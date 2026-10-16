@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef } from 'react';
 
 const AUDIO_CACHE_NAME = 'my-music-offline-audio-v1';
-const SHELL_CACHE_NAME = 'mymusic-shell-v5';
+const SHELL_CACHE_NAME = 'mymusic-shell-v6';
 const USER_STORAGE_KEY = 'mma_cached_user_v1';
 const LIKES_STORAGE_KEY = 'mma_liked_tracks_v1';
 const OFFLINE_CATALOG_KEY = 'mma_offline_catalog_v1';
@@ -305,6 +305,8 @@ export default function HomePage() {
   const [offlineUrls, setOfflineUrls] = useState({});
   const [deviceQuota, setDeviceQuota] = useState(null);
   const [syncingAll, setSyncingAll] = useState(false);
+  const [syncProgress, setSyncProgress] = useState({ done: 0, total: 0 });
+  const cancelSyncRef = useRef(false);
 
   // Settings: Spotify Importer
   const [spotifyUrl, setSpotifyUrl] = useState('');
@@ -1311,9 +1313,9 @@ export default function HomePage() {
     } catch {}
   }
 
-  async function startDownload(track) {
+  async function startDownload(track, waitUntilFinished = false) {
     const key = track.id || track.title;
-    if (downloads[key]?.status === 'downloading') return;
+    if (downloads[key]?.status === 'downloading') return false;
 
     setDownloads(prev => ({
       ...prev,
@@ -1333,39 +1335,102 @@ export default function HomePage() {
         })
       });
       const data = await res.json();
-      if (data.downloadId) {
-        setDownloads(prev => ({
-          ...prev,
-          [key]: {
-            status: 'downloading',
-            progress: 8,
-            downloadId: data.downloadId,
-            trackMeta: track
-          }
-        }));
-      } else {
+      if (!data.downloadId) {
         setDownloads(prev => ({ ...prev, [key]: { status: 'error' } }));
+        return false;
       }
+
+      const dlId = data.downloadId;
+      setDownloads(prev => ({
+        ...prev,
+        [key]: {
+          status: 'downloading',
+          progress: 8,
+          downloadId: dlId,
+          trackMeta: track
+        }
+      }));
+
+      if (!waitUntilFinished) return true;
+
+      // In bulk queue mode, wait until this track completes extraction + offline caching + VPS cleanup
+      const startedAt = Date.now();
+      while (Date.now() - startedAt < 85000 && !cancelSyncRef.current) {
+        await new Promise(r => setTimeout(r, 1500));
+        try {
+          const checkRes = await fetch(`/api/download?id=${dlId}`);
+          if (!checkRes.ok) break;
+          const checkData = await checkRes.json();
+          if (checkData.status === 'ready' && checkData.filename) {
+            const streamUrl = `/api/stream?file=${encodeURIComponent(checkData.filename)}`;
+            await saveUrlToOfflineCache(streamUrl, {
+              ...track,
+              id: track.id || `offline_${checkData.filename}`,
+              title: track.title || checkData.title,
+              artist: track.artist || checkData.artist || 'Audio MP3',
+              artwork: track.artwork || '/icon.svg',
+              filename: checkData.filename,
+              streamUrl
+            });
+            setDownloads(prev => ({
+              ...prev,
+              [key]: { ...prev[key], ...checkData, status: 'ready', progress: 100 }
+            }));
+            updateTrackFileAcrossLibraries(key, checkData.filename, streamUrl);
+            return true;
+          }
+          if (checkData.status === 'error') {
+            setDownloads(prev => ({ ...prev, [key]: { status: 'error' } }));
+            return false;
+          }
+        } catch {
+          break;
+        }
+      }
+      return false;
     } catch {
       setDownloads(prev => ({ ...prev, [key]: { status: 'error' } }));
+      return false;
     }
   }
 
   async function downloadCollectionForOffline(tracksList) {
-    if (syncingAll || !tracksList || tracksList.length === 0) return;
+    if (syncingAll) {
+      // Tapping again cancels/pauses the bulk queue gracefully
+      cancelSyncRef.current = true;
+      return;
+    }
+    if (!tracksList || tracksList.length === 0) return;
+
+    const pending = tracksList.filter(t => !isTrackAvailableOffline(t));
+    if (pending.length === 0) return;
+
+    cancelSyncRef.current = false;
     setSyncingAll(true);
-    for (const track of tracksList) {
+    setSyncProgress({ done: 0, total: pending.length });
+
+    let completed = 0;
+    for (const track of pending) {
+      if (cancelSyncRef.current) break;
       const streamUrl =
         track.streamUrl ||
         (track.filename ? `/api/stream?file=${encodeURIComponent(track.filename)}` : null);
-      if (streamUrl && offlineUrls[streamUrl]) continue;
+      if (streamUrl && offlineUrls[streamUrl]) {
+        completed += 1;
+        setSyncProgress({ done: completed, total: pending.length });
+        continue;
+      }
       if (streamUrl) {
         await saveUrlToOfflineCache(streamUrl, track);
       } else {
-        await startDownload(track);
+        await startDownload(track, true);
       }
+      completed += 1;
+      setSyncProgress({ done: completed, total: pending.length });
     }
+
     setSyncingAll(false);
+    cancelSyncRef.current = false;
   }
 
   // Robust CSV Parser for Exportify / Spotify CSV files (supports ',', ';', '\t', BOM, EN/ES headers, artwork & duration)
@@ -2541,7 +2606,9 @@ export default function HomePage() {
               <div className="playlist-header-meta">
                 {activeLibraryTracks.length}{' '}
                 {activeLibraryTracks.length === 1 ? 'canción' : 'canciones'}
-                {selectedLibrary === 'offline' && deviceQuota
+                {syncingAll && syncProgress.total > 0
+                  ? ` · Descargando ${syncProgress.done}/${syncProgress.total} (tocá para pausar)`
+                  : selectedLibrary === 'offline' && deviceQuota
                   ? ` · ${deviceQuota.usedMB} MB en dispositivo`
                   : isOffline && playableActiveLibraryTracks.length < activeLibraryTracks.length
                   ? ` · ${playableActiveLibraryTracks.length} disponibles sin red`
@@ -2572,9 +2639,13 @@ export default function HomePage() {
                 <button
                   type="button"
                   className={`icon-btn ${syncingAll ? 'active' : ''}`}
-                  disabled={syncingAll || isOffline}
+                  disabled={isOffline}
                   onClick={() => downloadCollectionForOffline(activeLibraryTracks)}
-                  title="Descargar toda esta librería a Offline"
+                  title={
+                    syncingAll
+                      ? `Pausar cola (${syncProgress.done}/${syncProgress.total})`
+                      : 'Descargar toda esta librería a Offline'
+                  }
                 >
                   <Icon
                     name={syncingAll ? 'loader' : 'download'}
