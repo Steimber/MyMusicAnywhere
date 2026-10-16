@@ -3017,23 +3017,35 @@ export default function HomePage() {
             <div className="playlist-header-info">
               <h1 className="playlist-header-title">{activeLibraryTitle}</h1>
               <div className="playlist-header-meta">
-                {syncingAll && syncProgress.total > 0
-                  ? `⚡ ${syncProgress.done}/${syncProgress.total}${
-                      syncProgress.currentTitle ? ` · ${syncProgress.currentTitle}` : ''
-                    }`
-                  : coverSync.active && coverSync.total > 0
-                  ? `🖼 Portadas ${coverSync.done}/${coverSync.total} · ${activeLibraryTracks.length} canciones`
-                  : `${activeLibraryTracks.length} ${
-                      activeLibraryTracks.length === 1 ? 'canción' : 'canciones'
-                    }${
-                      missingCoversInActiveLibrary.length > 0 && !isOffline
-                        ? ` · ${missingCoversInActiveLibrary.length} sin portada`
-                        : selectedLibrary === 'offline' && deviceQuota
-                        ? ` · ${deviceQuota.usedMB} MB en dispositivo`
-                        : isOffline && playableActiveLibraryTracks.length < activeLibraryTracks.length
-                        ? ` · ${playableActiveLibraryTracks.length} disponibles sin red`
-                        : ''
-                    }`}
+                {syncingAll && syncProgress.total > 0 ? (
+                  <>
+                    <Icon name="download" size={13} />
+                    <span>
+                      Descargando {syncProgress.done}/{syncProgress.total}
+                      {syncProgress.currentTitle ? ` · ${syncProgress.currentTitle}` : ''}
+                    </span>
+                  </>
+                ) : coverSync.active && coverSync.total > 0 ? (
+                  <>
+                    <Icon name="image" size={13} />
+                    <span>
+                      Portadas {coverSync.done}/{coverSync.total} · {activeLibraryTracks.length}{' '}
+                      {activeLibraryTracks.length === 1 ? 'canción' : 'canciones'}
+                    </span>
+                  </>
+                ) : (
+                  <span>
+                    {activeLibraryTracks.length}{' '}
+                    {activeLibraryTracks.length === 1 ? 'canción' : 'canciones'}
+                    {missingCoversInActiveLibrary.length > 0 && !isOffline
+                      ? ` · ${missingCoversInActiveLibrary.length} sin portada`
+                      : selectedLibrary === 'offline' && deviceQuota
+                      ? ` · ${deviceQuota.usedMB} MB en dispositivo`
+                      : isOffline && playableActiveLibraryTracks.length < activeLibraryTracks.length
+                      ? ` · ${playableActiveLibraryTracks.length} disponibles sin red`
+                      : ''}
+                  </span>
+                )}
               </div>
             </div>
 

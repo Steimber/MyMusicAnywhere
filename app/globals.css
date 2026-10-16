@@ -750,10 +750,11 @@ textarea {
 
 .playlist-header {
   display: flex;
+  flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
-  padding: 12px 14px;
+  gap: 10px 14px;
+  padding: 14px 16px;
   border-radius: 18px;
   background: var(--surface);
   border: 1px solid var(--border);
@@ -762,33 +763,48 @@ textarea {
 
 .playlist-header-info {
   min-width: 0;
-  flex: 1;
+  flex: 1 1 210px;
 }
 
 .playlist-header-title {
   font-family: var(--font-syne), sans-serif;
-  font-size: 1.12rem;
+  font-size: 1.16rem;
   font-weight: 800;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  line-height: 1.25;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  line-clamp: 2;
+  overflow: clip;
+  word-break: break-word;
 }
 
 .playlist-header-meta {
-  font-size: 0.76rem;
+  font-size: 0.78rem;
   color: var(--muted);
   font-weight: 600;
-  margin-top: 2px;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  margin-top: 4px;
+  line-height: 1.35;
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  line-clamp: 2;
+  overflow: clip;
+}
+
+.playlist-header-meta .svg-icon {
+  vertical-align: -2px;
+  margin-right: 5px;
+  color: var(--clay-text);
 }
 
 .playlist-header-actions {
   display: flex;
   align-items: center;
+  justify-content: flex-end;
   gap: 6px;
   flex-shrink: 0;
+  margin-left: auto;
 }
 
 /* ==================== SINGLE-LINE TRACK LIST (.track-list & .track-row) ==================== */
