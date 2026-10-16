@@ -42,6 +42,7 @@ export default function HomePage() {
   const [downloads, setDownloads] = useState({});
   const [libraryFiles, setLibraryFiles] = useState([]);
   const [offlineUrls, setOfflineUrls] = useState({});
+  const [deviceQuota, setDeviceQuota] = useState(null);
   const [syncingAll, setSyncingAll] = useState(false);
 
   // Admin Panel state
@@ -329,17 +330,30 @@ export default function HomePage() {
   }
 
   async function refreshOfflineCacheList() {
-    if (typeof window === 'undefined' || !('caches' in window)) return;
-    try {
-      const cache = await caches.open(AUDIO_CACHE_NAME);
-      const keys = await cache.keys();
-      const map = {};
-      for (const req of keys) {
-        const url = new URL(req.url);
-        map[url.pathname + url.search] = true;
-      }
-      setOfflineUrls(map);
-    } catch {}
+    if (typeof window === 'undefined') return;
+    if ('caches' in window) {
+      try {
+        const cache = await caches.open(AUDIO_CACHE_NAME);
+        const keys = await cache.keys();
+        const map = {};
+        for (const req of keys) {
+          const url = new URL(req.url);
+          map[url.pathname + url.search] = true;
+        }
+        setOfflineUrls(map);
+      } catch {}
+    }
+    if (navigator.storage && navigator.storage.estimate) {
+      try {
+        const est = await navigator.storage.estimate();
+        if (est && est.quota) {
+          setDeviceQuota({
+            usedMB: ((est.usage || 0) / (1024 * 1024)).toFixed(1),
+            quotaGB: (est.quota / (1024 * 1024 * 1024)).toFixed(1)
+          });
+        }
+      } catch {}
+    }
   }
 
   async function saveUrlToOfflineCache(url) {
@@ -449,6 +463,7 @@ export default function HomePage() {
           title: track.title,
           artist: track.artist,
           artwork: track.artwork,
+          previewUrl: track.previewUrl || null,
           query: `${track.title} ${track.artist || ''}`.trim()
         })
       });
@@ -456,7 +471,7 @@ export default function HomePage() {
       if (data.downloadId) {
         setDownloads(prev => ({
           ...prev,
-          [key]: { status: 'downloading', progress: 5, downloadId: data.downloadId }
+          [key]: { status: 'downloading', progress: 8, downloadId: data.downloadId }
         }));
       } else {
         setDownloads(prev => ({ ...prev, [key]: { status: 'error' } }));
@@ -1001,7 +1016,7 @@ export default function HomePage() {
                             className="btn sm"
                             onClick={() => startDownload(track)}
                           >
-                            ⬇ MP3
+                            {dl?.status === 'error' ? '↻ Reintentar MP3' : '⬇ MP3'}
                           </button>
                         )}
                       </div>
@@ -1050,9 +1065,21 @@ export default function HomePage() {
               <div>
                 <h1 className="page-title">Mi librería</h1>
                 <p className="page-sub">
-                  Tus pistas con corazón, sincronizadas en caché offline del navegador y listas para bucle o aleatorio.
+                  Tus pistas con corazón, sincronizadas en caché offline de tu dispositivo y listas para bucle o aleatorio.
                 </p>
               </div>
+            </div>
+
+            <div className="storage-banner">
+              <span>
+                <strong>Capacidad PWA en este dispositivo:</strong>{' '}
+                {deviceQuota
+                  ? `${deviceQuota.usedMB} MB usados de ~${deviceQuota.quotaGB} GB disponibles`
+                  : 'Caché del navegador activo (miles de canciones offline)'}
+              </span>
+              <span className="badge mint">
+                {Object.keys(offlineUrls).length} pistas offline
+              </span>
             </div>
 
             <div className="toolbar">
@@ -1133,7 +1160,7 @@ export default function HomePage() {
                             <span className="badge mint">✓ Offline</span>
                           ) : dl?.status === 'downloading' ? (
                             <span className="badge amber">
-                              {Math.round(dl.progress || 0)}%
+                              Extrayendo {Math.round(dl.progress || 0)}%
                             </span>
                           ) : (
                             <button
@@ -1141,7 +1168,7 @@ export default function HomePage() {
                               className="btn sm"
                               onClick={() => startDownload(track)}
                             >
-                              ⬇ Obtener MP3
+                              {dl?.status === 'error' ? '↻ Reintentar MP3' : '⬇ Obtener MP3'}
                             </button>
                           )}
 
@@ -1157,7 +1184,7 @@ export default function HomePage() {
 
                           <button
                             type="button"
-                            className="btn heart liked"
+                            className="btn heart liked heart-icon-only"
                             onClick={() => toggleLike(track)}
                             title="Quitar de Librería"
                           >
