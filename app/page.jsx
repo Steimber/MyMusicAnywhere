@@ -639,10 +639,10 @@ export default function HomePage() {
     return () => document.removeEventListener('mousedown', onDocClick);
   }, [accountOpen]);
 
-  // Poll active downloads
+  // Poll active single downloads (bulk queue downloads manage their own polling loop)
   useEffect(() => {
     const activeIds = Object.values(downloads)
-      .filter(d => d.status === 'downloading')
+      .filter(d => d.status === 'downloading' && !d.managedByQueue && d.downloadId)
       .map(d => d.downloadId);
 
     if (activeIds.length === 0) return;
@@ -650,15 +650,17 @@ export default function HomePage() {
     const timer = setInterval(async () => {
       for (const id of activeIds) {
         try {
-          const res = await fetch(`/api/download?id=${id}`);
+          const res = await fetch(`/api/download?id=${id}`, { cache: 'no-store' });
+          if (res.status === 404) {
+            setDownloads(prev => {
+              const key = Object.keys(prev).find(k => prev[k].downloadId === id);
+              if (!key) return prev;
+              return { ...prev, [key]: { ...prev[key], status: 'error' } };
+            });
+            continue;
+          }
           if (!res.ok) continue;
           const data = await res.json();
-
-          setDownloads(prev => {
-            const key = Object.keys(prev).find(k => prev[k].downloadId === id);
-            if (!key) return prev;
-            return { ...prev, [key]: { ...prev[key], ...data } };
-          });
 
           if (data.status === 'ready' && data.filename) {
             const streamUrl = `/api/stream?file=${encodeURIComponent(data.filename)}`;
@@ -670,7 +672,7 @@ export default function HomePage() {
               downloads[trackKey]?.trackMeta ||
               null;
 
-            await saveUrlToOfflineCache(streamUrl, {
+            const savedOk = await saveUrlToOfflineCache(streamUrl, {
               ...(metaTrack || {}),
               id: metaTrack?.id || `offline_${data.filename}`,
               title: metaTrack?.title || data.title || data.filename.replace(/\.mp3$/i, ''),
@@ -680,17 +682,37 @@ export default function HomePage() {
               streamUrl
             });
 
-            setResults(prev =>
-              prev.map(t =>
-                String(t.id) === String(trackKey)
-                  ? { ...t, filename: data.filename, streamUrl }
-                  : t
-              )
-            );
+            if (savedOk) {
+              setDownloads(prev => {
+                const key = Object.keys(prev).find(k => prev[k].downloadId === id);
+                if (!key) return prev;
+                return { ...prev, [key]: { ...prev[key], ...data, status: 'ready', progress: 100 } };
+              });
 
-            updateTrackFileAcrossLibraries(trackKey, data.filename, streamUrl);
-            fetchLibraryFiles();
-            if (user?.is_admin) fetchAdminData();
+              setResults(prev =>
+                prev.map(t =>
+                  String(t.id) === String(trackKey)
+                    ? { ...t, filename: data.filename, streamUrl }
+                    : t
+                )
+              );
+
+              updateTrackFileAcrossLibraries(trackKey, data.filename, streamUrl);
+              fetchLibraryFiles();
+              if (user?.is_admin) fetchAdminData();
+            } else {
+              setDownloads(prev => {
+                const key = Object.keys(prev).find(k => prev[k].downloadId === id);
+                if (!key) return prev;
+                return { ...prev, [key]: { ...prev[key], status: 'error' } };
+              });
+            }
+          } else {
+            setDownloads(prev => {
+              const key = Object.keys(prev).find(k => prev[k].downloadId === id);
+              if (!key) return prev;
+              return { ...prev, [key]: { ...prev[key], ...data } };
+            });
           }
         } catch {}
       }
@@ -1117,6 +1139,10 @@ export default function HomePage() {
       return;
     }
 
+    if (manualClick) {
+      enrichedArtworkRef.current.clear();
+    }
+
     const missing = (targetTracks || []).filter(
       t =>
         t &&
@@ -1141,12 +1167,31 @@ export default function HomePage() {
       return `${alb}|${art}`;
     };
 
+    const stripTitleNoise = raw =>
+      String(raw || '')
+        .replace(/\s*[-–—]\s*(remaster(ed)?(\s+\d{4})?|\d{4}\s+remaster(ed)?|radio\s+edit|album\s+version|single\s+version).*/i, '')
+        .replace(/\s*\((remaster(ed)?(\s+\d{4})?|\d{4}\s+remaster(ed)?|feat\.?[^)]+|ft\.?[^)]+)\)/gi, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+
     try {
       let done = 0;
-      for (const item of missing) {
+      for (let i = 0; i < missing.length; i++) {
+        const item = missing[i];
         if (cancelCoverSyncRef.current || (typeof navigator !== 'undefined' && navigator.onLine === false)) {
           break;
         }
+
+        // Wait if the user switched away from the app so we never abort/skip covers in background
+        while (
+          typeof document !== 'undefined' &&
+          document.visibilityState === 'hidden' &&
+          !cancelCoverSyncRef.current
+        ) {
+          await new Promise(r => setTimeout(r, 1000));
+        }
+        if (cancelCoverSyncRef.current) break;
+
         if (resolvedIdsInRun.has(String(item.id))) {
           done += 1;
           setCoverSync({ active: true, done, total: missing.length });
@@ -1154,15 +1199,18 @@ export default function HomePage() {
         }
 
         let rateLimited = false;
+        let networkAborted = false;
         try {
           const cleanArtist =
             item.artist && item.artist !== 'Artista' && item.artist !== 'Guardado en dispositivo'
               ? item.artist.split(',')[0].trim()
               : '';
-          const q = `${item.title} ${cleanArtist}`.trim();
+          const cleanTitle = stripTitleNoise(item.title) || item.title;
+          const q = `${cleanTitle} ${cleanArtist}`.trim();
           let smallCover = null;
           let previewUrl = null;
           let directRespondedOk = false;
+          let fallbackRespondedOk = false;
 
           try {
             const res = await fetch(
@@ -1179,24 +1227,45 @@ export default function HomePage() {
                 previewUrl = hit.previewUrl || null;
               }
             }
-          } catch {}
+          } catch {
+            networkAborted = true;
+          }
 
           // Only call VPS /api/search if browser direct call failed at network/CORS level (not when iTunes returned 0 results or 429)
           if (!smallCover && !directRespondedOk && !rateLimited) {
-            const fallbackRes = await fetch(`/api/search?q=${encodeURIComponent(q)}`);
-            if (fallbackRes.status === 429 || fallbackRes.status === 403) {
-              rateLimited = true;
-            } else if (fallbackRes.ok) {
-              const fbData = await fallbackRes.json();
-              const fbHit = fbData?.results?.[0];
-              if (fbHit?.artwork) {
-                smallCover = compressArtworkUrl(fbHit.artwork);
-                previewUrl = fbHit.previewUrl || null;
+            try {
+              const fallbackRes = await fetch(`/api/search?q=${encodeURIComponent(q)}`);
+              if (fallbackRes.status === 429 || fallbackRes.status === 403) {
+                rateLimited = true;
+              } else if (fallbackRes.ok) {
+                fallbackRespondedOk = true;
+                networkAborted = false;
+                const fbData = await fallbackRes.json();
+                const fbHit = fbData?.results?.[0];
+                if (fbHit?.artwork) {
+                  smallCover = compressArtworkUrl(fbHit.artwork);
+                  previewUrl = fbHit.previewUrl || null;
+                }
               }
+            } catch {
+              networkAborted = true;
             }
           }
 
-          if (!rateLimited) {
+          // If the user switched apps mid-request and the fetch aborted, wait until visible and retry this exact song
+          if (
+            networkAborted &&
+            !smallCover &&
+            typeof document !== 'undefined' &&
+            document.visibilityState === 'hidden'
+          ) {
+            i -= 1;
+            await new Promise(r => setTimeout(r, 1500));
+            continue;
+          }
+
+          // Only mark as checked if we actually got a cover OR the API genuinely returned 200 OK with 0 results
+          if (smallCover || directRespondedOk || fallbackRespondedOk) {
             enrichedArtworkRef.current.add(String(item.id));
           }
 
@@ -1619,13 +1688,18 @@ export default function HomePage() {
     } catch {}
   }
 
-  async function startDownload(track, waitUntilFinished = false) {
+  async function startDownload(track, waitUntilFinished = false, forceRetry = false) {
     const key = track.id || track.title;
-    if (downloads[key]?.status === 'downloading') return false;
+    if (downloads[key]?.status === 'downloading' && !forceRetry) return false;
 
     setDownloads(prev => ({
       ...prev,
-      [key]: { status: 'downloading', progress: 0, trackMeta: track }
+      [key]: {
+        status: 'downloading',
+        progress: 0,
+        managedByQueue: Boolean(waitUntilFinished),
+        trackMeta: track
+      }
     }));
 
     try {
@@ -1653,6 +1727,7 @@ export default function HomePage() {
           status: 'downloading',
           progress: 8,
           downloadId: dlId,
+          managedByQueue: Boolean(waitUntilFinished),
           trackMeta: track
         }
       }));
@@ -1673,7 +1748,7 @@ export default function HomePage() {
           const checkData = await checkRes.json();
           if (checkData.status === 'ready' && checkData.filename) {
             const streamUrl = `/api/stream?file=${encodeURIComponent(checkData.filename)}`;
-            await saveUrlToOfflineCache(streamUrl, {
+            const savedOk = await saveUrlToOfflineCache(streamUrl, {
               ...track,
               id: track.id || `offline_${checkData.filename}`,
               title: track.title || checkData.title,
@@ -1682,6 +1757,10 @@ export default function HomePage() {
               filename: checkData.filename,
               streamUrl
             });
+            if (!savedOk) {
+              setDownloads(prev => ({ ...prev, [key]: { status: 'error' } }));
+              return false;
+            }
             setDownloads(prev => ({
               ...prev,
               [key]: { ...prev[key], ...checkData, status: 'ready', progress: 100 }
@@ -1693,6 +1772,13 @@ export default function HomePage() {
             setDownloads(prev => ({ ...prev, [key]: { status: 'error' } }));
             return false;
           }
+          setDownloads(prev => ({
+            ...prev,
+            [key]: {
+              ...prev[key],
+              progress: checkData.progress || prev[key]?.progress || 8
+            }
+          }));
         } catch {
           // Transient mobile network handoff: keep polling until timeout
         }
@@ -1718,6 +1804,7 @@ export default function HomePage() {
     }
     if (!tracksList || tracksList.length === 0) return;
 
+    await refreshOfflineCacheList();
     const pending = tracksList.filter(t => !isTrackAvailableOffline(t));
     if (pending.length === 0) return;
 
@@ -1730,8 +1817,20 @@ export default function HomePage() {
 
     let completed = 0;
     try {
-      for (const track of pending) {
+      for (let i = 0; i < pending.length; i++) {
+        const track = pending[i];
         if (cancelSyncRef.current) break;
+
+        // If the user switched away from the app, wait until they return so mobile OS does not abort the download
+        while (
+          typeof document !== 'undefined' &&
+          document.visibilityState === 'hidden' &&
+          !cancelSyncRef.current
+        ) {
+          await new Promise(r => setTimeout(r, 1000));
+        }
+        if (cancelSyncRef.current) break;
+
         setSyncProgress({
           done: completed,
           total: pending.length,
@@ -1749,11 +1848,32 @@ export default function HomePage() {
           });
           continue;
         }
+
+        let ok = false;
         if (streamUrl) {
-          await saveUrlToOfflineCache(streamUrl, track);
-        } else {
-          await startDownload(track, true);
+          ok = await saveUrlToOfflineCache(streamUrl, track);
         }
+        // If streamUrl was missing OR its temporary VPS file had already expired/deleted, run a fresh extraction
+        if (!ok) {
+          ok = await startDownload(track, true, true);
+        }
+
+        // If the download was interrupted specifically because the user briefly left the app, wait until visible and retry this track once
+        if (
+          !ok &&
+          !cancelSyncRef.current &&
+          typeof document !== 'undefined' &&
+          document.visibilityState === 'hidden'
+        ) {
+          while (document.visibilityState === 'hidden' && !cancelSyncRef.current) {
+            await new Promise(r => setTimeout(r, 1000));
+          }
+          if (!cancelSyncRef.current) {
+            noSleepRef.current?.enable();
+            ok = await startDownload(track, true, true);
+          }
+        }
+
         completed += 1;
         setSyncProgress({
           done: completed,
