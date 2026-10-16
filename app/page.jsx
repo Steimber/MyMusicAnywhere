@@ -5,6 +5,9 @@ import { useState, useEffect, useRef } from 'react';
 const AUDIO_CACHE_NAME = 'my-music-offline-audio-v1';
 const SHELL_CACHE_NAME = 'mymusic-shell-v3';
 const USER_STORAGE_KEY = 'mma_cached_user_v1';
+const LIKES_STORAGE_KEY = 'mma_liked_tracks_v1';
+const OFFLINE_CATALOG_KEY = 'mma_offline_catalog_v1';
+const PLAYLISTS_STORAGE_KEY = 'mma_custom_playlists_v1';
 
 const DISCOVERY_SEEDS = [
   { term: 'Pop Latino Hits', label: 'Pop Latino' },
@@ -31,8 +34,11 @@ export default function HomePage() {
   const [authBusy, setAuthBusy] = useState(false);
   const [accountOpen, setAccountOpen] = useState(false);
 
-  // Navigation
-  const [activeTab, setActiveTab] = useState('explore'); // 'explore' | 'library' | 'files' | 'admin'
+  // Navigation: 'explore' | 'library' | 'files' | 'settings' | 'admin'
+  const [activeTab, setActiveTab] = useState('explore');
+
+  // Sub-library selector inside 'library': 'liked' | 'offline' | <customPlaylistId>
+  const [selectedLibrary, setSelectedLibrary] = useState('liked');
 
   // Explore, Recommendations & Search
   const [query, setQuery] = useState('');
@@ -40,16 +46,30 @@ export default function HomePage() {
   const [loading, setLoading] = useState(false);
   const [feedInfo, setFeedInfo] = useState({ mode: 'random', label: 'Descubrimiento aleatorio' });
 
-  // Library & Offline Cache
-  const [likedTracks, setLikedTracks] = useState([]);
+  // Libraries & Offline Cache (strictly separated!)
+  const [likedTracks, setLikedTracks] = useState([]); // ONLY tracks with heart ♥
+  const [offlineCatalog, setOfflineCatalog] = useState([]); // Metadata for tracks stored in device CacheStorage
+  const [customPlaylists, setCustomPlaylists] = useState([]); // [{ id, name, createdAt, tracks: [] }]
+  const [newPlaylistName, setNewPlaylistName] = useState('');
+  const [creatingPlaylist, setCreatingPlaylist] = useState(false);
+
+  // Save-to-Library Modal Dialog state
+  const [trackToSave, setTrackToSave] = useState(null);
+  const [modalNewPlaylistName, setModalNewPlaylistName] = useState('');
+  const saveDialogRef = useRef(null);
+
+  // Downloads & Server Files
   const [downloads, setDownloads] = useState({});
   const [libraryFiles, setLibraryFiles] = useState([]);
   const [offlineUrls, setOfflineUrls] = useState({});
   const [deviceQuota, setDeviceQuota] = useState(null);
   const [syncingAll, setSyncingAll] = useState(false);
+
+  // Settings: Spotify Importer state
   const [spotifyUrl, setSpotifyUrl] = useState('');
   const [spotifyBusy, setSpotifyBusy] = useState(false);
   const [spotifyMsg, setSpotifyMsg] = useState({ type: '', text: '' });
+  const [spotifyTargetLib, setSpotifyTargetLib] = useState('new_playlist'); // 'liked' | 'new_playlist' | <playlistId>
 
   // Admin Panel state
   const [adminData, setAdminData] = useState({ users: [], invites: [], storage: null });
@@ -102,7 +122,28 @@ export default function HomePage() {
     } catch {}
   }
 
-  // Check session on mount (with instant offline fallback so reopening without internet never blocks)
+  // Fallback for browsers without native <dialog closedby="any"> support (e.g. iOS Safari)
+  useEffect(() => {
+    const dialog = saveDialogRef.current;
+    if (!dialog) return;
+    if (typeof HTMLDialogElement !== 'undefined' && !('closedBy' in HTMLDialogElement.prototype)) {
+      const handleBackdropClick = event => {
+        if (event.target !== dialog) return;
+        const rect = dialog.getBoundingClientRect();
+        const isDialogContent =
+          rect.top <= event.clientY &&
+          event.clientY <= rect.top + rect.height &&
+          rect.left <= event.clientX &&
+          event.clientX <= rect.left + rect.width;
+        if (isDialogContent) return;
+        dialog.close();
+      };
+      dialog.addEventListener('click', handleBackdropClick);
+      return () => dialog.removeEventListener('click', handleBackdropClick);
+    }
+  }, [user]);
+
+  // Check session & hydrate local collections on mount
   useEffect(() => {
     let cachedUser = null;
     try {
@@ -114,19 +155,32 @@ export default function HomePage() {
       }
     } catch {}
 
-    let savedLikesList = [];
     try {
-      const savedLikes = localStorage.getItem('mma_liked_tracks_v1');
+      const savedLikes = localStorage.getItem(LIKES_STORAGE_KEY);
       if (savedLikes) {
-        savedLikesList = JSON.parse(savedLikes);
-        setLikedTracks(savedLikesList);
+        // Filter out old auto-injected 'offline_' entries so Favoritos only has hearted tracks
+        const parsed = JSON.parse(savedLikes).filter(
+          t => !String(t.id).startsWith('offline_')
+        );
+        setLikedTracks(parsed);
       }
+    } catch {}
+
+    try {
+      const savedOffline = localStorage.getItem(OFFLINE_CATALOG_KEY);
+      if (savedOffline) setOfflineCatalog(JSON.parse(savedOffline));
+    } catch {}
+
+    try {
+      const savedPlaylists = localStorage.getItem(PLAYLISTS_STORAGE_KEY);
+      if (savedPlaylists) setCustomPlaylists(JSON.parse(savedPlaylists));
     } catch {}
 
     const offlineNow = typeof navigator !== 'undefined' && !navigator.onLine;
     setIsOffline(offlineNow);
     if (offlineNow) {
       setActiveTab('library');
+      setSelectedLibrary('offline');
       if (!cachedUser) {
         setUser({ username: 'Modo Offline', is_admin: false, offline: true });
       }
@@ -142,7 +196,6 @@ export default function HomePage() {
             localStorage.setItem(USER_STORAGE_KEY, JSON.stringify(data.user));
           } catch {}
         } else if (r.status === 401 || (r.ok && !data.user)) {
-          // Server explicitly confirmed no active session while online
           setUser(null);
           try {
             localStorage.removeItem(USER_STORAGE_KEY);
@@ -150,9 +203,9 @@ export default function HomePage() {
         }
       })
       .catch(() => {
-        // Network error / offline: keep cached user or enter Offline Player mode
         setIsOffline(true);
         setActiveTab('library');
+        setSelectedLibrary('offline');
         setUser(prev => prev || cachedUser || { username: 'Modo Offline', is_admin: false, offline: true });
       })
       .finally(() => setAuthChecked(true));
@@ -164,6 +217,7 @@ export default function HomePage() {
     const handleOffline = () => {
       setIsOffline(true);
       setActiveTab('library');
+      setSelectedLibrary('offline');
     };
     window.addEventListener('online', handleOnline);
     window.addEventListener('offline', handleOffline);
@@ -180,17 +234,18 @@ export default function HomePage() {
     };
   }, []);
 
-  // Load initial catalog (recommended by liked genres, or random if none) & server files once logged in
+  // Load initial catalog & server files once logged in
   useEffect(() => {
     if (!user) return;
     if (typeof navigator !== 'undefined' && !navigator.onLine) {
       setActiveTab('library');
+      setSelectedLibrary('offline');
       return;
     }
     fetchLibraryFiles();
     let initialLikes = likedTracks;
     try {
-      const raw = localStorage.getItem('mma_liked_tracks_v1');
+      const raw = localStorage.getItem(LIKES_STORAGE_KEY);
       if (raw) initialLikes = JSON.parse(raw);
     } catch {}
     loadRecommendedOrRandomFeed(initialLikes, false);
@@ -210,7 +265,7 @@ export default function HomePage() {
     return () => document.removeEventListener('mousedown', onDocClick);
   }, [accountOpen]);
 
-  // Poll active downloads
+  // Poll active downloads: when ready, save to Offline Cache & Offline Catalog ONLY (never force a heart!)
   useEffect(() => {
     const activeIds = Object.values(downloads)
       .filter(d => d.status === 'downloading')
@@ -233,12 +288,23 @@ export default function HomePage() {
 
           if (data.status === 'ready' && data.filename) {
             const streamUrl = `/api/stream?file=${encodeURIComponent(data.filename)}`;
-
             const trackKey = Object.keys(downloads).find(k => downloads[k].downloadId === id);
-            const likedMatch = likedTracks.find(t => String(t.id) === String(trackKey));
-            const resultMatch = results.find(t => String(t.id) === String(trackKey));
+            const metaTrack =
+              results.find(t => String(t.id) === String(trackKey)) ||
+              likedTracks.find(t => String(t.id) === String(trackKey)) ||
+              customPlaylists.flatMap(p => p.tracks).find(t => String(t.id) === String(trackKey)) ||
+              downloads[trackKey]?.trackMeta ||
+              null;
 
-            await saveUrlToOfflineCache(streamUrl);
+            await saveUrlToOfflineCache(streamUrl, {
+              ...(metaTrack || {}),
+              id: metaTrack?.id || `offline_${data.filename}`,
+              title: metaTrack?.title || data.title || data.filename.replace(/\.mp3$/i, ''),
+              artist: metaTrack?.artist || data.artist || 'Audio MP3',
+              artwork: metaTrack?.artwork || '/icon.svg',
+              filename: data.filename,
+              streamUrl
+            });
 
             setResults(prev =>
               prev.map(t =>
@@ -248,25 +314,8 @@ export default function HomePage() {
               )
             );
 
-            if (likedMatch) {
-              updateLikedTrackFile(likedMatch.id, data.filename, streamUrl);
-            } else if (resultMatch && !savedDeviceIdsRef.current.has(id)) {
-              savedDeviceIdsRef.current.add(id);
-              const newEntry = {
-                ...resultMatch,
-                addedAt: Date.now(),
-                filename: data.filename,
-                streamUrl
-              };
-              setLikedTracks(prev => {
-                if (prev.some(t => String(t.id) === String(resultMatch.id))) return prev;
-                const updated = [newEntry, ...prev];
-                try {
-                  localStorage.setItem('mma_liked_tracks_v1', JSON.stringify(updated));
-                } catch {}
-                return updated;
-              });
-            }
+            // Update file reference if this track already exists in Favoritos or a custom playlist
+            updateTrackFileAcrossLibraries(trackKey, data.filename, streamUrl);
 
             fetchLibraryFiles();
             if (user?.is_admin) fetchAdminData();
@@ -276,7 +325,7 @@ export default function HomePage() {
     }, 1400);
 
     return () => clearInterval(timer);
-  }, [downloads, likedTracks, results, user]);
+  }, [downloads, likedTracks, customPlaylists, results, user]);
 
   // Manage audio playback when currentTrack changes
   useEffect(() => {
@@ -392,22 +441,25 @@ export default function HomePage() {
     setTimeout(() => setCopiedCode(''), 2000);
   }
 
-  // Offline & File helpers
-  function triggerBrowserFileDownload(url, filename) {
-    if (typeof document === 'undefined') return;
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = filename || 'track.mp3';
-    a.style.display = 'none';
-    document.body.appendChild(a);
-    a.click();
-    setTimeout(() => document.body.removeChild(a), 1000);
-  }
-
+  // ==================== LIBRARIES & OFFLINE PERSISTENCE ====================
   function persistLikes(nextLikes) {
     setLikedTracks(nextLikes);
     try {
-      localStorage.setItem('mma_liked_tracks_v1', JSON.stringify(nextLikes));
+      localStorage.setItem(LIKES_STORAGE_KEY, JSON.stringify(nextLikes));
+    } catch {}
+  }
+
+  function persistOfflineCatalog(nextOffline) {
+    setOfflineCatalog(nextOffline);
+    try {
+      localStorage.setItem(OFFLINE_CATALOG_KEY, JSON.stringify(nextOffline));
+    } catch {}
+  }
+
+  function persistCustomPlaylists(nextPlaylists) {
+    setCustomPlaylists(nextPlaylists);
+    try {
+      localStorage.setItem(PLAYLISTS_STORAGE_KEY, JSON.stringify(nextPlaylists));
     } catch {}
   }
 
@@ -415,32 +467,134 @@ export default function HomePage() {
     return likedTracks.some(t => String(t.id) === String(trackId));
   }
 
+  function isTrackInPlaylist(playlistId, trackId) {
+    const pl = customPlaylists.find(p => p.id === playlistId);
+    if (!pl) return false;
+    return pl.tracks.some(t => String(t.id) === String(trackId));
+  }
+
   function toggleLike(track) {
     if (isLiked(track.id)) {
       persistLikes(likedTracks.filter(t => String(t.id) !== String(track.id)));
     } else {
       const existingDl = downloads[track.id];
+      const offMatch = offlineCatalog.find(t => String(t.id) === String(track.id));
+      const filename = existingDl?.filename || offMatch?.filename || track.filename || null;
       const entry = {
         ...track,
         addedAt: Date.now(),
-        filename: existingDl?.filename || track.filename || null,
-        streamUrl: existingDl?.filename
-          ? `/api/stream?file=${encodeURIComponent(existingDl.filename)}`
+        filename,
+        streamUrl: filename
+          ? `/api/stream?file=${encodeURIComponent(filename)}`
           : track.streamUrl || null
       };
       persistLikes([entry, ...likedTracks]);
     }
   }
 
-  function updateLikedTrackFile(trackId, filename, streamUrl) {
+  function createCustomPlaylist(name, initialTracks = []) {
+    const clean = (name || '').trim();
+    if (!clean) return null;
+    const newPl = {
+      id: `pl_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      name: clean,
+      createdAt: Date.now(),
+      tracks: initialTracks
+    };
+    const next = [...customPlaylists, newPl];
+    persistCustomPlaylists(next);
+    return newPl;
+  }
+
+  function deleteCustomPlaylist(playlistId) {
+    const next = customPlaylists.filter(p => p.id !== playlistId);
+    persistCustomPlaylists(next);
+    if (selectedLibrary === playlistId) {
+      setSelectedLibrary('liked');
+    }
+  }
+
+  function toggleTrackInPlaylist(playlistId, track) {
+    const existingDl = downloads[track.id];
+    const offMatch = offlineCatalog.find(t => String(t.id) === String(track.id));
+    const filename = existingDl?.filename || offMatch?.filename || track.filename || null;
+    const preparedTrack = {
+      ...track,
+      addedAt: Date.now(),
+      filename,
+      streamUrl: filename
+        ? `/api/stream?file=${encodeURIComponent(filename)}`
+        : track.streamUrl || null
+    };
+
+    const next = customPlaylists.map(pl => {
+      if (pl.id !== playlistId) return pl;
+      const exists = pl.tracks.some(t => String(t.id) === String(track.id));
+      return {
+        ...pl,
+        tracks: exists
+          ? pl.tracks.filter(t => String(t.id) !== String(track.id))
+          : [preparedTrack, ...pl.tracks]
+      };
+    });
+    persistCustomPlaylists(next);
+  }
+
+  function removeTrackFromPlaylist(playlistId, trackId) {
+    const next = customPlaylists.map(pl =>
+      pl.id === playlistId
+        ? { ...pl, tracks: pl.tracks.filter(t => String(t.id) !== String(trackId)) }
+        : pl
+    );
+    persistCustomPlaylists(next);
+  }
+
+  function openSaveModal(track) {
+    setTrackToSave(track);
+    setModalNewPlaylistName('');
+    if (saveDialogRef.current && typeof saveDialogRef.current.showModal === 'function') {
+      saveDialogRef.current.showModal();
+    }
+  }
+
+  function closeSaveModal() {
+    if (saveDialogRef.current && saveDialogRef.current.open) {
+      saveDialogRef.current.close();
+    }
+    setTrackToSave(null);
+  }
+
+  function updateTrackFileAcrossLibraries(trackId, filename, streamUrl) {
     setLikedTracks(prev => {
+      if (!prev.some(t => String(t.id) === String(trackId))) return prev;
       const updated = prev.map(t =>
         String(t.id) === String(trackId) ? { ...t, filename, streamUrl } : t
       );
       try {
-        localStorage.setItem('mma_liked_tracks_v1', JSON.stringify(updated));
+        localStorage.setItem(LIKES_STORAGE_KEY, JSON.stringify(updated));
       } catch {}
       return updated;
+    });
+
+    setCustomPlaylists(prev => {
+      let changed = false;
+      const updated = prev.map(pl => {
+        if (!pl.tracks.some(t => String(t.id) === String(trackId))) return pl;
+        changed = true;
+        return {
+          ...pl,
+          tracks: pl.tracks.map(t =>
+            String(t.id) === String(trackId) ? { ...t, filename, streamUrl } : t
+          )
+        };
+      });
+      if (changed) {
+        try {
+          localStorage.setItem(PLAYLISTS_STORAGE_KEY, JSON.stringify(updated));
+        } catch {}
+        return updated;
+      }
+      return prev;
     });
   }
 
@@ -463,42 +617,45 @@ export default function HomePage() {
         }
         setOfflineUrls(map);
 
-        if (cachedFilenames.length > 0) {
-          setLikedTracks(prev => {
-            let changed = false;
-            const next = [...prev];
-            for (const item of cachedFilenames) {
-              const exists = next.some(
-                t => t.filename === item.filename || t.streamUrl === item.streamUrl
-              );
-              if (!exists) {
-                const cleanTitle = item.filename
-                  .replace(/_\d+\.mp3$/i, '')
-                  .replace(/\.mp3$/i, '')
-                  .replace(/_/g, ' ');
-                next.unshift({
-                  id: `offline_${item.filename}`,
-                  title: cleanTitle,
-                  artist: 'Guardado en dispositivo',
-                  album: 'Offline PWA',
-                  genre: 'Offline',
-                  artwork: '/icon.svg',
-                  filename: item.filename,
-                  streamUrl: item.streamUrl,
-                  addedAt: Date.now()
-                });
-                changed = true;
-              }
+        // Keep offlineCatalog synced with actual CacheStorage files (NEVER mutating likedTracks!)
+        setOfflineCatalog(prev => {
+          const validSet = new Set(cachedFilenames.map(c => c.streamUrl));
+          const filtered = prev.filter(item => item.streamUrl && validSet.has(item.streamUrl));
+          let changed = filtered.length !== prev.length;
+          const next = [...filtered];
+
+          for (const item of cachedFilenames) {
+            const exists = next.some(
+              t => t.filename === item.filename || t.streamUrl === item.streamUrl
+            );
+            if (!exists) {
+              const cleanTitle = item.filename
+                .replace(/_\d+\.mp3$/i, '')
+                .replace(/\.mp3$/i, '')
+                .replace(/_/g, ' ');
+              next.unshift({
+                id: `offline_${item.filename}`,
+                title: cleanTitle,
+                artist: 'Guardado en dispositivo',
+                album: 'Offline PWA',
+                genre: 'Offline',
+                artwork: '/icon.svg',
+                filename: item.filename,
+                streamUrl: item.streamUrl,
+                addedAt: Date.now()
+              });
+              changed = true;
             }
-            if (changed) {
-              try {
-                localStorage.setItem('mma_liked_tracks_v1', JSON.stringify(next));
-              } catch {}
-              return next;
-            }
-            return prev;
-          });
-        }
+          }
+
+          if (changed) {
+            try {
+              localStorage.setItem(OFFLINE_CATALOG_KEY, JSON.stringify(next));
+            } catch {}
+            return next;
+          }
+          return prev;
+        });
       } catch {}
     }
     if (navigator.storage && navigator.storage.estimate) {
@@ -514,13 +671,25 @@ export default function HomePage() {
     }
   }
 
-  async function saveUrlToOfflineCache(url) {
+  async function saveUrlToOfflineCache(url, trackMeta = null) {
     if (typeof window === 'undefined' || !('caches' in window)) return false;
     try {
       const cache = await caches.open(AUDIO_CACHE_NAME);
       const response = await fetch(url);
       if (response.ok) {
         await cache.put(url, response.clone());
+        if (trackMeta) {
+          setOfflineCatalog(prev => {
+            const filtered = prev.filter(
+              t => t.streamUrl !== url && String(t.id) !== String(trackMeta.id)
+            );
+            const next = [{ ...trackMeta, streamUrl: url, addedAt: Date.now() }, ...filtered];
+            try {
+              localStorage.setItem(OFFLINE_CATALOG_KEY, JSON.stringify(next));
+            } catch {}
+            return next;
+          });
+        }
         await refreshOfflineCacheList();
         return true;
       }
@@ -528,12 +697,58 @@ export default function HomePage() {
     return false;
   }
 
-  async function resolvePlayableSource(track) {
-    const dl = downloads[track.id];
-    const likedItem = likedTracks.find(t => String(t.id) === String(track.id));
-    const filename = track.filename || dl?.filename || likedItem?.filename;
+  // Delete a track from device offline CacheStorage
+  async function deleteOfflineTrack(track) {
+    if (typeof window === 'undefined' || !('caches' in window)) return;
+    const filename = track.filename || downloads[track.id]?.filename;
     const streamUrl =
       track.streamUrl ||
+      (filename ? `/api/stream?file=${encodeURIComponent(filename)}` : null);
+
+    try {
+      const cache = await caches.open(AUDIO_CACHE_NAME);
+      if (streamUrl) {
+        await cache.delete(streamUrl);
+        const fullUrl = new URL(streamUrl, window.location.origin).href;
+        await cache.delete(fullUrl);
+      }
+    } catch {}
+
+    const nextOffline = offlineCatalog.filter(
+      t =>
+        String(t.id) !== String(track.id) &&
+        (!streamUrl || t.streamUrl !== streamUrl) &&
+        (!filename || t.filename !== filename)
+    );
+    persistOfflineCatalog(nextOffline);
+    await refreshOfflineCacheList();
+  }
+
+  // Delete an MP3 file from the VPS server
+  async function deleteServerFile(filename) {
+    try {
+      const res = await fetch(`/api/library?file=${encodeURIComponent(filename)}`, {
+        method: 'DELETE'
+      });
+      if (res.ok) {
+        setLibraryFiles(prev => prev.filter(f => f.filename !== filename));
+        if (user?.is_admin) fetchAdminData();
+      }
+    } catch {}
+  }
+
+  async function resolvePlayableSource(track) {
+    const dl = downloads[track.id];
+    const offItem = offlineCatalog.find(
+      t =>
+        String(t.id) === String(track.id) ||
+        (track.filename && t.filename === track.filename)
+    );
+    const likedItem = likedTracks.find(t => String(t.id) === String(track.id));
+    const filename = track.filename || dl?.filename || offItem?.filename || likedItem?.filename;
+    const streamUrl =
+      track.streamUrl ||
+      offItem?.streamUrl ||
       likedItem?.streamUrl ||
       (filename ? `/api/stream?file=${encodeURIComponent(filename)}` : null);
 
@@ -615,7 +830,7 @@ export default function HomePage() {
 
     setDownloads(prev => ({
       ...prev,
-      [key]: { status: 'downloading', progress: 0 }
+      [key]: { status: 'downloading', progress: 0, trackMeta: track }
     }));
 
     try {
@@ -634,7 +849,12 @@ export default function HomePage() {
       if (data.downloadId) {
         setDownloads(prev => ({
           ...prev,
-          [key]: { status: 'downloading', progress: 8, downloadId: data.downloadId }
+          [key]: {
+            status: 'downloading',
+            progress: 8,
+            downloadId: data.downloadId,
+            trackMeta: track
+          }
         }));
       } else {
         setDownloads(prev => ({ ...prev, [key]: { status: 'error' } }));
@@ -644,21 +864,63 @@ export default function HomePage() {
     }
   }
 
-  async function downloadAllLikedForOffline() {
-    if (syncingAll || likedTracks.length === 0) return;
+  async function downloadCollectionForOffline(tracksList) {
+    if (syncingAll || !tracksList || tracksList.length === 0) return;
     setSyncingAll(true);
-    for (const track of likedTracks) {
+    for (const track of tracksList) {
       const streamUrl =
         track.streamUrl ||
         (track.filename ? `/api/stream?file=${encodeURIComponent(track.filename)}` : null);
       if (streamUrl && offlineUrls[streamUrl]) continue;
       if (streamUrl) {
-        await saveUrlToOfflineCache(streamUrl, track.id);
+        await saveUrlToOfflineCache(streamUrl, track);
       } else {
         await startDownload(track);
       }
     }
     setSyncingAll(false);
+  }
+
+  // Save imported tracks (from Spotify URL or CSV) into chosen target library
+  function saveImportedTracksToTarget(freshTracks, defaultName = 'Spotify Import') {
+    if (!freshTracks || freshTracks.length === 0) return { count: 0, targetName: '' };
+
+    if (spotifyTargetLib === 'liked') {
+      const existingKeys = new Set(
+        likedTracks.map(t => `${t.title?.toLowerCase()}|${t.artist?.toLowerCase()}`)
+      );
+      const filtered = freshTracks.filter(
+        t => !existingKeys.has(`${t.title?.toLowerCase()}|${t.artist?.toLowerCase()}`)
+      );
+      persistLikes([...filtered, ...likedTracks]);
+      return { count: filtered.length, targetName: '♥ Favoritos' };
+    }
+
+    if (spotifyTargetLib === 'new_playlist') {
+      const created = createCustomPlaylist(defaultName, freshTracks);
+      if (created) {
+        setSelectedLibrary(created.id);
+        return { count: freshTracks.length, targetName: created.name };
+      }
+    }
+
+    const targetPl = customPlaylists.find(p => p.id === spotifyTargetLib);
+    if (targetPl) {
+      const existingKeys = new Set(
+        targetPl.tracks.map(t => `${t.title?.toLowerCase()}|${t.artist?.toLowerCase()}`)
+      );
+      const filtered = freshTracks.filter(
+        t => !existingKeys.has(`${t.title?.toLowerCase()}|${t.artist?.toLowerCase()}`)
+      );
+      const next = customPlaylists.map(p =>
+        p.id === targetPl.id ? { ...p, tracks: [...filtered, ...p.tracks] } : p
+      );
+      persistCustomPlaylists(next);
+      setSelectedLibrary(targetPl.id);
+      return { count: filtered.length, targetName: targetPl.name };
+    }
+
+    return { count: 0, targetName: '' };
   }
 
   // Player controls
@@ -913,6 +1175,23 @@ export default function HomePage() {
                   </button>
                 </form>
               )}
+
+              {offlineCatalog.length > 0 && (
+                <div style={{ marginTop: 14, paddingTop: 12, borderTop: '1px solid var(--line)' }}>
+                  <button
+                    type="button"
+                    className="btn secondary"
+                    style={{ width: '100%' }}
+                    onClick={() => {
+                      setUser({ username: 'Modo Offline', is_admin: false, offline: true });
+                      setActiveTab('library');
+                      setSelectedLibrary('offline');
+                    }}
+                  >
+                    🎧 Abrir mis canciones Offline ({offlineCatalog.length}) sin conexión
+                  </button>
+                </div>
+              )}
             </div>
           </div>
         </main>
@@ -920,8 +1199,26 @@ export default function HomePage() {
     );
   }
 
-  // ==================== AUTHENTICATED APP SHELL ====================
+  // ==================== COMPUTE ACTIVE LIBRARY VIEW ====================
   const initial = (user.username || 'U').trim().charAt(0).toUpperCase();
+  const activeCustomPlaylist = customPlaylists.find(p => p.id === selectedLibrary) || null;
+  const activeLibraryTracks =
+    selectedLibrary === 'liked'
+      ? likedTracks
+      : selectedLibrary === 'offline'
+      ? offlineCatalog
+      : activeCustomPlaylist
+      ? activeCustomPlaylist.tracks
+      : likedTracks;
+
+  const activeLibraryTitle =
+    selectedLibrary === 'liked'
+      ? '♥ Favoritos (Con corazón)'
+      : selectedLibrary === 'offline'
+      ? '✓ Offline (Guardadas en este dispositivo)'
+      : activeCustomPlaylist
+      ? `📁 ${activeCustomPlaylist.name}`
+      : '♥ Favoritos';
 
   return (
     <>
@@ -955,8 +1252,10 @@ export default function HomePage() {
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
               <path d="M12 21s-7-4.5-7-10a4 4 0 0 1 7-2.6A4 4 0 0 1 19 11c0 5.5-7 10-7 10z" />
             </svg>
-            <span>Librería</span>
-            {likedTracks.length > 0 && <span className="nav-count">{likedTracks.length}</span>}
+            <span>Librerías</span>
+            {(likedTracks.length + offlineCatalog.length) > 0 && (
+              <span className="nav-count">{likedTracks.length || offlineCatalog.length}</span>
+            )}
           </button>
 
           <button
@@ -970,6 +1269,18 @@ export default function HomePage() {
             </svg>
             <span>Servidor</span>
             {libraryFiles.length > 0 && <span className="nav-count">{libraryFiles.length}</span>}
+          </button>
+
+          <button
+            type="button"
+            className={activeTab === 'settings' ? 'active' : ''}
+            onClick={() => setActiveTab('settings')}
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <circle cx="12" cy="12" r="3" />
+              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9c.26.6.77 1.02 1.41 1.09H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+            </svg>
+            <span>Ajustes</span>
           </button>
 
           {user.is_admin && (
@@ -1009,6 +1320,17 @@ export default function HomePage() {
                 </span>
               </div>
 
+              <button
+                type="button"
+                className="account-item"
+                onClick={() => {
+                  setActiveTab('settings');
+                  setAccountOpen(false);
+                }}
+              >
+                ⚙ Configuración e Importar Spotify
+              </button>
+
               {user.is_admin && (
                 <button
                   type="button"
@@ -1019,13 +1341,13 @@ export default function HomePage() {
                     fetchAdminData();
                   }}
                 >
-                  Panel de invitaciones
+                  🛡 Panel de invitaciones
                 </button>
               )}
 
               {deferredPrompt && (
                 <button type="button" className="account-item" onClick={handleInstallPwa}>
-                  Instalar app en dispositivo
+                  📲 Instalar app en dispositivo
                 </button>
               )}
 
@@ -1054,7 +1376,7 @@ export default function HomePage() {
               <div>
                 <h1 className="page-title">Catálogo musical</h1>
                 <p className="page-sub">
-                  Busca por canción, álbum o artista, escucha el adelanto o descarga el MP3 directo a tu dispositivo.
+                  Busca por canción, álbum o artista, elije en qué librería guardarla o descarga el MP3 completo.
                 </p>
               </div>
               {deferredPrompt && (
@@ -1136,6 +1458,9 @@ export default function HomePage() {
               {results.map((track, idx) => {
                 const dl = downloads[track.id];
                 const liked = isLiked(track.id);
+                const savedPlaylistCount = customPlaylists.filter(p =>
+                  p.tracks.some(t => String(t.id) === String(track.id))
+                ).length;
                 const isCurrent = currentTrack?.id === track.id;
 
                 return (
@@ -1148,13 +1473,13 @@ export default function HomePage() {
                           title="Reproducir pista"
                         >
                           <img
-                              src={track.artwork || '/icon.svg'}
-                              alt={track.title}
-                              loading="lazy"
-                              onError={e => {
-                                e.currentTarget.src = '/icon.svg';
-                              }}
-                            />
+                            src={track.artwork || '/icon.svg'}
+                            alt={track.title}
+                            loading="lazy"
+                            onError={e => {
+                              e.currentTarget.src = '/icon.svg';
+                            }}
+                          />
                           <div className="artwork-play-overlay">
                             {isCurrent && isPlaying ? '⏸' : '▶'}
                           </div>
@@ -1172,9 +1497,18 @@ export default function HomePage() {
                           type="button"
                           className={`btn heart ${liked ? 'liked' : ''}`}
                           onClick={() => toggleLike(track)}
-                          title={liked ? 'Quitar de Librería' : 'Guardar en Librería'}
+                          title={liked ? 'Quitar corazón' : 'Dar corazón (Favoritos)'}
                         >
-                          {liked ? '♥ Guardada' : '♡ Favorito'}
+                          {liked ? '♥' : '♡'}
+                        </button>
+
+                        <button
+                          type="button"
+                          className="btn secondary sm"
+                          onClick={() => openSaveModal(track)}
+                          title="Elegir en qué librería guardar"
+                        >
+                          📁 Guardar{savedPlaylistCount > 0 ? ` (${savedPlaylistCount})` : ''}
                         </button>
 
                         {dl?.status === 'downloading' ? (
@@ -1227,9 +1561,11 @@ export default function HomePage() {
                         <dt>Estado</dt>
                         <dd>
                           {dl?.status === 'ready'
-                            ? 'MP3 listo'
+                            ? 'En librería Offline'
                             : liked
-                            ? 'En tu librería'
+                            ? 'En ♥ Favoritos'
+                            : savedPlaylistCount > 0
+                            ? `En ${savedPlaylistCount} librería(s)`
                             : 'Streaming 30s'}
                         </dd>
                       </div>
@@ -1241,36 +1577,403 @@ export default function HomePage() {
           </section>
         )}
 
-        {/* ==================== TAB 2: LIBRERÍA (FAVORITOS & OFFLINE) ==================== */}
+        {/* ==================== TAB 2: LIBRERÍAS (FAVORITOS / OFFLINE / PROPIAS) ==================== */}
         {activeTab === 'library' && (
           <section>
             <div className="page-head">
               <div>
-                <h1 className="page-title">Mi librería</h1>
+                <h1 className="page-title">Mis librerías</h1>
                 <p className="page-sub">
-                  Tus pistas con corazón, sincronizadas en caché offline de tu dispositivo y listas para bucle o aleatorio.
+                  Tu colección separada entre ♥ Favoritos, ✓ Offline en el dispositivo y las librerías que vos crees.
                 </p>
               </div>
+              <button
+                type="button"
+                className="btn secondary sm"
+                onClick={() => setCreatingPlaylist(v => !v)}
+              >
+                {creatingPlaylist ? 'Cancelar' : '+ Nueva librería'}
+              </button>
+            </div>
+
+            {creatingPlaylist && (
+              <form
+                className="search-bar"
+                style={{ marginBottom: 14 }}
+                onSubmit={e => {
+                  e.preventDefault();
+                  const created = createCustomPlaylist(newPlaylistName);
+                  if (created) {
+                    setNewPlaylistName('');
+                    setCreatingPlaylist(false);
+                    setSelectedLibrary(created.id);
+                  }
+                }}
+              >
+                <input
+                  type="text"
+                  className="search-input"
+                  placeholder="Nombre de tu nueva librería (ej. Gym, Viaje, Rock)…"
+                  value={newPlaylistName}
+                  onChange={e => setNewPlaylistName(e.target.value)}
+                  required
+                />
+                <button type="submit" className="btn sm">
+                  Crear librería
+                </button>
+              </form>
+            )}
+
+            {/* Switcher between ♥ Favoritos, ✓ Offline, and Custom Libraries */}
+            <div className="library-switcher" role="tablist" aria-label="Selector de librería">
+              <button
+                type="button"
+                className={`library-pill ${selectedLibrary === 'liked' ? 'active' : ''}`}
+                onClick={() => setSelectedLibrary('liked')}
+              >
+                <span>♥ Favoritos</span>
+                <span className="library-pill-count">{likedTracks.length}</span>
+              </button>
+
+              <button
+                type="button"
+                className={`library-pill ${selectedLibrary === 'offline' ? 'active' : ''}`}
+                onClick={() => setSelectedLibrary('offline')}
+              >
+                <span>✓ Offline</span>
+                <span className="library-pill-count">{offlineCatalog.length}</span>
+              </button>
+
+              {customPlaylists.map(pl => (
+                <button
+                  key={pl.id}
+                  type="button"
+                  className={`library-pill ${selectedLibrary === pl.id ? 'active' : ''}`}
+                  onClick={() => setSelectedLibrary(pl.id)}
+                >
+                  <span>📁 {pl.name}</span>
+                  <span className="library-pill-count">{pl.tracks.length}</span>
+                </button>
+              ))}
             </div>
 
             <div className="storage-banner">
               <span>
-                <strong>Capacidad PWA en este dispositivo:</strong>{' '}
+                <strong> Vista activa:</strong> {activeLibraryTitle} ·{' '}
                 {deviceQuota
-                  ? `${deviceQuota.usedMB} MB usados de ~${deviceQuota.quotaGB} GB disponibles`
-                  : 'Caché del navegador activo (miles de canciones offline)'}
+                  ? `${deviceQuota.usedMB} MB usados de ~${deviceQuota.quotaGB} GB en dispositivo`
+                  : 'Caché offline del navegador activo'}
               </span>
-              <span className="badge mint">
-                {Object.keys(offlineUrls).length} pistas offline
-              </span>
+              <span className="badge mint">{offlineCatalog.length} pistas offline</span>
             </div>
 
-            <div className="card" style={{ marginBottom: 14 }}>
-              <div className="item-head" style={{ marginBottom: 10 }}>
+            <div className="toolbar">
+              <div className="toolbar-group">
+                <button
+                  type="button"
+                  className="btn sm"
+                  disabled={activeLibraryTracks.length === 0}
+                  onClick={() => playFromList(activeLibraryTracks, 0)}
+                >
+                  ▶ Reproducir librería
+                </button>
+                <button
+                  type="button"
+                  className={`btn secondary sm ${shuffle ? 'cobalt' : ''}`}
+                  onClick={() => setShuffle(s => !s)}
+                >
+                  🔀 Aleatorio: {shuffle ? 'ON' : 'OFF'}
+                </button>
+                <button type="button" className="btn secondary sm" onClick={cycleRepeatMode}>
+                  🔁 Bucle:{' '}
+                  {repeatMode === 'off' ? 'No' : repeatMode === 'all' ? 'Todo' : '1 pista'}
+                </button>
+              </div>
+
+              <div className="toolbar-group">
+                {selectedLibrary !== 'offline' && (
+                  <button
+                    type="button"
+                    className="btn secondary sm"
+                    disabled={activeLibraryTracks.length === 0 || syncingAll}
+                    onClick={() => downloadCollectionForOffline(activeLibraryTracks)}
+                  >
+                    {syncingAll ? 'Sincronizando…' : '⬇ Bajar toda esta librería a Offline'}
+                  </button>
+                )}
+
+                {activeCustomPlaylist && (
+                  <button
+                    type="button"
+                    className="btn danger sm"
+                    onClick={() => deleteCustomPlaylist(activeCustomPlaylist.id)}
+                  >
+                    🗑 Eliminar librería
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {activeLibraryTracks.length === 0 ? (
+              <div className="empty">
+                <div className="empty-title">Esta librería está vacía</div>
+                <p>
+                  {selectedLibrary === 'liked'
+                    ? 'Toca el corazón ♡ en cualquier canción de Explorar para guardarla en Favoritos.'
+                    : selectedLibrary === 'offline'
+                    ? 'Cuando descargues cualquier MP3 aparecerá automáticamente aquí para escuchar sin internet.'
+                    : 'Usa el botón «📁 Guardar» en Explorar para agregar canciones a esta librería.'}
+                </p>
+              </div>
+            ) : (
+              <div className="grid">
+                {activeLibraryTracks.map((track, idx) => {
+                  const dl = downloads[track.id];
+                  const offItem = offlineCatalog.find(
+                    t =>
+                      String(t.id) === String(track.id) ||
+                      (track.filename && t.filename === track.filename)
+                  );
+                  const filename = track.filename || dl?.filename || offItem?.filename;
+                  const streamUrl =
+                    track.streamUrl ||
+                    offItem?.streamUrl ||
+                    (filename ? `/api/stream?file=${encodeURIComponent(filename)}` : null);
+                  const isOfflineReady =
+                    selectedLibrary === 'offline' || Boolean(streamUrl && offlineUrls[streamUrl]);
+                  const isCurrent = currentTrack?.id === track.id;
+                  const liked = isLiked(track.id);
+
+                  return (
+                    <article
+                      key={`${selectedLibrary}_${track.id}`}
+                      className={`card item ${isCurrent ? 'playing' : ''}`}
+                    >
+                      <div className="item-head">
+                        <div className="item-media">
+                          <div
+                            className="artwork-wrap"
+                            onClick={() => playFromList(activeLibraryTracks, idx)}
+                          >
+                            <img
+                              src={track.artwork || '/icon.svg'}
+                              alt={track.title}
+                              loading="lazy"
+                              onError={e => {
+                                e.currentTarget.src = '/icon.svg';
+                              }}
+                            />
+                            <div className="artwork-play-overlay">
+                              {isCurrent && isPlaying ? '⏸' : '▶'}
+                            </div>
+                          </div>
+                          <div className="item-info">
+                            <div className="item-title">{track.title}</div>
+                            <div className="item-sub">{track.artist}</div>
+                          </div>
+                        </div>
+
+                        <div className="item-actions">
+                          {isOfflineReady ? (
+                            <span className="badge mint">✓ Offline</span>
+                          ) : dl?.status === 'downloading' ? (
+                            <span className="badge amber">
+                              Extrayendo {Math.round(dl.progress || 0)}%
+                            </span>
+                          ) : (
+                            <button
+                              type="button"
+                              className="btn sm"
+                              onClick={() => startDownload(track)}
+                            >
+                              {dl?.status === 'error' ? '↻ Reintentar MP3' : '⬇ Obtener MP3'}
+                            </button>
+                          )}
+
+                          {filename && (
+                            <a
+                              href={`/api/stream?file=${encodeURIComponent(filename)}&download=1`}
+                              download={filename}
+                              className="btn secondary sm"
+                              title="Exportar archivo MP3"
+                            >
+                              💾 Archivo
+                            </a>
+                          )}
+
+                          <button
+                            type="button"
+                            className={`btn heart ${liked ? 'liked' : ''}`}
+                            onClick={() => toggleLike(track)}
+                            title={liked ? 'Quitar de ♥ Favoritos' : 'Agregar a ♥ Favoritos'}
+                          >
+                            {liked ? '♥' : '♡'}
+                          </button>
+
+                          <button
+                            type="button"
+                            className="btn secondary sm"
+                            onClick={() => openSaveModal(track)}
+                            title="Guardar en otra librería"
+                          >
+                            📁
+                          </button>
+
+                          {/* Delete / Remove action depending on current library */}
+                          {selectedLibrary === 'offline' ? (
+                            <button
+                              type="button"
+                              className="btn danger sm"
+                              onClick={() => deleteOfflineTrack(track)}
+                              title="Borrar MP3 del almacenamiento offline del dispositivo"
+                            >
+                              🗑 Borrar
+                            </button>
+                          ) : selectedLibrary === 'liked' ? (
+                            <button
+                              type="button"
+                              className="btn danger sm"
+                              onClick={() => toggleLike(track)}
+                              title="Quitar canción de Favoritos"
+                            >
+                              🗑 Quitar
+                            </button>
+                          ) : (
+                            <button
+                              type="button"
+                              className="btn danger sm"
+                              onClick={() =>
+                                removeTrackFromPlaylist(selectedLibrary, track.id)
+                              }
+                              title="Quitar canción de esta librería"
+                            >
+                              🗑 Quitar
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                    </article>
+                  );
+                })}
+              </div>
+            )}
+          </section>
+        )}
+
+        {/* ==================== TAB 3: ARCHIVOS EN SERVIDOR ==================== */}
+        {activeTab === 'files' && (
+          <section>
+            <div className="page-head">
+              <div>
+                <h1 className="page-title">Archivos MP3 en servidor</h1>
+                <p className="page-sub">
+                  Pistas extraídas temporalmente en el servidor listas para cachear en tu dispositivo o eliminar.
+                </p>
+              </div>
+              <button type="button" className="btn secondary sm" onClick={fetchLibraryFiles}>
+                Actualizar lista
+              </button>
+            </div>
+
+            {libraryFiles.length === 0 ? (
+              <div className="empty">
+                <div className="empty-title">Sin archivos MP3 todavía</div>
+                <p>Descarga cualquier canción desde Explorar o Librerías.</p>
+              </div>
+            ) : (
+              <div className="grid">
+                {libraryFiles.map((file, idx) => {
+                  const isCached = offlineUrls[file.url];
+                  const cleanTitle = file.filename
+                    .replace(/_\d+\.mp3$/i, '')
+                    .replace(/\.mp3$/i, '')
+                    .replace(/_/g, ' ');
+                  const formattedList = libraryFiles.map(f => ({
+                    id: f.filename,
+                    title: f.filename.replace(/\.mp3$/i, ''),
+                    artist: `${f.sizeMB} MB · Servidor`,
+                    artwork: '/icon.svg',
+                    filename: f.filename,
+                    streamUrl: f.url
+                  }));
+
+                  return (
+                    <article key={file.filename} className="card item">
+                      <div className="item-head">
+                        <div className="item-media">
+                          <div
+                            className="artwork-wrap"
+                            onClick={() => playFromList(formattedList, idx)}
+                          >
+                            <img src="/icon.svg" alt="MP3" />
+                            <div className="artwork-play-overlay">▶</div>
+                          </div>
+                          <div className="item-info">
+                            <div className="item-title">{cleanTitle}</div>
+                            <div className="item-sub">{file.sizeMB} MB · Audio MP3</div>
+                          </div>
+                        </div>
+
+                        <div className="item-actions">
+                          <button
+                            type="button"
+                            className="btn secondary sm"
+                            onClick={() =>
+                              saveUrlToOfflineCache(file.url, {
+                                id: `offline_${file.filename}`,
+                                title: cleanTitle,
+                                artist: 'Guardado desde servidor',
+                                artwork: '/icon.svg',
+                                filename: file.filename,
+                                streamUrl: file.url
+                              })
+                            }
+                          >
+                            {isCached ? '✓ En Offline' : '⚡ Guardar Offline'}
+                          </button>
+                          <a
+                            href={`${file.url}&download=1`}
+                            download={file.filename}
+                            className="btn sm"
+                          >
+                            💾 Archivo
+                          </a>
+                          <button
+                            type="button"
+                            className="btn danger sm"
+                            onClick={() => deleteServerFile(file.filename)}
+                            title="Borrar archivo del servidor"
+                          >
+                            🗑 Borrar
+                          </button>
+                        </div>
+                      </div>
+                    </article>
+                  );
+                })}
+              </div>
+            )}
+          </section>
+        )}
+
+        {/* ==================== TAB 4: CONFIGURACIÓN (SPOTIFY SYNC & CACHÉ) ==================== */}
+        {activeTab === 'settings' && (
+          <section>
+            <div className="page-head">
+              <div>
+                <h1 className="page-title">Configuración y sincronización</h1>
+                <p className="page-sub">
+                  Importa playlists o álbumes desde Spotify, sube archivos CSV de Exportify y administra el almacenamiento de tu PWA.
+                </p>
+              </div>
+            </div>
+
+            <div className="card" style={{ marginBottom: 16 }}>
+              <div className="item-head" style={{ marginBottom: 12 }}>
                 <div>
-                  <div className="item-title">Importar desde Spotify</div>
+                  <div className="item-title">Importar música desde Spotify</div>
                   <div className="item-sub">
-                    Pegá el enlace de cualquier playlist o álbum público de Spotify, o subí un CSV de Exportify.
+                    Pega el enlace de cualquier playlist o álbum público de Spotify, o sube un archivo CSV de Exportify.
                   </div>
                 </div>
                 <span className="badge mint">Spotify Sync</span>
@@ -1282,9 +1985,26 @@ export default function HomePage() {
                 </div>
               )}
 
+              <div className="field" style={{ marginBottom: 12 }}>
+                <label htmlFor="spotify-target-select">¿En qué librería querés guardar lo importado?</label>
+                <select
+                  id="spotify-target-select"
+                  value={spotifyTargetLib}
+                  onChange={e => setSpotifyTargetLib(e.target.value)}
+                >
+                  <option value="new_playlist">✨ Crear una nueva librería con el nombre de la playlist</option>
+                  <option value="liked">♥ Guardar en Favoritos (Con corazón)</option>
+                  {customPlaylists.map(pl => (
+                    <option key={pl.id} value={pl.id}>
+                      📁 Guardar en «{pl.name}» ({pl.tracks.length} pistas)
+                    </option>
+                  ))}
+                </select>
+              </div>
+
               <form
                 className="search-bar"
-                style={{ marginBottom: 8 }}
+                style={{ marginBottom: 12 }}
                 onSubmit={async e => {
                   e.preventDefault();
                   if (!spotifyUrl.trim() || spotifyBusy) return;
@@ -1303,20 +2023,14 @@ export default function HomePage() {
                         text: data.error || 'No se pudo importar desde Spotify.'
                       });
                     } else {
-                      const existingIds = new Set(likedTracks.map(t => String(t.id)));
-                      const existingKeys = new Set(
-                        likedTracks.map(t => `${t.title?.toLowerCase()}|${t.artist?.toLowerCase()}`)
+                      const { count, targetName } = saveImportedTracksToTarget(
+                        data.tracks || [],
+                        data.playlistName || 'Playlist Spotify'
                       );
-                      const fresh = (data.tracks || []).filter(
-                        t =>
-                          !existingIds.has(String(t.id)) &&
-                          !existingKeys.has(`${t.title?.toLowerCase()}|${t.artist?.toLowerCase()}`)
-                      );
-                      persistLikes([...fresh, ...likedTracks]);
                       setSpotifyUrl('');
                       setSpotifyMsg({
                         type: 'ok',
-                        text: `✓ Se agregaron ${fresh.length} canciones de «${data.playlistName}» a tu librería.`
+                        text: `✓ Se guardaron ${count} canciones en «${targetName}».`
                       });
                     }
                   } catch {
@@ -1339,13 +2053,23 @@ export default function HomePage() {
                 </button>
               </form>
 
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8, fontSize: 12, color: 'var(--muted)' }}>
+              <div
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  flexWrap: 'wrap',
+                  gap: 8,
+                  fontSize: 12,
+                  color: 'var(--muted)'
+                }}
+              >
                 <span>
                   ¿Tus «Me gusta» privados? Exportalos en{' '}
                   <a href="https://exportify.net" target="_blank" rel="noreferrer">
                     exportify.net
                   </a>{' '}
-                  y subí el <code>.csv</code>:
+                  y subí el archivo <code>.csv</code>:
                 </span>
                 <label className="btn secondary sm" style={{ cursor: 'pointer' }}>
                   📂 Subir CSV de Spotify
@@ -1398,9 +2122,7 @@ export default function HomePage() {
                       }
 
                       const imported = [];
-                      const existingKeys = new Set(
-                        likedTracks.map(t => `${t.title?.toLowerCase()}|${t.artist?.toLowerCase()}`)
-                      );
+                      const seen = new Set();
 
                       for (let i = 1; i < lines.length; i++) {
                         const cols = parseCsvRow(lines[i]);
@@ -1408,24 +2130,28 @@ export default function HomePage() {
                         const artist = artistIdx >= 0 ? cols[artistIdx] : '';
                         if (!title) continue;
                         const k = `${title.toLowerCase()}|${artist.toLowerCase()}`;
-                        if (existingKeys.has(k)) continue;
-                        existingKeys.add(k);
+                        if (seen.has(k)) continue;
+                        seen.add(k);
                         imported.push({
                           id: `csv_${Date.now()}_${i}`,
                           title,
                           artist: artist.replace(/;/g, ', '),
                           album: albumIdx >= 0 ? cols[albumIdx] : 'Spotify CSV',
-                          genre: genreIdx >= 0 && cols[genreIdx] ? cols[genreIdx].split(',')[0] : 'Spotify',
+                          genre:
+                            genreIdx >= 0 && cols[genreIdx]
+                              ? cols[genreIdx].split(',')[0]
+                              : 'Spotify',
                           artwork: '/icon.svg',
                           previewUrl: null,
                           duration: '—'
                         });
                       }
 
-                      persistLikes([...imported, ...likedTracks]);
+                      const csvName = file.name.replace(/\.csv$/i, '') || 'Spotify CSV';
+                      const { count, targetName } = saveImportedTracksToTarget(imported, csvName);
                       setSpotifyMsg({
                         type: 'ok',
-                        text: `✓ Se importaron ${imported.length} canciones desde el archivo CSV.`
+                        text: `✓ Se importaron ${count} canciones del CSV en «${targetName}».`
                       });
                       e.target.value = '';
                     }}
@@ -1434,207 +2160,37 @@ export default function HomePage() {
               </div>
             </div>
 
-            <div className="toolbar">
-              <div className="toolbar-group">
-                <button
-                  type="button"
-                  className="btn sm"
-                  disabled={likedTracks.length === 0}
-                  onClick={() => playFromList(likedTracks, 0)}
-                >
-                  ▶ Reproducir todo
-                </button>
-                <button
-                  type="button"
-                  className={`btn secondary sm ${shuffle ? 'cobalt' : ''}`}
-                  onClick={() => setShuffle(s => !s)}
-                >
-                  🔀 Aleatorio: {shuffle ? 'ON' : 'OFF'}
-                </button>
-                <button type="button" className="btn secondary sm" onClick={cycleRepeatMode}>
-                  🔁 Bucle:{' '}
-                  {repeatMode === 'off' ? 'No' : repeatMode === 'all' ? 'Todo' : '1 pista'}
-                </button>
+            <div className="card">
+              <div className="item-head">
+                <div>
+                  <div className="item-title">Almacenamiento Offline de este dispositivo</div>
+                  <div className="item-sub">
+                    {deviceQuota
+                      ? `Usando ${deviceQuota.usedMB} MB de ~${deviceQuota.quotaGB} GB disponibles (${offlineCatalog.length} canciones en caché).`
+                      : `${offlineCatalog.length} canciones guardadas en el caché offline de tu navegador.`}
+                  </div>
+                </div>
+                {offlineCatalog.length > 0 && (
+                  <button
+                    type="button"
+                    className="btn danger sm"
+                    onClick={async () => {
+                      if ('caches' in window) {
+                        await caches.delete(AUDIO_CACHE_NAME);
+                      }
+                      persistOfflineCatalog([]);
+                      await refreshOfflineCacheList();
+                    }}
+                  >
+                    🗑 Vaciar todo el caché Offline
+                  </button>
+                )}
               </div>
-
-              <button
-                type="button"
-                className="btn secondary sm"
-                disabled={likedTracks.length === 0 || syncingAll}
-                onClick={downloadAllLikedForOffline}
-              >
-                {syncingAll ? 'Sincronizando…' : '⬇ Descargar todo (Offline + MP3)'}
-              </button>
             </div>
-
-            {likedTracks.length === 0 ? (
-              <div className="empty">
-                <div className="empty-title">Tu librería está vacía</div>
-                <p>
-                  Pulsa <strong>♡ Favorito</strong> en cualquier canción del buscador para guardarla aquí.
-                </p>
-              </div>
-            ) : (
-              <div className="grid">
-                {likedTracks.map((track, idx) => {
-                  const dl = downloads[track.id];
-                  const streamUrl =
-                    track.streamUrl ||
-                    (track.filename
-                      ? `/api/stream?file=${encodeURIComponent(track.filename)}`
-                      : null) ||
-                    (dl?.filename ? `/api/stream?file=${encodeURIComponent(dl.filename)}` : null);
-                  const filename = track.filename || dl?.filename;
-                  const isOfflineReady = streamUrl && offlineUrls[streamUrl];
-                  const isCurrent = currentTrack?.id === track.id;
-
-                  return (
-                    <article key={track.id} className={`card item ${isCurrent ? 'playing' : ''}`}>
-                      <div className="item-head">
-                        <div className="item-media">
-                          <div
-                            className="artwork-wrap"
-                            onClick={() => playFromList(likedTracks, idx)}
-                          >
-                            <img
-                              src={track.artwork || '/icon.svg'}
-                              alt={track.title}
-                              loading="lazy"
-                              onError={e => {
-                                e.currentTarget.src = '/icon.svg';
-                              }}
-                            />
-                            <div className="artwork-play-overlay">
-                              {isCurrent && isPlaying ? '⏸' : '▶'}
-                            </div>
-                          </div>
-                          <div className="item-info">
-                            <div className="item-title">{track.title}</div>
-                            <div className="item-sub">{track.artist}</div>
-                          </div>
-                        </div>
-
-                        <div className="item-actions">
-                          {isOfflineReady ? (
-                            <span className="badge mint">✓ Offline</span>
-                          ) : dl?.status === 'downloading' ? (
-                            <span className="badge amber">
-                              Extrayendo {Math.round(dl.progress || 0)}%
-                            </span>
-                          ) : (
-                            <button
-                              type="button"
-                              className="btn sm"
-                              onClick={() => startDownload(track)}
-                            >
-                              {dl?.status === 'error' ? '↻ Reintentar MP3' : '⬇ Obtener MP3'}
-                            </button>
-                          )}
-
-                          {filename && (
-                            <a
-                              href={`/api/stream?file=${encodeURIComponent(filename)}&download=1`}
-                              download={filename}
-                              className="btn secondary sm"
-                            >
-                              💾 Archivo
-                            </a>
-                          )}
-
-                          <button
-                            type="button"
-                            className="btn heart liked heart-icon-only"
-                            onClick={() => toggleLike(track)}
-                            title="Quitar de Librería"
-                          >
-                            ♥
-                          </button>
-                        </div>
-                      </div>
-                    </article>
-                  );
-                })}
-              </div>
-            )}
           </section>
         )}
 
-        {/* ==================== TAB 3: ARCHIVOS EN SERVIDOR ==================== */}
-        {activeTab === 'files' && (
-          <section>
-            <div className="page-head">
-              <div>
-                <h1 className="page-title">Archivos MP3 en servidor</h1>
-                <p className="page-sub">
-                  Pistas extraídas en el servidor listas para reproducir o bajar a tu teléfono o PC.
-                </p>
-              </div>
-              <button type="button" className="btn secondary sm" onClick={fetchLibraryFiles}>
-                Actualizar lista
-              </button>
-            </div>
-
-            {libraryFiles.length === 0 ? (
-              <div className="empty">
-                <div className="empty-title">Sin archivos MP3 todavía</div>
-                <p>Descarga cualquier canción desde Explorar o Librería.</p>
-              </div>
-            ) : (
-              <div className="grid">
-                {libraryFiles.map((file, idx) => {
-                  const isOffline = offlineUrls[file.url];
-                  const formattedList = libraryFiles.map(f => ({
-                    id: f.filename,
-                    title: f.filename.replace(/\.mp3$/i, ''),
-                    artist: `${f.sizeMB} MB · Servidor`,
-                    artwork: '/icon.svg',
-                    filename: f.filename,
-                    streamUrl: f.url
-                  }));
-
-                  return (
-                    <article key={file.filename} className="card item">
-                      <div className="item-head">
-                        <div className="item-media">
-                          <div
-                            className="artwork-wrap"
-                            onClick={() => playFromList(formattedList, idx)}
-                          >
-                            <img src="/icon.svg" alt="MP3" />
-                            <div className="artwork-play-overlay">▶</div>
-                          </div>
-                          <div className="item-info">
-                            <div className="item-title">{file.filename.replace(/\.mp3$/i, '')}</div>
-                            <div className="item-sub">{file.sizeMB} MB · Audio MP3</div>
-                          </div>
-                        </div>
-
-                        <div className="item-actions">
-                          <button
-                            type="button"
-                            className="btn secondary sm"
-                            onClick={() => saveUrlToOfflineCache(file.url, file.filename)}
-                          >
-                            {isOffline ? '✓ En caché' : '⚡ Cachear'}
-                          </button>
-                          <a
-                            href={`${file.url}&download=1`}
-                            download={file.filename}
-                            className="btn sm"
-                          >
-                            ⬇ Descargar
-                          </a>
-                        </div>
-                      </div>
-                    </article>
-                  );
-                })}
-              </div>
-            )}
-          </section>
-        )}
-
-        {/* ==================== TAB 4: ADMIN PANEL (SOLO ADMIN) ==================== */}
+        {/* ==================== TAB 5: ADMIN PANEL (SOLO ADMIN) ==================== */}
         {activeTab === 'admin' && user.is_admin && (
           <section>
             <div className="page-head">
@@ -1847,6 +2403,88 @@ export default function HomePage() {
           </section>
         )}
       </main>
+
+      {/* ==================== MODAL DIALOG: CHOOSE LIBRARY TO SAVE TRACK ==================== */}
+      <dialog
+        ref={saveDialogRef}
+        closedby="any"
+        className="save-dialog"
+        aria-labelledby="save-dialog-title"
+        onClose={() => setTrackToSave(null)}
+      >
+        {trackToSave && (
+          <div>
+            <div className="item-head" style={{ marginBottom: 8 }}>
+              <div>
+                <h2 id="save-dialog-title" className="item-title" style={{ margin: 0 }}>
+                  Guardar en librería
+                </h2>
+                <div className="item-sub">
+                  {trackToSave.title} · {trackToSave.artist}
+                </div>
+              </div>
+              <button type="button" className="btn ghost sm" onClick={closeSaveModal}>
+                ✕
+              </button>
+            </div>
+
+            <div className="dialog-list">
+              <button
+                type="button"
+                className={`dialog-option ${isLiked(trackToSave.id) ? 'selected' : ''}`}
+                onClick={() => toggleLike(trackToSave)}
+              >
+                <span>♥ Favoritos (Con corazón)</span>
+                <span>{isLiked(trackToSave.id) ? '✓ Guardada' : '+ Agregar'}</span>
+              </button>
+
+              {customPlaylists.map(pl => {
+                const inside = isTrackInPlaylist(pl.id, trackToSave.id);
+                return (
+                  <button
+                    key={pl.id}
+                    type="button"
+                    className={`dialog-option ${inside ? 'selected' : ''}`}
+                    onClick={() => toggleTrackInPlaylist(pl.id, trackToSave)}
+                  >
+                    <span>📁 {pl.name}</span>
+                    <span>{inside ? '✓ Guardada' : '+ Agregar'}</span>
+                  </button>
+                );
+              })}
+            </div>
+
+            <form
+              className="search-bar"
+              style={{ marginTop: 10, marginBottom: 0 }}
+              onSubmit={e => {
+                e.preventDefault();
+                const created = createCustomPlaylist(modalNewPlaylistName, [
+                  {
+                    ...trackToSave,
+                    addedAt: Date.now()
+                  }
+                ]);
+                if (created) {
+                  setModalNewPlaylistName('');
+                }
+              }}
+            >
+              <input
+                type="text"
+                className="search-input"
+                placeholder="O crear nueva librería…"
+                value={modalNewPlaylistName}
+                onChange={e => setModalNewPlaylistName(e.target.value)}
+                required
+              />
+              <button type="submit" className="btn sm">
+                + Crear y guardar
+              </button>
+            </form>
+          </div>
+        )}
+      </dialog>
 
       {/* ==================== EDITORIAL FLOATING PLAYER DOCK ==================== */}
       {currentTrack && (

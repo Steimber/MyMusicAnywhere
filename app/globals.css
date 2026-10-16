@@ -1095,3 +1095,116 @@ a {
   height: 4px;
   cursor: pointer;
 }
+
+/* ==================== LIBRARY COLLECTION SWITCHER & DIALOG ==================== */
+.btn.danger {
+  background: var(--coral-soft);
+  color: var(--coral);
+  border-color: #f5b5c2;
+}
+
+.btn.danger:hover:not(:disabled) {
+  background: #fde0e6;
+}
+
+.library-switcher {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 14px;
+}
+
+.library-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 8px 13px;
+  border-radius: 999px;
+  border: 1px solid var(--line);
+  background: var(--paper);
+  color: var(--ink);
+  font-size: 13px;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.library-pill:hover {
+  background: var(--paper-alt);
+}
+
+.library-pill.active {
+  background: var(--ink);
+  color: var(--paper);
+  border-color: var(--ink);
+}
+
+.library-pill-count {
+  font-size: 11px;
+  font-weight: 700;
+  padding: 1px 7px;
+  border-radius: 99px;
+  background: var(--paper-alt);
+  color: var(--muted);
+}
+
+.library-pill.active .library-pill-count {
+  background: rgba(255, 255, 255, 0.16);
+  color: #fff;
+}
+
+dialog.save-dialog {
+  width: min(92vw, 420px);
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  background: var(--paper);
+  color: var(--ink);
+  padding: 18px;
+  box-shadow: 0 20px 44px rgba(15, 17, 23, 0.25);
+  margin: auto;
+}
+
+dialog.save-dialog::backdrop {
+  background-color: rgba(15, 17, 23, 0.5);
+  backdrop-filter: blur(2px);
+}
+
+.dialog-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 12px 0;
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+.dialog-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  width: 100%;
+  padding: 10px 12px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: var(--paper);
+  color: var(--ink);
+  font-size: 13.5px;
+  font-weight: 600;
+  font-family: inherit;
+  cursor: pointer;
+  text-align: left;
+}
+
+.dialog-option:hover {
+  background: var(--paper-alt);
+}
+
+.dialog-option.selected {
+  border-color: var(--cobalt);
+  background: var(--cobalt-soft);
+  color: var(--cobalt);
+}
+

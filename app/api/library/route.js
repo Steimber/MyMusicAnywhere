@@ -35,3 +35,31 @@ export async function GET(request) {
     return NextResponse.json({ error: err.message }, { status: 500 });
   }
 }
+
+export async function DELETE(request) {
+  try {
+    const user = getSessionUser(request);
+    if (!user) {
+      return NextResponse.json({ error: 'No autorizado' }, { status: 401 });
+    }
+
+    const { searchParams } = new URL(request.url);
+    const rawFile = searchParams.get('file') || '';
+    const safeName = path.basename(rawFile);
+
+    if (!safeName || safeName !== rawFile) {
+      return NextResponse.json({ error: 'Nombre de archivo inválido' }, { status: 400 });
+    }
+
+    const downloadsDir = getDownloadsDir();
+    const targetPath = path.join(downloadsDir, safeName);
+
+    if (fs.existsSync(targetPath)) {
+      fs.unlinkSync(targetPath);
+    }
+
+    return NextResponse.json({ deleted: true, filename: safeName });
+  } catch (err) {
+    return NextResponse.json({ error: err.message }, { status: 500 });
+  }
+}
