@@ -4,14 +4,25 @@ import { useState, useEffect, useRef } from 'react';
 import { NoSleepController } from '../lib/nosleep';
 
 const AUDIO_CACHE_NAME = 'my-music-offline-audio-v1';
-const SHELL_CACHE_NAME = 'mymusic-shell-v10';
+const SHELL_CACHE_NAME = 'mymusic-shell-v11';
+const DEFAULT_TRACK_COVER = '/icon.svg?v=3';
 const USER_STORAGE_KEY = 'mma_cached_user_v1';
 const LIKES_STORAGE_KEY = 'mma_liked_tracks_v1';
 const OFFLINE_CATALOG_KEY = 'mma_offline_catalog_v1';
 const PLAYLISTS_STORAGE_KEY = 'mma_custom_playlists_v1';
 
+function isPlaceholderCover(rawUrl) {
+  if (!rawUrl || typeof rawUrl !== 'string') return true;
+  const u = rawUrl.trim().toLowerCase();
+  return (
+    !u.startsWith('http') ||
+    u.includes('/icon.svg') ||
+    u.includes('/brand/logo')
+  );
+}
+
 function compressArtworkUrl(rawUrl) {
-  if (!rawUrl || typeof rawUrl !== 'string' || !rawUrl.startsWith('http')) return '/icon.svg';
+  if (isPlaceholderCover(rawUrl)) return DEFAULT_TRACK_COVER;
   // Spotify CDN: replace 640x640 (ab67616d0000b273) with compact 300x300 (ab67616d00001e02)
   if (rawUrl.includes('i.scdn.co/image/')) {
     return rawUrl.replace('ab67616d0000b273', 'ab67616d00001e02');
@@ -19,6 +30,10 @@ function compressArtworkUrl(rawUrl) {
   // Apple/iTunes CDN: use 100x100bb.jpg (~4 KB per thumbnail instead of ~80 KB 600x600bb.jpg)
   if (rawUrl.includes('mzstatic.com')) {
     return rawUrl.replace(/\d+x\d+bb\.(jpg|png|webp)/i, '100x100bb.jpg');
+  }
+  // Deezer CDN: use compact 250x250 thumbnail
+  if (rawUrl.includes('dzcdn.net/images/cover/')) {
+    return rawUrl.replace(/\/\d+x\d+(-000000-\d+-0-0)?\.(jpg|png)/i, '/250x250-000000-80-0-0.jpg');
   }
   return rawUrl;
 }
@@ -1148,7 +1163,7 @@ export default function HomePage() {
         t &&
         t.id &&
         t.title &&
-        (!t.artwork || t.artwork === '/icon.svg') &&
+        isPlaceholderCover(t.artwork) &&
         (manualClick || !enrichedArtworkRef.current.has(String(t.id)))
     );
     if (missing.length === 0) return;
@@ -1169,8 +1184,21 @@ export default function HomePage() {
 
     const stripTitleNoise = raw =>
       String(raw || '')
-        .replace(/\s*[-–—]\s*(remaster(ed)?(\s+\d{4})?|\d{4}\s+remaster(ed)?|radio\s+edit|album\s+version|single\s+version).*/i, '')
-        .replace(/\s*\((remaster(ed)?(\s+\d{4})?|\d{4}\s+remaster(ed)?|feat\.?[^)]+|ft\.?[^)]+)\)/gi, '')
+        .replace(
+          /\s*[-–—]\s*(remaster(ed)?(\s+\d{4})?|\d{4}\s+remaster(ed)?|radio\s+edit|album\s+version|single\s+version|solo|demo|live|acoustic|bonus\s+track|\d+\/\d+.*).*/i,
+          ''
+        )
+        .replace(
+          /\s*\((remaster(ed)?(\s+\d{4})?|\d{4}\s+remaster(ed)?|feat\.?[^)]+|ft\.?[^)]+|solo|live|demo)\)/gi,
+          ''
+        )
+        .replace(/\s*\[[^\]]+\]/g, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+
+    const cleanArtistPart = raw =>
+      String(raw || '')
+        .replace(/\b(archive|archives|vault|topic|reupload|official)\b/gi, '')
         .replace(/\s+/g, ' ')
         .trim();
 
@@ -1201,12 +1229,26 @@ export default function HomePage() {
         let rateLimited = false;
         let networkAborted = false;
         try {
-          const cleanArtist =
+          const rawArtists =
             item.artist && item.artist !== 'Artista' && item.artist !== 'Guardado en dispositivo'
-              ? item.artist.split(',')[0].trim()
-              : '';
-          const cleanTitle = stripTitleNoise(item.title) || item.title;
-          const q = `${cleanTitle} ${cleanArtist}`.trim();
+              ? String(item.artist)
+                  .split(/[,;&]/)
+                  .map(a => a.trim())
+                  .filter(Boolean)
+              : [];
+          const cleanTitle = stripTitleNoise(item.title) || String(item.title || '').trim();
+          const primaryArtist = cleanArtistPart(rawArtists[0] || '');
+          const secondaryArtist = cleanArtistPart(rawArtists[1] || '');
+          const candidateQueries = Array.from(
+            new Set(
+              [
+                `${cleanTitle} ${primaryArtist}`.trim(),
+                secondaryArtist ? `${cleanTitle} ${secondaryArtist}`.trim() : '',
+                cleanTitle.trim()
+              ].filter(Boolean)
+            )
+          );
+          const q = candidateQueries[0] || cleanTitle;
           let smallCover = null;
           let previewUrl = null;
           let directRespondedOk = false;
@@ -1231,24 +1273,30 @@ export default function HomePage() {
             networkAborted = true;
           }
 
-          // Only call VPS /api/search if browser direct call failed at network/CORS level (not when iTunes returned 0 results or 429)
-          if (!smallCover && !directRespondedOk && !rateLimited) {
-            try {
-              const fallbackRes = await fetch(`/api/search?q=${encodeURIComponent(q)}`);
-              if (fallbackRes.status === 429 || fallbackRes.status === 403) {
-                rateLimited = true;
-              } else if (fallbackRes.ok) {
-                fallbackRespondedOk = true;
-                networkAborted = false;
-                const fbData = await fallbackRes.json();
-                const fbHit = fbData?.results?.[0];
-                if (fbHit?.artwork) {
-                  smallCover = compressArtworkUrl(fbHit.artwork);
-                  previewUrl = fbHit.previewUrl || null;
+          // If iTunes direct didn't find a cover (e.g. archive/reupload track or network/CORS block),
+          // query /api/search (which checks both iTunes and Deezer API) across our cleaned candidate queries
+          if (!smallCover && !rateLimited) {
+            for (const cand of candidateQueries.slice(0, 3)) {
+              try {
+                const fallbackRes = await fetch(`/api/search?q=${encodeURIComponent(cand)}`);
+                if (fallbackRes.status === 429 || fallbackRes.status === 403) {
+                  rateLimited = true;
+                  break;
+                } else if (fallbackRes.ok) {
+                  fallbackRespondedOk = true;
+                  networkAborted = false;
+                  const fbData = await fallbackRes.json();
+                  const fbHit = fbData?.results?.[0];
+                  if (fbHit?.artwork && !isPlaceholderCover(fbHit.artwork)) {
+                    smallCover = compressArtworkUrl(fbHit.artwork);
+                    previewUrl = fbHit.previewUrl || null;
+                    break;
+                  }
                 }
+              } catch {
+                networkAborted = true;
+                break;
               }
-            } catch {
-              networkAborted = true;
             }
           }
 
@@ -1269,7 +1317,7 @@ export default function HomePage() {
             enrichedArtworkRef.current.add(String(item.id));
           }
 
-          if (smallCover) {
+          if (smallCover && !isPlaceholderCover(smallCover)) {
             const patch = { artwork: smallCover };
             if (!item.previewUrl && previewUrl) {
               patch.previewUrl = previewUrl;
@@ -1327,7 +1375,7 @@ export default function HomePage() {
         t &&
         t.id &&
         t.title &&
-        (!t.artwork || t.artwork === '/icon.svg') &&
+        isPlaceholderCover(t.artwork) &&
         !enrichedArtworkRef.current.has(String(t.id))
     );
     if (missing.length > 0) {
@@ -2423,11 +2471,15 @@ export default function HomePage() {
         >
           <div className="track-cover">
             <img
-              src={track.artwork || '/icon.svg'}
+              src={isPlaceholderCover(track.artwork) ? DEFAULT_TRACK_COVER : track.artwork}
               alt=""
               loading="lazy"
               onError={e => {
-                e.currentTarget.src = '/icon.svg';
+                e.currentTarget.src = DEFAULT_TRACK_COVER;
+                if (!isPlaceholderCover(track.artwork)) {
+                  enrichedArtworkRef.current.delete(String(track.id));
+                  updateTrackMetadataAcrossLibraries(track.id, { artwork: DEFAULT_TRACK_COVER });
+                }
               }}
             />
             <div className="track-cover-overlay">
@@ -2733,7 +2785,7 @@ export default function HomePage() {
       : 'Favoritos';
 
   const missingCoversInActiveLibrary = activeLibraryTracks.filter(
-    t => t && (!t.artwork || t.artwork === '/icon.svg')
+    t => t && isPlaceholderCover(t.artwork)
   );
 
   const normalizedLibQuery = libraryQuery
@@ -3977,10 +4029,14 @@ export default function HomePage() {
               <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
                 <div className="track-cover" style={{ width: 40, height: 40 }}>
                   <img
-                    src={downloadPrompt.track.artwork || '/icon.svg'}
+                    src={
+                      isPlaceholderCover(downloadPrompt.track.artwork)
+                        ? DEFAULT_TRACK_COVER
+                        : downloadPrompt.track.artwork
+                    }
                     alt=""
                     onError={e => {
-                      e.currentTarget.src = '/icon.svg';
+                      e.currentTarget.src = DEFAULT_TRACK_COVER;
                     }}
                   />
                 </div>
@@ -4075,10 +4131,14 @@ export default function HomePage() {
           <div className="player-main">
             <div className="player-track">
               <img
-                src={currentTrack.artwork || '/icon.svg'}
+                src={
+                  isPlaceholderCover(currentTrack.artwork)
+                    ? DEFAULT_TRACK_COVER
+                    : currentTrack.artwork
+                }
                 alt=""
                 onError={e => {
-                  e.currentTarget.src = '/icon.svg';
+                  e.currentTarget.src = DEFAULT_TRACK_COVER;
                 }}
               />
               <div style={{ minWidth: 0 }}>

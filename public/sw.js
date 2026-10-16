@@ -1,10 +1,11 @@
-const STATIC_CACHE = 'mymusic-shell-v10';
+const STATIC_CACHE = 'mymusic-shell-v11';
 const AUDIO_CACHE = 'my-music-offline-audio-v1';
 
 const PRECACHE_URLS = [
   '/',
   '/manifest.json',
   '/icon.svg',
+  '/icon.svg?v=3',
   '/apple-touch-icon.png',
   '/icons/icon-192.png',
   '/icons/icon-512.png',
@@ -100,7 +101,8 @@ self.addEventListener('fetch', (event) => {
             response.ok &&
             (url.origin === self.location.origin ||
               url.hostname.endsWith('.mzstatic.com') ||
-              url.hostname.endsWith('.scdn.co'))
+              url.hostname.endsWith('.scdn.co') ||
+              url.hostname.endsWith('.dzcdn.net'))
           ) {
             cache.put(event.request, response.clone());
           }
