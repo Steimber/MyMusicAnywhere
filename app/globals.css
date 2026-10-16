@@ -966,6 +966,23 @@ textarea {
   filter: grayscale(0.88);
 }
 
+.track-row.library-undownloaded {
+  background: color-mix(in srgb, var(--muted) 12%, var(--surface));
+  opacity: 0.54;
+  filter: grayscale(0.85);
+}
+
+.track-row.library-undownloaded:hover {
+  background: color-mix(in srgb, var(--muted) 16%, var(--surface-alt));
+  opacity: 0.76;
+  filter: grayscale(0.45);
+}
+
+.track-row.library-undownloaded .track-title,
+.track-row.library-undownloaded .track-sub {
+  color: var(--muted);
+}
+
 .track-row-main {
   display: flex;
   align-items: center;

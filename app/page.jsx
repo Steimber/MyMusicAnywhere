@@ -417,12 +417,15 @@ export default function HomePage() {
   const [pendingSpotifyImport, setPendingSpotifyImport] = useState(null);
   const [spotifyNewLibName, setSpotifyNewLibName] = useState('');
 
-  // Admin Panel
-  const [adminData, setAdminData] = useState({ users: [], invites: [], storage: null });
+  // Admin Panel & YouTube Cookies
+  const [adminData, setAdminData] = useState({ users: [], invites: [], storage: null, ytCookies: null });
   const [inviteLabel, setInviteLabel] = useState('');
   const [inviteMaxUses, setInviteMaxUses] = useState(1);
   const [adminMsg, setAdminMsg] = useState('');
   const [copiedCode, setCopiedCode] = useState('');
+  const [ytCookiesText, setYtCookiesText] = useState('');
+  const [ytCookiesBusy, setYtCookiesBusy] = useState(false);
+  const [ytCookiesMsg, setYtCookiesMsg] = useState({ type: '', text: '' });
 
   // PWA Install Prompt
   const [deferredPrompt, setDeferredPrompt] = useState(null);
@@ -933,6 +936,54 @@ export default function HomePage() {
     navigator.clipboard?.writeText(code);
     setCopiedCode(code);
     setTimeout(() => setCopiedCode(''), 2000);
+  }
+
+  async function saveYtCookiesContent(rawContent) {
+    setYtCookiesBusy(true);
+    setYtCookiesMsg({ type: '', text: '' });
+    try {
+      const res = await fetch('/api/admin', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'save_yt_cookies',
+          content: rawContent
+        })
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setYtCookiesMsg({ type: 'error', text: data.error || 'No se pudieron guardar las cookies.' });
+      } else {
+        setYtCookiesText('');
+        setYtCookiesMsg({
+          type: 'ok',
+          text: `Cookies de YouTube activas (${data.ytCookies?.cookieLines || 0} entradas guardadas en el servidor).`
+        });
+        fetchAdminData();
+      }
+    } catch {
+      setYtCookiesMsg({ type: 'error', text: 'Error de red al guardar cookies.' });
+    } finally {
+      setYtCookiesBusy(false);
+    }
+  }
+
+  async function handleClearYtCookies() {
+    setYtCookiesBusy(true);
+    setYtCookiesMsg({ type: '', text: '' });
+    try {
+      await fetch('/api/admin', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'clear_yt_cookies' })
+      });
+      setYtCookiesMsg({ type: 'ok', text: 'Cookies de YouTube eliminadas del servidor.' });
+      fetchAdminData();
+    } catch {
+      setYtCookiesMsg({ type: 'error', text: 'No se pudieron eliminar las cookies.' });
+    } finally {
+      setYtCookiesBusy(false);
+    }
   }
 
   // ==================== LIBRARIES & OFFLINE PERSISTENCE ====================
@@ -2800,10 +2851,12 @@ export default function HomePage() {
           )
         : -1;
     const isQueuedForSlot = dlSlotIndex >= MAX_SIMULTANEOUS_DOWNLOADS;
+    const trackDedupKey = getTrackDedupKey(track);
     const offItem = offlineCatalog.find(
       t =>
         String(t.id) === String(track.id) ||
-        (track.filename && t.filename === track.filename)
+        (track.filename && t.filename === track.filename) ||
+        (trackDedupKey && getTrackDedupKey(t) === trackDedupKey)
     );
     const filename = track.filename || dl?.filename || offItem?.filename;
     const streamUrl =
@@ -2816,6 +2869,10 @@ export default function HomePage() {
       Boolean(offItem) ||
       Boolean(streamUrl && offlineUrls[streamUrl]);
     const isGreyedOffline = isOffline && !isOfflineReady;
+    const isLibraryUndownloaded =
+      Boolean(contextLib && contextLib !== 'offline') &&
+      !isOfflineReady &&
+      dl?.status !== 'downloading';
     const isCurrent = currentTrack && String(currentTrack.id) === String(track.id);
     const liked = isLiked(track.id);
 
@@ -2836,7 +2893,7 @@ export default function HomePage() {
         key={`${contextLib || 'exp'}_${track.id}_${idx}`}
         className={`track-row ${isCurrent ? 'playing' : ''} ${
           isGreyedOffline ? 'offline-unavailable' : ''
-        }`.trim()}
+        } ${isLibraryUndownloaded ? 'library-undownloaded' : ''}`.trim()}
       >
         <div
           className="track-row-main"
@@ -4034,6 +4091,87 @@ export default function HomePage() {
               )}
             </div>
           </div>
+
+          {user?.is_admin && (
+            <div className="card" style={{ marginTop: 14 }}>
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap', marginBottom: 8 }}>
+                <div>
+                  <div className="track-title" style={{ fontSize: '1rem', display: 'flex', alignItems: 'center', gap: 8 }}>
+                    YouTube Prioritario (Cookies de cuenta secundaria)
+                    <span className={`pill ${adminData.ytCookies?.configured ? 'ready' : ''}`}>
+                      {adminData.ytCookies?.configured
+                        ? `Activas (${adminData.ytCookies.cookieLines} líneas)`
+                        : 'Sin configurar'}
+                    </span>
+                  </div>
+                  <div className="section-bar-sub">
+                    Guarda tu archivo <code>cookies.txt</code> (formato Netscape) en el servidor de forma privada para desbloquear YouTube como fuente #1 sin bloqueo de IP.
+                  </div>
+                </div>
+                {adminData.ytCookies?.configured && (
+                  <button
+                    type="button"
+                    className="btn danger sm"
+                    disabled={ytCookiesBusy || isOffline}
+                    onClick={handleClearYtCookies}
+                  >
+                    <Icon name="trash" size={14} /> Quitar cookies
+                  </button>
+                )}
+              </div>
+
+              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
+                <label className="btn ghost sm" style={{ cursor: isOffline ? 'not-allowed' : 'pointer' }}>
+                  <Icon name="upload" size={14} /> Subir archivo cookies.txt
+                  <input
+                    type="file"
+                    accept=".txt,text/plain"
+                    disabled={ytCookiesBusy || isOffline}
+                    style={{ display: 'none' }}
+                    onChange={async e => {
+                      const file = e.target.files?.[0];
+                      e.target.value = '';
+                      if (!file) return;
+                      const text = await file.text();
+                      await saveYtCookiesContent(text);
+                    }}
+                  />
+                </label>
+              </div>
+
+              <textarea
+                className="search-input"
+                rows={4}
+                style={{ width: '100%', fontFamily: 'monospace', fontSize: '0.76rem', resize: 'vertical', padding: '8px 10px' }}
+                placeholder="# Netscape HTTP Cookie File&#10;.youtube.com	TRUE	/	TRUE	..."
+                value={ytCookiesText}
+                disabled={ytCookiesBusy || isOffline}
+                onChange={e => setYtCookiesText(e.target.value)}
+              />
+
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginTop: 8, flexWrap: 'wrap' }}>
+                <button
+                  type="button"
+                  className="btn sm"
+                  disabled={ytCookiesBusy || isOffline || !ytCookiesText.trim()}
+                  onClick={() => saveYtCookiesContent(ytCookiesText)}
+                >
+                  <Icon name="check" size={14} /> {ytCookiesBusy ? 'Guardando…' : 'Guardar cookies en VPS'}
+                </button>
+                {ytCookiesMsg.text && (
+                  <span
+                    style={{
+                      fontSize: '0.78rem',
+                      color: ytCookiesMsg.type === 'error' ? 'var(--clay)' : 'var(--sage)',
+                      fontWeight: 600
+                    }}
+                  >
+                    {ytCookiesMsg.text}
+                  </span>
+                )}
+              </div>
+            </div>
+          )}
         </section>
       )}
 

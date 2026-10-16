@@ -6,7 +6,8 @@ import {
   getDownloadsDir,
   getSessionUser,
   enforceStorageQuota,
-  scheduleFileCleanup
+  scheduleFileCleanup,
+  getYtCookiesFilePath
 } from '../../../lib/store';
 
 if (!global.__activeDownloads) {
@@ -561,10 +562,18 @@ function scoreCandidate(cand, ctx) {
   score -= foreignTitleWords.length * 15;
 
   const extractorLower = String(cand.extractor || '').toLowerCase();
-  if (extractorLower.includes('soundcloud')) {
+  if (extractorLower.includes('youtube')) {
+    // YouTube is #1 priority for official master recordings
+    score += 38;
+    if (
+      uploaderMatchesArtist ||
+      uploaderLower.endsWith('- topic') ||
+      uploaderLower.includes('release - topic')
+    ) {
+      score += 26;
+    }
+  } else if (extractorLower.includes('soundcloud')) {
     score += 10;
-  } else if (extractorLower.includes('youtube') && uploaderMatchesArtist) {
-    score += 24;
   }
 
   return score;
@@ -650,16 +659,19 @@ function scoreLoopCandidate(cand, ctx) {
 
 function discoverCandidatesFromSearch(searchQueries) {
   return new Promise(resolve => {
+    const cookiesPath = getYtCookiesFilePath();
     const ytdlpArgs = [
       '--flat-playlist',
       '--ignore-errors',
       '--no-warnings',
       '--socket-timeout', '10',
       '--js-runtimes', 'node',
-      '--print', '%(extractor)s\t%(id)s\t%(webpage_url)s\t%(url)s\t%(duration)s\t%(uploader)s\t%(title)s',
-      '--',
-      ...searchQueries
+      '--print', '%(extractor)s\t%(id)s\t%(webpage_url)s\t%(url)s\t%(duration)s\t%(uploader)s\t%(title)s'
     ];
+    if (cookiesPath) {
+      ytdlpArgs.push('--cookies', cookiesPath);
+    }
+    ytdlpArgs.push('--', ...searchQueries);
 
     const { cmd, args } = resolveYtDlpCommand(ytdlpArgs);
     let stdoutText = '';
@@ -800,6 +812,8 @@ function runYtDlpAttempt(target, outputTemplate, options, onProgress) {
       }
     }
 
+    const cookiesPath = getYtCookiesFilePath();
+
     // Transparent VBR compression (LAME -V 5 ~128kbps VBR + 44.1kHz joint stereo at compression_level 0):
     // Matches the native 128kbps YouTube/SoundCloud source fidelity with zero audible loss while saving ~60% disk space (~2.4-3MB per track instead of ~8MB)
     const ytdlpArgs = [
@@ -819,8 +833,17 @@ function runYtDlpAttempt(target, outputTemplate, options, onProgress) {
       '-o', outputTemplate
     ];
 
+    if (cookiesPath) {
+      ytdlpArgs.push('--cookies', cookiesPath);
+    }
+
     if (/youtube\.com|youtu\.be|^ytsearch/i.test(String(target || ''))) {
-      ytdlpArgs.push('--extractor-args', 'youtube:player_client=tv,ios,mweb,web');
+      // When cookies are present, use web/mweb/web_creator/tv (which support cookies + bgutil PO token);
+      // without cookies, prioritize tv/ios/mweb/web
+      const clientList = cookiesPath
+        ? 'youtube:player_client=web,mweb,web_creator,tv'
+        : 'youtube:player_client=tv,ios,mweb,web';
+      ytdlpArgs.push('--extractor-args', clientList);
     }
 
     if (isSearchPool) {
@@ -984,10 +1007,10 @@ async function runExtractionPipeline(downloadId, rawQuery, downloadsDir, baseSlu
     );
     updateProg(14);
 
-    // Step 1: Fast candidate discovery across SoundCloud (top 25) + YouTube (top 8)
+    // Step 1: Fast candidate discovery prioritizing YouTube (#1) + SoundCloud fallback
     const discoveryQueries = [
-      `scsearch25:${artistAndCleanTitle}`,
-      `ytsearch8:${artistAndCleanTitle} official audio`
+      `ytsearch10:${artistAndCleanTitle} official audio`,
+      `scsearch20:${artistAndCleanTitle}`
     ];
     if (primaryArtist && cleanTitleOnly && cleanTitleOnly.length >= 3) {
       discoveryQueries.push(`scsearch10:${cleanTitleOnly}`);
@@ -996,7 +1019,7 @@ async function runExtractionPipeline(downloadId, rawQuery, downloadsDir, baseSlu
     const ctx = buildCandidateContext(rawTitle, cleanTitle, item.artist, expectedDurationSec);
     const rawCandidates = await discoverCandidatesFromSearch(discoveryQueries);
 
-    // Tier 1: Exact 1x studio recordings (within ±20s of canonical duration)
+    // Tier 1: Exact 1x studio recordings (within ±20s of canonical duration), YouTube ranked first
     const scoredTier1 = rawCandidates
       .map(c => ({ ...c, score: scoreCandidate(c, ctx) }))
       .filter(c => c.score >= 0)
@@ -1034,11 +1057,11 @@ async function runExtractionPipeline(downloadId, rawQuery, downloadsDir, baseSlu
       });
     }
 
-    // Fallback search pools if direct URLs all failed
+    // Fallback search pools if direct URLs all failed (YouTube #1, then SoundCloud, then Bilibili)
     const minDur = expectedDurationSec ? Math.max(45, expectedDurationSec - 15) : 55;
     const maxDur = expectedDurationSec ? expectedDurationSec + 15 : 540;
     targets.push({
-      url: `scsearch15:${artistAndCleanTitle}`,
+      url: `ytsearch8:${artistAndCleanTitle} official audio`,
       isSearchPool: true,
       minDuration: minDur,
       maxDuration: maxDur,
@@ -1046,7 +1069,7 @@ async function runExtractionPipeline(downloadId, rawQuery, downloadsDir, baseSlu
       trimDurationSec: maxAllowedDur
     });
     targets.push({
-      url: `ytsearch5:${artistAndCleanTitle} official audio`,
+      url: `scsearch15:${artistAndCleanTitle}`,
       isSearchPool: true,
       minDuration: minDur,
       maxDuration: maxDur,

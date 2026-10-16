@@ -4,7 +4,10 @@ import {
   loadStore,
   saveStore,
   getSessionUser,
-  getStorageStats
+  getStorageStats,
+  getYtCookiesStatus,
+  saveYtCookiesFile,
+  clearYtCookiesFile
 } from '../../../lib/store';
 
 function generateInviteCode() {
@@ -35,7 +38,8 @@ export async function GET(request) {
   return NextResponse.json({
     users: safeUsers,
     invites: store.invites,
-    storage: getStorageStats()
+    storage: getStorageStats(),
+    ytCookies: getYtCookiesStatus()
   });
 }
 
@@ -90,6 +94,16 @@ export async function POST(request) {
         saveStore(store);
       }
       return NextResponse.json({ ok: true });
+    }
+
+    if (action === 'save_yt_cookies') {
+      const status = saveYtCookiesFile(body.cookiesText || '');
+      return NextResponse.json({ ok: true, ytCookies: status });
+    }
+
+    if (action === 'clear_yt_cookies') {
+      const status = clearYtCookiesFile();
+      return NextResponse.json({ ok: true, ytCookies: status });
     }
 
     return NextResponse.json({ error: 'Acción inválida' }, { status: 400 });

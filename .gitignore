@@ -22,6 +22,7 @@ downloads/
 !.env.example
 *.pem
 *.key
+*cookies*.txt
 
 # Logs & OS
 npm-debug.log*
