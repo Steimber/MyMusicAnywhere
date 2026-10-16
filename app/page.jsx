@@ -38,6 +38,62 @@ function compressArtworkUrl(rawUrl) {
   return rawUrl;
 }
 
+function getTrackDedupKey(track) {
+  if (!track) return '';
+  const normTitle = String(track.title || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(
+      /\s*[-–—]\s*(remaster(ed)?(\s+\d{4})?|\d{4}\s+remaster(ed)?|radio\s+edit|album\s+version|single\s+version).*/i,
+      ''
+    )
+    .replace(/\s*\((remaster(ed)?(\s+\d{4})?|\d{4}\s+remaster(ed)?|feat\.?[^)]+|ft\.?[^)]+)\)/gi, '')
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .trim();
+  const normArtist = String(track.artist || '')
+    .split(/[,;&]/)[0]
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^\p{L}\p{N}]+/gu, ' ')
+    .trim();
+  if (!normTitle) return String(track.id || '');
+  return `${normTitle}|${normArtist}`;
+}
+
+function deduplicateTracksList(list) {
+  if (!Array.isArray(list)) return [];
+  const byKey = new Map();
+  const result = [];
+
+  for (const item of list) {
+    if (!item || !item.title) continue;
+    const key = getTrackDedupKey(item);
+    if (!byKey.has(key)) {
+      const cloned = { ...item };
+      byKey.set(key, cloned);
+      result.push(cloned);
+    } else {
+      // Merge useful fields (downloaded file, real cover, duration, previewUrl) into the existing entry
+      const existing = byKey.get(key);
+      if (!existing.filename && item.filename) existing.filename = item.filename;
+      if (!existing.streamUrl && item.streamUrl) existing.streamUrl = item.streamUrl;
+      if (isPlaceholderCover(existing.artwork) && !isPlaceholderCover(item.artwork)) {
+        existing.artwork = item.artwork;
+      }
+      if ((!existing.duration || existing.duration === '—') && item.duration && item.duration !== '—') {
+        existing.duration = item.duration;
+      }
+      if (!existing.previewUrl && item.previewUrl) {
+        existing.previewUrl = item.previewUrl;
+      }
+    }
+  }
+
+  return result;
+}
+
 const EXPLORE_CHIPS = [
   { id: 'for-you', label: 'Para vos', term: null },
   { id: 'trending', label: 'Tendencias', term: 'Top Hits Global 2025' },
@@ -526,7 +582,7 @@ export default function HomePage() {
     try {
       const savedLikes = localStorage.getItem(LIKES_STORAGE_KEY);
       if (savedLikes) {
-        const parsed = sanitizeLikedTracksList(JSON.parse(savedLikes));
+        const parsed = deduplicateTracksList(sanitizeLikedTracksList(JSON.parse(savedLikes)));
         setLikedTracks(parsed);
         localStorage.setItem(LIKES_STORAGE_KEY, JSON.stringify(parsed));
       }
@@ -534,12 +590,26 @@ export default function HomePage() {
 
     try {
       const savedOffline = localStorage.getItem(OFFLINE_CATALOG_KEY);
-      if (savedOffline) setOfflineCatalog(JSON.parse(savedOffline));
+      if (savedOffline) {
+        const parsedOff = deduplicateTracksList(JSON.parse(savedOffline));
+        setOfflineCatalog(parsedOff);
+        localStorage.setItem(OFFLINE_CATALOG_KEY, JSON.stringify(parsedOff));
+      }
     } catch {}
 
     try {
       const savedPlaylists = localStorage.getItem(PLAYLISTS_STORAGE_KEY);
-      if (savedPlaylists) setCustomPlaylists(JSON.parse(savedPlaylists));
+      if (savedPlaylists) {
+        const rawPls = JSON.parse(savedPlaylists);
+        const dedupedPls = Array.isArray(rawPls)
+          ? rawPls.map(pl => ({
+              ...pl,
+              tracks: deduplicateTracksList(pl.tracks || [])
+            }))
+          : [];
+        setCustomPlaylists(dedupedPls);
+        localStorage.setItem(PLAYLISTS_STORAGE_KEY, JSON.stringify(dedupedPls));
+      }
     } catch {}
 
     const offlineNow = typeof navigator !== 'undefined' && !navigator.onLine;
@@ -853,23 +923,31 @@ export default function HomePage() {
 
   // ==================== LIBRARIES & OFFLINE PERSISTENCE ====================
   function persistLikes(nextLikes) {
-    setLikedTracks(nextLikes);
+    const clean = deduplicateTracksList(nextLikes);
+    setLikedTracks(clean);
     try {
-      localStorage.setItem(LIKES_STORAGE_KEY, JSON.stringify(nextLikes));
+      localStorage.setItem(LIKES_STORAGE_KEY, JSON.stringify(clean));
     } catch {}
   }
 
   function persistOfflineCatalog(nextOffline) {
-    setOfflineCatalog(nextOffline);
+    const clean = deduplicateTracksList(nextOffline);
+    setOfflineCatalog(clean);
     try {
-      localStorage.setItem(OFFLINE_CATALOG_KEY, JSON.stringify(nextOffline));
+      localStorage.setItem(OFFLINE_CATALOG_KEY, JSON.stringify(clean));
     } catch {}
   }
 
   function persistCustomPlaylists(nextPlaylists) {
-    setCustomPlaylists(nextPlaylists);
+    const cleanPls = Array.isArray(nextPlaylists)
+      ? nextPlaylists.map(pl => ({
+          ...pl,
+          tracks: deduplicateTracksList(pl.tracks || [])
+        }))
+      : [];
+    setCustomPlaylists(cleanPls);
     try {
-      localStorage.setItem(PLAYLISTS_STORAGE_KEY, JSON.stringify(nextPlaylists));
+      localStorage.setItem(PLAYLISTS_STORAGE_KEY, JSON.stringify(cleanPls));
     } catch {}
   }
 
@@ -905,11 +983,22 @@ export default function HomePage() {
   function createCustomPlaylist(name, initialTracks = []) {
     const clean = (name || '').trim();
     if (!clean) return null;
+    const dedupedInitial = deduplicateTracksList(initialTracks);
+    const existingPl = customPlaylists.find(
+      p => String(p.name || '').trim().toLowerCase() === clean.toLowerCase()
+    );
+    if (existingPl) {
+      const mergedTracks = deduplicateTracksList([...dedupedInitial, ...(existingPl.tracks || [])]);
+      const updatedPl = { ...existingPl, tracks: mergedTracks };
+      const next = customPlaylists.map(p => (p.id === existingPl.id ? updatedPl : p));
+      persistCustomPlaylists(next);
+      return updatedPl;
+    }
     const newPl = {
       id: `pl_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
       name: clean,
       createdAt: Date.now(),
-      tracks: initialTracks
+      tracks: dedupedInitial
     };
     const next = [...customPlaylists, newPl];
     persistCustomPlaylists(next);
@@ -1540,6 +1629,13 @@ export default function HomePage() {
       }
     } catch {}
 
+    setDownloads(prev => {
+      const next = { ...prev };
+      delete next[track.id];
+      return next;
+    });
+    updateTrackFileAcrossLibraries(track.id, null, null);
+
     const nextOffline = offlineCatalog.filter(
       t =>
         String(t.id) !== String(track.id) &&
@@ -1757,6 +1853,7 @@ export default function HomePage() {
         body: JSON.stringify({
           title: track.title,
           artist: track.artist,
+          duration: track.duration || null,
           artwork: track.artwork,
           previewUrl: track.previewUrl || null,
           query: `${track.title} ${track.artist || ''}`.trim()
@@ -2074,7 +2171,7 @@ export default function HomePage() {
         const rawArtist = artistIdx >= 0 ? cols[artistIdx]?.trim() || '' : '';
         if (!title) continue;
         const artist = rawArtist.replace(/;/g, ', ') || 'Artista';
-        const k = `${title.toLowerCase()}|${artist.toLowerCase()}`;
+        const k = getTrackDedupKey({ title, artist });
         if (seen.has(k)) continue;
         seen.add(k);
 
@@ -2090,7 +2187,7 @@ export default function HomePage() {
           );
           if (detectedImgCol) rawImg = detectedImgCol;
         }
-        const imgUrl = rawImg ? compressArtworkUrl(rawImg) : '/icon.svg';
+        const imgUrl = rawImg ? compressArtworkUrl(rawImg) : DEFAULT_TRACK_COVER;
         const dur = durationMsIdx >= 0 ? formatMs(cols[durationMsIdx]) : '—';
 
         imported.push({
@@ -2124,12 +2221,13 @@ export default function HomePage() {
   }
 
   function openSpotifyImportModal(tracks, sourceName = 'Playlist Spotify') {
-    if (!tracks || tracks.length === 0) return;
-    setPendingSpotifyImport({ tracks, sourceName });
+    const deduped = deduplicateTracksList(tracks || []);
+    if (deduped.length === 0) return;
+    setPendingSpotifyImport({ tracks: deduped, sourceName });
     setSpotifyNewLibName(sourceName);
     setSpotifyMsg({
       type: 'ok',
-      text: `Se leyeron ${tracks.length} canciones de «${sourceName}». Elegí dónde guardarlas:`
+      text: `Se leyeron ${deduped.length} canciones únicas de «${sourceName}». Elegí dónde guardarlas:`
     });
   }
 
@@ -2142,21 +2240,17 @@ export default function HomePage() {
 
   function confirmSpotifyImport(targetType, customName = '') {
     if (!pendingSpotifyImport) return;
-    const freshTracks = pendingSpotifyImport.tracks || [];
+    const freshTracks = deduplicateTracksList(pendingSpotifyImport.tracks || []);
     const fallbackName = (customName || pendingSpotifyImport.sourceName || 'Spotify Import').trim();
 
     if (targetType === 'liked') {
-      const existingKeys = new Set(
-        likedTracks.map(t => `${t.title?.toLowerCase()}|${t.artist?.toLowerCase()}`)
-      );
-      const filtered = freshTracks.filter(
-        t => !existingKeys.has(`${t.title?.toLowerCase()}|${t.artist?.toLowerCase()}`)
-      );
+      const existingKeys = new Set(likedTracks.map(t => getTrackDedupKey(t)));
+      const filtered = freshTracks.filter(t => !existingKeys.has(getTrackDedupKey(t)));
       persistLikes([...filtered, ...likedTracks]);
       setSelectedLibrary('liked');
       setSpotifyMsg({
         type: 'ok',
-        text: `Listo: se guardaron ${filtered.length} canciones en Favoritos.`
+        text: `Listo: se guardaron ${filtered.length} canciones nuevas en Favoritos (${freshTracks.length - filtered.length} duplicadas omitidas).`
       });
       closeSpotifyImportModal();
       return;
@@ -2168,7 +2262,7 @@ export default function HomePage() {
         setSelectedLibrary(created.id);
         setSpotifyMsg({
           type: 'ok',
-          text: `Listo: se creó la librería «${created.name}» con ${freshTracks.length} canciones.`
+          text: `Listo: se guardó la librería «${created.name}» con ${created.tracks.length} canciones sin duplicados.`
         });
       }
       closeSpotifyImportModal();
@@ -2177,20 +2271,18 @@ export default function HomePage() {
 
     const targetPl = customPlaylists.find(p => p.id === targetType);
     if (targetPl) {
-      const existingKeys = new Set(
-        targetPl.tracks.map(t => `${t.title?.toLowerCase()}|${t.artist?.toLowerCase()}`)
-      );
-      const filtered = freshTracks.filter(
-        t => !existingKeys.has(`${t.title?.toLowerCase()}|${t.artist?.toLowerCase()}`)
-      );
+      const existingKeys = new Set(targetPl.tracks.map(t => getTrackDedupKey(t)));
+      const filtered = freshTracks.filter(t => !existingKeys.has(getTrackDedupKey(t)));
       const next = customPlaylists.map(p =>
-        p.id === targetPl.id ? { ...p, tracks: [...filtered, ...p.tracks] } : p
+        p.id === targetPl.id
+          ? { ...p, tracks: deduplicateTracksList([...filtered, ...p.tracks]) }
+          : p
       );
       persistCustomPlaylists(next);
       setSelectedLibrary(targetPl.id);
       setSpotifyMsg({
         type: 'ok',
-        text: `Listo: se guardaron ${filtered.length} canciones en «${targetPl.name}».`
+        text: `Listo: se guardaron ${filtered.length} canciones nuevas en «${targetPl.name}» (${freshTracks.length - filtered.length} duplicadas omitidas).`
       });
       closeSpotifyImportModal();
     }
@@ -2199,6 +2291,7 @@ export default function HomePage() {
   function isTrackAvailableOffline(track) {
     if (!track) return false;
     const dl = downloads[track.id];
+    if (dl?.status === 'ready') return true;
     const offItem = offlineCatalog.find(
       t =>
         String(t.id) === String(track.id) ||
@@ -2257,42 +2350,41 @@ export default function HomePage() {
     return order;
   }
 
-  function playFromList(list, index, startRandom = false) {
+  function playFromList(list, index, startRandom = false, options = {}) {
     if (!Array.isArray(list) || list.length === 0) return;
+    const { forceIncludeTrack = null, allowSinglePreview = false } = options || {};
+    const clickedTrack = index >= 0 && index < list.length ? list[index] : null;
 
-    if (isOffline) {
-      const clickedTrack = list[index];
-      if (clickedTrack && !isTrackAvailableOffline(clickedTrack) && !startRandom) {
-        return;
-      }
-      const playableList = list.filter(t => isTrackAvailableOffline(t));
-      if (playableList.length === 0) return;
-      const mappedIdx = clickedTrack
-        ? Math.max(
-            0,
-            playableList.findIndex(t => String(t.id) === String(clickedTrack.id))
-          )
-        : 0;
-      setQueue(playableList);
-      if (shuffle || startRandom) {
-        const order = buildSmartShuffleOrder(playableList, startRandom ? -1 : mappedIdx);
-        shuffleStateRef.current = { order, pos: 0, queueLen: playableList.length };
-        setCurrentIndex(order[0] ?? mappedIdx);
-      } else {
-        shuffleStateRef.current = { order: [], pos: -1, queueLen: playableList.length };
-        setCurrentIndex(mappedIdx);
-      }
+    if (allowSinglePreview && clickedTrack && !isTrackAvailableOffline(clickedTrack)) {
+      if (isOffline) return;
+      setQueue([clickedTrack]);
+      shuffleStateRef.current = { order: [0], pos: 0, queueLen: 1 };
+      setCurrentIndex(0);
       return;
     }
 
-    setQueue(list);
+    // Normal and shuffle playback ONLY ever queue downloaded tracks
+    const playableList = list.filter(
+      t =>
+        isTrackAvailableOffline(t) ||
+        (forceIncludeTrack && String(t.id) === String(forceIncludeTrack.id))
+    );
+    if (playableList.length === 0) return;
+
+    const targetId = forceIncludeTrack?.id ?? clickedTrack?.id;
+    const foundIdx = targetId
+      ? playableList.findIndex(t => String(t.id) === String(targetId))
+      : 0;
+    const mappedIdx = foundIdx >= 0 ? foundIdx : 0;
+
+    setQueue(playableList);
     if (shuffle || startRandom) {
-      const order = buildSmartShuffleOrder(list, startRandom ? -1 : index);
-      shuffleStateRef.current = { order, pos: 0, queueLen: list.length };
-      setCurrentIndex(order[0] ?? index);
+      const order = buildSmartShuffleOrder(playableList, startRandom ? -1 : mappedIdx);
+      shuffleStateRef.current = { order, pos: 0, queueLen: playableList.length };
+      setCurrentIndex(order[0] ?? mappedIdx);
     } else {
-      shuffleStateRef.current = { order: [], pos: -1, queueLen: list.length };
-      setCurrentIndex(index);
+      shuffleStateRef.current = { order: [], pos: -1, queueLen: playableList.length };
+      setCurrentIndex(mappedIdx);
     }
   }
 
@@ -2309,30 +2401,49 @@ export default function HomePage() {
 
   function playNext() {
     if (queue.length === 0) return;
-    if (shuffle && queue.length > 1) {
+    const validIndices = queue
+      .map((t, i) => (isTrackAvailableOffline(t) ? i : -1))
+      .filter(i => i !== -1);
+    if (validIndices.length === 0) {
+      setIsPlaying(false);
+      return;
+    }
+
+    if (shuffle && validIndices.length > 1) {
       let { order, pos, queueLen } = shuffleStateRef.current;
-      if (!Array.isArray(order) || order.length !== queue.length || queueLen !== queue.length) {
-        order = buildSmartShuffleOrder(queue, currentIndex);
-        pos = 0;
+      const filteredOrder = Array.isArray(order)
+        ? order.filter(idx => isTrackAvailableOffline(queue[idx]))
+        : [];
+      if (filteredOrder.length !== validIndices.length || queueLen !== queue.length) {
+        order = buildSmartShuffleOrder(queue, currentIndex).filter(idx =>
+          isTrackAvailableOffline(queue[idx])
+        );
+        pos = Math.max(0, order.indexOf(currentIndex));
+      } else {
+        order = filteredOrder;
       }
       const nextPos = pos + 1;
       if (nextPos < order.length) {
         shuffleStateRef.current = { order, pos: nextPos, queueLen: queue.length };
         setCurrentIndex(order[nextPos]);
       } else {
-        const freshOrder = buildSmartShuffleOrder(queue, -1);
+        const freshOrder = buildSmartShuffleOrder(queue, -1).filter(idx =>
+          isTrackAvailableOffline(queue[idx])
+        );
         if (freshOrder.length > 1 && freshOrder[0] === currentIndex) {
           [freshOrder[0], freshOrder[1]] = [freshOrder[1], freshOrder[0]];
         }
         shuffleStateRef.current = { order: freshOrder, pos: 0, queueLen: queue.length };
-        setCurrentIndex(freshOrder[0]);
+        setCurrentIndex(freshOrder[0] ?? validIndices[0]);
       }
       return;
     }
-    if (currentIndex < queue.length - 1) {
-      setCurrentIndex(currentIndex + 1);
+
+    const nextValid = validIndices.find(i => i > currentIndex);
+    if (nextValid !== undefined) {
+      setCurrentIndex(nextValid);
     } else if (repeatMode === 'all') {
-      setCurrentIndex(0);
+      setCurrentIndex(validIndices[0]);
     } else {
       setIsPlaying(false);
     }
@@ -2344,19 +2455,29 @@ export default function HomePage() {
       audioRef.current.currentTime = 0;
       return;
     }
-    if (shuffle && queue.length > 1) {
+    const validIndices = queue
+      .map((t, i) => (isTrackAvailableOffline(t) ? i : -1))
+      .filter(i => i !== -1);
+    if (validIndices.length === 0) return;
+
+    if (shuffle && validIndices.length > 1) {
       const { order, pos, queueLen } = shuffleStateRef.current;
       if (Array.isArray(order) && queueLen === queue.length && pos > 0) {
-        const prevPos = pos - 1;
-        shuffleStateRef.current = { order, pos: prevPos, queueLen: queue.length };
-        setCurrentIndex(order[prevPos]);
-        return;
+        for (let p = pos - 1; p >= 0; p--) {
+          if (isTrackAvailableOffline(queue[order[p]])) {
+            shuffleStateRef.current = { order, pos: p, queueLen: queue.length };
+            setCurrentIndex(order[p]);
+            return;
+          }
+        }
       }
     }
-    if (currentIndex > 0) {
-      setCurrentIndex(currentIndex - 1);
+
+    const prevValid = [...validIndices].reverse().find(i => i < currentIndex);
+    if (prevValid !== undefined) {
+      setCurrentIndex(prevValid);
     } else if (repeatMode === 'all') {
-      setCurrentIndex(queue.length - 1);
+      setCurrentIndex(validIndices[validIndices.length - 1]);
     }
   }
 
@@ -2446,16 +2567,15 @@ export default function HomePage() {
             }
 
             if (isCurrent) {
-              if (wasSearching) {
-                setQueue(targetList);
-                setCurrentIndex(0);
+              if (wasSearching && isOfflineReady) {
+                playFromList(targetList, 0);
                 if (!isPlaying) togglePlayPause();
               } else {
                 togglePlayPause();
               }
               return;
             }
-            if (contextLib && !isOfflineReady) {
+            if (!isOfflineReady) {
               openDownloadPromptModal(track, targetList, targetIdx);
               return;
             }
@@ -2464,7 +2584,7 @@ export default function HomePage() {
           title={
             isGreyedOffline
               ? 'Disponible solo con conexión a internet'
-              : contextLib && !isOfflineReady
+              : !isOfflineReady
               ? 'Descargar o reproducir canción'
               : 'Reproducir'
           }
@@ -2771,9 +2891,9 @@ export default function HomePage() {
       ? activeCustomPlaylist.tracks
       : likedTracks;
 
-  const playableActiveLibraryTracks = isOffline
-    ? activeLibraryTracks.filter(t => isTrackAvailableOffline(t))
-    : activeLibraryTracks;
+  const playableActiveLibraryTracks = activeLibraryTracks.filter(t =>
+    isTrackAvailableOffline(t)
+  );
 
   const activeLibraryTitle =
     selectedLibrary === 'liked'
@@ -3782,18 +3902,35 @@ export default function HomePage() {
               </button>
 
               {isTrackAvailableOffline(menuTrack.track) ? (
-                <button
-                  type="button"
-                  className="dialog-option"
-                  onClick={() => {
-                    exportTrackFile(menuTrack.track.filename, menuTrack.track.streamUrl);
-                    closeTrackMenu();
-                  }}
-                >
-                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
-                    <Icon name="file-audio" size={15} /> Exportar archivo MP3 al dispositivo
-                  </span>
-                </button>
+                <>
+                  <button
+                    type="button"
+                    className="dialog-option"
+                    onClick={() => {
+                      exportTrackFile(menuTrack.track.filename, menuTrack.track.streamUrl);
+                      closeTrackMenu();
+                    }}
+                  >
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+                      <Icon name="file-audio" size={15} /> Exportar archivo MP3 al dispositivo
+                    </span>
+                  </button>
+                  <button
+                    type="button"
+                    className="dialog-option"
+                    disabled={isOffline}
+                    onClick={async () => {
+                      const target = menuTrack.track;
+                      closeTrackMenu();
+                      await deleteOfflineTrack(target);
+                      await startDownload(target, false, true);
+                    }}
+                  >
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+                      <Icon name="refresh" size={15} /> Volver a descargar audio original (Reemplazar)
+                    </span>
+                  </button>
+                </>
               ) : (
                 <button
                   type="button"
@@ -4068,7 +4205,9 @@ export default function HomePage() {
                   closeDownloadPromptModal();
                   const ok = await startDownload(target.track, true);
                   if (ok && target.list?.length > 0) {
-                    playFromList(target.list, target.idx);
+                    playFromList(target.list, target.idx, false, {
+                      forceIncludeTrack: target.track
+                    });
                   }
                 }}
               >
@@ -4086,7 +4225,9 @@ export default function HomePage() {
                   onClick={() => {
                     const target = downloadPrompt;
                     closeDownloadPromptModal();
-                    playFromList(target.list, target.idx);
+                    playFromList(target.list, target.idx, false, {
+                      allowSinglePreview: true
+                    });
                   }}
                 >
                   <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>

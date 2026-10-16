@@ -98,13 +98,116 @@ function sanitizeSlug(text) {
 
 function stripRemasterNoise(raw) {
   return String(raw || '')
-    .replace(/\s*[-–—]\s*(remaster(ed)?(\s+\d{4})?|\d{4}\s+remaster(ed)?|radio\s+edit|album\s+version|single\s+version|explicit|clean).*/i, '')
-    .replace(/\s*\((remaster(ed)?(\s+\d{4})?|\d{4}\s+remaster(ed)?|feat\.?[^)]+|ft\.?[^)]+)\)/gi, '')
+    .replace(
+      /\s*[-–—]\s*(remaster(ed)?(\s+\d{4})?|\d{4}\s+remaster(ed)?|radio\s+edit|album\s+version|single\s+version|explicit|clean|solo|mono|stereo|\d+\/\d+.*).*/i,
+      ''
+    )
+    .replace(
+      /\s*\((remaster(ed)?(\s+\d{4})?|\d{4}\s+remaster(ed)?|feat\.?[^)]+|ft\.?[^)]+|explicit|clean|mono|stereo)\)/gi,
+      ''
+    )
+    .replace(/\s*\[[^\]]+\]/g, '')
     .replace(/\s+/g, ' ')
     .trim();
 }
 
-function runYtDlpAttempt(target, outputTemplate, isSearchPool, onProgress) {
+function cleanArtistName(raw) {
+  const first = String(raw || '')
+    .split(/[,;&]/)[0]
+    .replace(/\b(archive|archives|vault|topic|reupload|official|artista|guardado en dispositivo)\b/gi, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return first;
+}
+
+function getArtistTokens(rawArtist) {
+  const stopWords = new Set([
+    'the',
+    'los',
+    'las',
+    'les',
+    'and',
+    'con',
+    'del',
+    'por',
+    'para',
+    'feat',
+    'with',
+    'official',
+    'archive',
+    'vault',
+    'topic',
+    'music',
+    'band',
+    'dj'
+  ]);
+  return String(rawArtist || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .split(/[^a-z0-9]+/)
+    .filter(w => w.length >= 3 && !stopWords.has(w));
+}
+
+function parseDurationToSec(rawDur) {
+  if (!rawDur) return null;
+  if (typeof rawDur === 'number' && rawDur >= 45 && rawDur <= 1200) {
+    return Math.round(rawDur);
+  }
+  const str = String(rawDur).trim();
+  const parts = str.split(':').map(Number);
+  if (parts.some(isNaN)) return null;
+  let sec = 0;
+  if (parts.length === 2) {
+    sec = parts[0] * 60 + parts[1];
+  } else if (parts.length === 3) {
+    sec = parts[0] * 3600 + parts[1] * 60 + parts[2];
+  }
+  return sec >= 45 && sec <= 1200 ? sec : null;
+}
+
+function buildRejectTitleRegex(rawTitle) {
+  const lower = String(rawTitle || '').toLowerCase();
+  const banned = [
+    'cover',
+    'covered',
+    'tribute',
+    'karaoke',
+    'instrumental',
+    'nightcore',
+    '8d',
+    'slowed',
+    'reverb',
+    'parody',
+    'tutorial',
+    'lesson',
+    'guitar cover',
+    'drum cover',
+    'piano cover',
+    'vocal cover',
+    'bass cover',
+    'acapella',
+    'acappella'
+  ];
+  if (!lower.includes('remix')) {
+    banned.push('remix', 'bootleg', 'mashup', 'flip', 'rework');
+  }
+  if (!lower.includes('live') && !lower.includes('vivo')) {
+    banned.push('live at', 'live in', 'live from', 'en vivo');
+  }
+  const activeBanned = banned.filter(w => !lower.includes(w));
+  if (activeBanned.length === 0) return null;
+  return `(?i)\\b(${activeBanned.join('|')})\\b`;
+}
+
+function runYtDlpAttempt(target, outputTemplate, options, onProgress) {
+  const {
+    isSearchPool = true,
+    minDuration = 60,
+    maxDuration = 900,
+    rejectTitleRegex = null
+  } = options || {};
+
   return new Promise(resolve => {
     // Transparent VBR compression (LAME -V 5 ~128kbps VBR + 44.1kHz joint stereo at compression_level 0):
     // Matches the native 128kbps YouTube/SoundCloud source fidelity with zero audible loss while saving ~60% disk space (~2.4-3MB per track instead of ~8MB)
@@ -114,6 +217,7 @@ function runYtDlpAttempt(target, outputTemplate, isSearchPool, onProgress) {
       '--audio-quality', '5',
       '--postprocessor-args', 'ExtractAudio:-ac 2 -ar 44100 -compression_level 0',
       '--embed-metadata',
+      '--restrict-filenames',
       '--no-cache-dir',
       '--ignore-errors',
       '--socket-timeout', '15',
@@ -122,8 +226,10 @@ function runYtDlpAttempt(target, outputTemplate, isSearchPool, onProgress) {
     ];
 
     if (isSearchPool) {
-      // Skip 30-second SoundCloud Go+ previews and overly long mixes (>15 min)
-      ytdlpArgs.push('--match-filter', 'duration > 60 & duration < 900');
+      ytdlpArgs.push('--match-filter', `duration >= ${minDuration} & duration <= ${maxDuration}`);
+      if (rejectTitleRegex) {
+        ytdlpArgs.push('--reject-title', rejectTitleRegex);
+      }
       ytdlpArgs.push('--max-downloads', '1');
     } else {
       ytdlpArgs.push('--no-playlist');
@@ -185,11 +291,58 @@ function runYtDlpAttempt(target, outputTemplate, isSearchPool, onProgress) {
   });
 }
 
+function findAndValidateDownloadedMp3(downloadsDir, baseSlug, expectedMp3Path, artistTokens, requireArtistMatch) {
+  try {
+    const files = fs.readdirSync(downloadsDir);
+    const candidateName = files.find(
+      f => f.startsWith(`${baseSlug}__`) && f.toLowerCase().endsWith('.mp3')
+    );
+    if (!candidateName) {
+      return fs.existsSync(expectedMp3Path);
+    }
+    const candidatePath = path.join(downloadsDir, candidateName);
+    const stat = fs.statSync(candidatePath);
+    if (stat.size <= 400 * 1024) {
+      try {
+        fs.unlinkSync(candidatePath);
+      } catch {}
+      return false;
+    }
+
+    if (requireArtistMatch && artistTokens.length > 0) {
+      const metaPart = candidateName
+        .slice(baseSlug.length + 2)
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, ' ');
+      const matchesArtist = artistTokens.some(tok => metaPart.includes(tok));
+      if (!matchesArtist) {
+        try {
+          fs.unlinkSync(candidatePath);
+        } catch {}
+        return false;
+      }
+    }
+
+    if (fs.existsSync(expectedMp3Path)) {
+      try {
+        fs.unlinkSync(expectedMp3Path);
+      } catch {}
+    }
+    fs.renameSync(candidatePath, expectedMp3Path);
+    return true;
+  } catch {
+    return fs.existsSync(expectedMp3Path);
+  }
+}
+
 async function runExtractionPipeline(downloadId, rawQuery, downloadsDir, baseSlug) {
   const item = activeDownloads.get(downloadId);
   if (!item) return;
 
-  const outputTemplate = path.join(downloadsDir, `${baseSlug}.%(ext)s`);
+  const tempOutputTemplate = path.join(
+    downloadsDir,
+    `${baseSlug}__%(title).60s__%(uploader).40s.%(ext)s`
+  );
   const expectedMp3Name = `${baseSlug}.mp3`;
   const expectedMp3Path = path.join(downloadsDir, expectedMp3Name);
 
@@ -199,35 +352,112 @@ async function runExtractionPipeline(downloadId, rawQuery, downloadsDir, baseSlu
   };
 
   let targets = [];
+  const rawTitle = String(item.title || rawQuery || '').trim();
+  const cleanTitle = stripRemasterNoise(rawTitle) || rawTitle;
+  const primaryArtist = cleanArtistName(item.artist);
+  const artistTokens = getArtistTokens(item.artist);
+  const expectedDurationSec = parseDurationToSec(item.duration);
+  const rejectTitleRegex = buildRejectTitleRegex(rawTitle);
+
   if (/^https?:\/\//i.test(rawQuery)) {
     if (!isAllowedMediaUrl(rawQuery)) {
       item.status = 'error';
       item.error = 'Dominio de URL no permitido.';
       return;
     }
-    targets = [{ url: rawQuery, isSearchPool: false }];
+    targets = [{ url: rawQuery, isSearchPool: false, requireArtistMatch: false }];
   } else {
-    const safeQuery = sanitizeSearchQuery(rawQuery);
-    if (!safeQuery) {
+    // IMPORTANT: Strip remaster noise ONLY from title, never from the artist!
+    const artistAndCleanTitle = sanitizeSearchQuery(
+      primaryArtist ? `${primaryArtist} - ${cleanTitle}` : cleanTitle
+    );
+    const artistAndRawTitle = sanitizeSearchQuery(
+      primaryArtist ? `${primaryArtist} - ${rawTitle}` : rawTitle
+    );
+
+    if (!artistAndCleanTitle) {
       item.status = 'error';
       item.error = 'Búsqueda inválida.';
       return;
     }
-    const strippedQuery = sanitizeSearchQuery(stripRemasterNoise(rawQuery));
-    targets = [
-      { url: `scsearch10:${safeQuery}`, isSearchPool: true }
-    ];
-    if (strippedQuery && strippedQuery.toLowerCase() !== safeQuery.toLowerCase()) {
-      targets.push({ url: `scsearch10:${strippedQuery}`, isSearchPool: true });
+
+    // 1. If we know the track's exact duration (e.g. 3:09 = 189s from Spotify CSV),
+    // first search with a tight duration window (±10s) + artist verification + cover/remix rejection
+    if (expectedDurationSec && expectedDurationSec >= 65) {
+      const tightMin = Math.max(55, expectedDurationSec - 10);
+      const tightMax = expectedDurationSec + 10;
+      targets.push({
+        url: `scsearch10:${artistAndCleanTitle}`,
+        isSearchPool: true,
+        minDuration: tightMin,
+        maxDuration: tightMax,
+        rejectTitleRegex,
+        requireArtistMatch: artistTokens.length > 0
+      });
+      targets.push({
+        url: `ytsearch5:${artistAndCleanTitle} official audio`,
+        isSearchPool: true,
+        minDuration: Math.max(55, expectedDurationSec - 15),
+        maxDuration: expectedDurationSec + 15,
+        rejectTitleRegex,
+        requireArtistMatch: artistTokens.length > 0
+      });
     }
-    targets.push({ url: `ytsearch5:${strippedQuery || safeQuery} audio`, isSearchPool: true });
+
+    // 2. Standard duration window (60s-900s), still requiring artist match and rejecting covers/remixes
+    targets.push({
+      url: `scsearch10:${artistAndCleanTitle}`,
+      isSearchPool: true,
+      minDuration: 60,
+      maxDuration: 900,
+      rejectTitleRegex,
+      requireArtistMatch: artistTokens.length > 0
+    });
+
+    if (artistAndRawTitle.toLowerCase() !== artistAndCleanTitle.toLowerCase()) {
+      targets.push({
+        url: `scsearch10:${artistAndRawTitle}`,
+        isSearchPool: true,
+        minDuration: 60,
+        maxDuration: 900,
+        rejectTitleRegex,
+        requireArtistMatch: artistTokens.length > 0
+      });
+    }
+
+    targets.push({
+      url: `ytsearch5:${artistAndCleanTitle} official audio`,
+      isSearchPool: true,
+      minDuration: 60,
+      maxDuration: 900,
+      rejectTitleRegex,
+      requireArtistMatch: false
+    });
+
+    // 3. Final fallback for obscure archive/reupload tracks where the uploader name differs from the Spotify artist
+    if (artistTokens.length > 0) {
+      targets.push({
+        url: `scsearch5:${artistAndCleanTitle}`,
+        isSearchPool: true,
+        minDuration: expectedDurationSec ? Math.max(55, expectedDurationSec - 20) : 60,
+        maxDuration: expectedDurationSec ? expectedDurationSec + 20 : 900,
+        rejectTitleRegex,
+        requireArtistMatch: false
+      });
+    }
   }
 
   for (const t of targets) {
-    await runYtDlpAttempt(t.url, outputTemplate, t.isSearchPool, updateProg);
-    if (fs.existsSync(expectedMp3Path)) {
+    await runYtDlpAttempt(t.url, tempOutputTemplate, t, updateProg);
+    const valid = findAndValidateDownloadedMp3(
+      downloadsDir,
+      baseSlug,
+      expectedMp3Path,
+      artistTokens,
+      t.requireArtistMatch
+    );
+    if (valid && fs.existsSync(expectedMp3Path)) {
       const stat = fs.statSync(expectedMp3Path);
-      // Verify it's a real full track (> 400 KB at VBR V5) and not a 29-second preview snippet
       if (stat.size > 400 * 1024) {
         enforceStorageQuota();
         scheduleFileCleanup(expectedMp3Path, 90000);
@@ -245,7 +475,7 @@ async function runExtractionPipeline(downloadId, rawQuery, downloadsDir, baseSlu
 
   enforceStorageQuota();
   item.status = 'error';
-  item.error = 'No se encontró versión completa de esta pista.';
+  item.error = 'No se encontró versión original completa de esta pista.';
 }
 
 export async function POST(request) {
@@ -277,6 +507,7 @@ export async function POST(request) {
       id: downloadId,
       title: data.title || rawQuery,
       artist: data.artist || '',
+      duration: data.duration || null,
       artwork: data.artwork || '',
       status: 'downloading',
       progress: 8,
