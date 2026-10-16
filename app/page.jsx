@@ -4,11 +4,24 @@ import { useState, useEffect, useRef } from 'react';
 import { NoSleepController } from '../lib/nosleep';
 
 const AUDIO_CACHE_NAME = 'my-music-offline-audio-v1';
-const SHELL_CACHE_NAME = 'mymusic-shell-v8';
+const SHELL_CACHE_NAME = 'mymusic-shell-v10';
 const USER_STORAGE_KEY = 'mma_cached_user_v1';
 const LIKES_STORAGE_KEY = 'mma_liked_tracks_v1';
 const OFFLINE_CATALOG_KEY = 'mma_offline_catalog_v1';
 const PLAYLISTS_STORAGE_KEY = 'mma_custom_playlists_v1';
+
+function compressArtworkUrl(rawUrl) {
+  if (!rawUrl || typeof rawUrl !== 'string' || !rawUrl.startsWith('http')) return '/icon.svg';
+  // Spotify CDN: replace 640x640 (ab67616d0000b273) with compact 300x300 (ab67616d00001e02)
+  if (rawUrl.includes('i.scdn.co/image/')) {
+    return rawUrl.replace('ab67616d0000b273', 'ab67616d00001e02');
+  }
+  // Apple/iTunes CDN: use 100x100bb.jpg (~4 KB per thumbnail instead of ~80 KB 600x600bb.jpg)
+  if (rawUrl.includes('mzstatic.com')) {
+    return rawUrl.replace(/\d+x\d+bb\.(jpg|png|webp)/i, '100x100bb.jpg');
+  }
+  return rawUrl;
+}
 
 const EXPLORE_CHIPS = [
   { id: 'for-you', label: 'Para vos', term: null },
@@ -291,14 +304,19 @@ export default function HomePage() {
   const [customPlaylists, setCustomPlaylists] = useState([]);
   const [newPlaylistName, setNewPlaylistName] = useState('');
   const [creatingPlaylist, setCreatingPlaylist] = useState(false);
+  const [libraryQuery, setLibraryQuery] = useState('');
+  const enrichedArtworkRef = useRef(new Set());
+  const enrichingBusyRef = useRef(false);
 
-  // Dialogs: Track options menu ('⋯'), Save-to-Library, Spotify Import Destination
+  // Dialogs: Track options menu ('⋯'), Save-to-Library, Spotify Import Destination, Download Prompt
   const [menuTrack, setMenuTrack] = useState(null); // { track, contextLibrary }
   const [trackToSave, setTrackToSave] = useState(null);
+  const [downloadPrompt, setDownloadPrompt] = useState(null); // { track, list, idx }
   const [modalNewPlaylistName, setModalNewPlaylistName] = useState('');
   const menuDialogRef = useRef(null);
   const saveDialogRef = useRef(null);
   const spotifyDialogRef = useRef(null);
+  const downloadDialogRef = useRef(null);
 
   // Downloads & Server Files
   const [downloads, setDownloads] = useState({});
@@ -928,6 +946,43 @@ export default function HomePage() {
     setTrackToSave(null);
   }
 
+  function openDownloadPromptModal(track, list = [], idx = 0) {
+    setDownloadPrompt({ track, list, idx });
+    setTimeout(() => {
+      if (
+        downloadDialogRef.current &&
+        !downloadDialogRef.current.open &&
+        typeof downloadDialogRef.current.showModal === 'function'
+      ) {
+        downloadDialogRef.current.showModal();
+      }
+    }, 15);
+  }
+
+  function closeDownloadPromptModal() {
+    if (downloadDialogRef.current && downloadDialogRef.current.open) {
+      downloadDialogRef.current.close();
+    }
+    setDownloadPrompt(null);
+  }
+
+  function handleDialogBackdropClick(e, closeFn) {
+    if (typeof HTMLDialogElement !== 'undefined' && 'closedBy' in HTMLDialogElement.prototype) {
+      return;
+    }
+    const dialog = e.currentTarget;
+    if (e.target !== dialog) return;
+    const rect = dialog.getBoundingClientRect();
+    const isDialogContent =
+      rect.top <= e.clientY &&
+      e.clientY <= rect.top + rect.height &&
+      rect.left <= e.clientX &&
+      e.clientX <= rect.left + rect.width;
+    if (!isDialogContent) {
+      closeFn();
+    }
+  }
+
   function updateTrackFileAcrossLibraries(trackId, filename, streamUrl) {
     setLikedTracks(prev => {
       if (!prev.some(t => String(t.id) === String(trackId))) return prev;
@@ -961,6 +1016,143 @@ export default function HomePage() {
       return prev;
     });
   }
+
+  function updateTrackMetadataAcrossLibraries(trackId, patch) {
+    setLikedTracks(prev => {
+      if (!prev.some(t => String(t.id) === String(trackId))) return prev;
+      const updated = prev.map(t =>
+        String(t.id) === String(trackId) ? { ...t, ...patch } : t
+      );
+      try {
+        localStorage.setItem(LIKES_STORAGE_KEY, JSON.stringify(updated));
+      } catch {}
+      return updated;
+    });
+
+    setOfflineCatalog(prev => {
+      if (!prev.some(t => String(t.id) === String(trackId))) return prev;
+      const updated = prev.map(t =>
+        String(t.id) === String(trackId) ? { ...t, ...patch } : t
+      );
+      try {
+        localStorage.setItem(OFFLINE_CATALOG_KEY, JSON.stringify(updated));
+      } catch {}
+      return updated;
+    });
+
+    setCustomPlaylists(prev => {
+      let changed = false;
+      const updated = prev.map(pl => {
+        if (!pl.tracks.some(t => String(t.id) === String(trackId))) return pl;
+        changed = true;
+        return {
+          ...pl,
+          tracks: pl.tracks.map(t =>
+            String(t.id) === String(trackId) ? { ...t, ...patch } : t
+          )
+        };
+      });
+      if (changed) {
+        try {
+          localStorage.setItem(PLAYLISTS_STORAGE_KEY, JSON.stringify(updated));
+        } catch {}
+        return updated;
+      }
+      return prev;
+    });
+  }
+
+  // Moves the chosen track to position #1 (index 0) of the specified library and returns the reordered full list
+  function promoteTrackToTopOfLibrary(libId, track) {
+    if (!libId || !track) return [];
+    const matchTrack = t =>
+      String(t.id) === String(track.id) ||
+      (track.filename && t.filename === track.filename);
+
+    if (libId === 'liked') {
+      const rest = likedTracks.filter(t => !matchTrack(t));
+      const reordered = [track, ...rest];
+      persistLikes(reordered);
+      return reordered;
+    }
+
+    if (libId === 'offline') {
+      const rest = offlineCatalog.filter(t => !matchTrack(t));
+      const reordered = [track, ...rest];
+      persistOfflineCatalog(reordered);
+      return reordered;
+    }
+
+    const targetPl = customPlaylists.find(p => p.id === libId);
+    if (targetPl) {
+      const rest = targetPl.tracks.filter(t => !matchTrack(t));
+      const reordered = [track, ...rest];
+      const nextPlaylists = customPlaylists.map(pl =>
+        pl.id === libId ? { ...pl, tracks: reordered } : pl
+      );
+      persistCustomPlaylists(nextPlaylists);
+      return reordered;
+    }
+
+    return [track];
+  }
+
+  // Automatically resolve & compress missing album covers (~4 KB 100x100bb.jpg) for CSV-imported tracks
+  useEffect(() => {
+    if (!user || isOffline || enrichingBusyRef.current) return;
+    const activePl = customPlaylists.find(p => p.id === selectedLibrary);
+    const pool = [
+      ...(activePl ? activePl.tracks : []),
+      ...likedTracks,
+      ...offlineCatalog
+    ];
+    const missing = pool.filter(
+      t =>
+        t &&
+        t.id &&
+        t.title &&
+        (!t.artwork || t.artwork === '/icon.svg') &&
+        !enrichedArtworkRef.current.has(String(t.id))
+    );
+    if (missing.length === 0) return;
+
+    enrichingBusyRef.current = true;
+
+    (async () => {
+      try {
+        const batch = missing.slice(0, 40);
+        for (const item of batch) {
+          if (typeof navigator !== 'undefined' && navigator.onLine === false) break;
+          enrichedArtworkRef.current.add(String(item.id));
+          try {
+            const cleanArtist =
+              item.artist && item.artist !== 'Artista' && item.artist !== 'Guardado en dispositivo'
+                ? item.artist.split(',')[0].trim()
+                : '';
+            const q = `${item.title} ${cleanArtist}`.trim();
+            const res = await fetch(
+              `https://itunes.apple.com/search?term=${encodeURIComponent(q)}&media=music&entity=song&limit=1`
+            );
+            if (res.ok) {
+              const data = await res.json();
+              const hit = data?.results?.[0];
+              if (hit?.artworkUrl100) {
+                const smallCover = compressArtworkUrl(hit.artworkUrl100);
+                const patch = { artwork: smallCover };
+                if (!item.previewUrl && hit.previewUrl) {
+                  patch.previewUrl = hit.previewUrl;
+                }
+                updateTrackMetadataAcrossLibraries(item.id, patch);
+              }
+            }
+          } catch {}
+          await new Promise(r => setTimeout(r, 320));
+        }
+      } finally {
+        enrichingBusyRef.current = false;
+      }
+    })();
+  }, [user, isOffline, selectedLibrary, likedTracks.length, customPlaylists]);
 
   async function refreshOfflineCacheList() {
     if (typeof window === 'undefined') return;
@@ -1535,7 +1727,14 @@ export default function HomePage() {
         h => h.includes('album name') || h.includes('nombre del album') || h === 'album'
       );
       const imageIdx = headers.findIndex(
-        h => h.includes('image url') || h.includes('imagen') || h === 'artwork' || h === 'cover'
+        h =>
+          h.includes('image') ||
+          h.includes('imagen') ||
+          h.includes('artwork') ||
+          h.includes('cover') ||
+          h.includes('portada') ||
+          h.includes('thumb') ||
+          h.includes('foto')
       );
       const durationMsIdx = headers.findIndex(
         h => h.includes('duration') || h.includes('duracion')
@@ -1581,7 +1780,19 @@ export default function HomePage() {
         if (seen.has(k)) continue;
         seen.add(k);
 
-        const imgUrl = imageIdx >= 0 && cols[imageIdx]?.startsWith('http') ? cols[imageIdx] : '/icon.svg';
+        let rawImg = imageIdx >= 0 && cols[imageIdx]?.startsWith('http') ? cols[imageIdx] : null;
+        if (!rawImg) {
+          const detectedImgCol = cols.find(
+            c =>
+              c &&
+              c.startsWith('http') &&
+              (c.includes('scdn.co/image/') ||
+                c.includes('mzstatic.com') ||
+                /\.(jpg|jpeg|png|webp)(\?|$)/i.test(c))
+          );
+          if (detectedImgCol) rawImg = detectedImgCol;
+        }
+        const imgUrl = rawImg ? compressArtworkUrl(rawImg) : '/icon.svg';
         const dur = durationMsIdx >= 0 ? formatMs(cols[durationMsIdx]) : '—';
 
         imported.push({
@@ -1923,13 +2134,42 @@ export default function HomePage() {
           className="track-row-main"
           onClick={() => {
             if (isGreyedOffline) return;
-            if (isCurrent) {
-              togglePlayPause();
-            } else {
-              playFromList(list, idx);
+            let targetList = list;
+            let targetIdx = idx;
+            const wasSearching = Boolean(contextLib && libraryQuery.trim());
+
+            if (wasSearching) {
+              const reordered = promoteTrackToTopOfLibrary(contextLib, track);
+              if (reordered.length > 0) {
+                targetList = reordered;
+                targetIdx = 0;
+              }
+              setLibraryQuery('');
             }
+
+            if (isCurrent) {
+              if (wasSearching) {
+                setQueue(targetList);
+                setCurrentIndex(0);
+                if (!isPlaying) togglePlayPause();
+              } else {
+                togglePlayPause();
+              }
+              return;
+            }
+            if (contextLib && !isOfflineReady) {
+              openDownloadPromptModal(track, targetList, targetIdx);
+              return;
+            }
+            playFromList(targetList, targetIdx);
           }}
-          title={isGreyedOffline ? 'Disponible solo con conexión a internet' : 'Reproducir'}
+          title={
+            isGreyedOffline
+              ? 'Disponible solo con conexión a internet'
+              : contextLib && !isOfflineReady
+              ? 'Descargar o reproducir canción'
+              : 'Reproducir'
+          }
         >
           <div className="track-cover">
             <img
@@ -2242,6 +2482,22 @@ export default function HomePage() {
       ? activeCustomPlaylist.name
       : 'Favoritos';
 
+  const normalizedLibQuery = libraryQuery
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
+
+  const filteredLibraryTracks = normalizedLibQuery
+    ? activeLibraryTracks.filter(t => {
+        const hay = `${t.title || ''} ${t.artist || ''} ${t.album || ''}`
+          .toLowerCase()
+          .normalize('NFD')
+          .replace(/[\u0300-\u036f]/g, '');
+        return hay.includes(normalizedLibQuery);
+      })
+    : activeLibraryTracks;
+
   const topFrequentArtists = getLikedCategories().slice(0, 5);
 
   return (
@@ -2543,7 +2799,10 @@ export default function HomePage() {
             <button
               type="button"
               className={`library-pill ${selectedLibrary === 'liked' ? 'active' : ''}`}
-              onClick={() => setSelectedLibrary('liked')}
+              onClick={() => {
+                setSelectedLibrary('liked');
+                setLibraryQuery('');
+              }}
             >
               <Icon name="heart-fill" size={13} />
               <span>Favoritos</span>
@@ -2553,7 +2812,10 @@ export default function HomePage() {
             <button
               type="button"
               className={`library-pill ${selectedLibrary === 'offline' ? 'active' : ''}`}
-              onClick={() => setSelectedLibrary('offline')}
+              onClick={() => {
+                setSelectedLibrary('offline');
+                setLibraryQuery('');
+              }}
             >
               <Icon name="offline-pin" size={13} />
               <span>Offline</span>
@@ -2565,7 +2827,10 @@ export default function HomePage() {
                 key={pl.id}
                 type="button"
                 className={`library-pill ${selectedLibrary === pl.id ? 'active' : ''}`}
-                onClick={() => setSelectedLibrary(pl.id)}
+                onClick={() => {
+                  setSelectedLibrary(pl.id);
+                  setLibraryQuery('');
+                }}
               >
                 <Icon name="folder" size={13} />
                 <span>{pl.name}</span>
@@ -2595,6 +2860,7 @@ export default function HomePage() {
                   setNewPlaylistName('');
                   setCreatingPlaylist(false);
                   setSelectedLibrary(created.id);
+                  setLibraryQuery('');
                 }
               }}
             >
@@ -2691,6 +2957,45 @@ export default function HomePage() {
             </div>
           </div>
 
+          {activeLibraryTracks.length > 0 && (
+            <div style={{ marginBottom: 14 }}>
+              <div className="search-bar" style={{ marginBottom: libraryQuery.trim() ? 6 : 0 }}>
+                <span className="search-icon">
+                  <Icon name="search" size={16} />
+                </span>
+                <input
+                  type="search"
+                  className="search-input"
+                  placeholder={`Buscar en ${activeLibraryTitle} (canción, artista o álbum)…`}
+                  value={libraryQuery}
+                  onChange={e => setLibraryQuery(e.target.value)}
+                />
+                {libraryQuery && (
+                  <button
+                    type="button"
+                    className="btn ghost sm"
+                    onClick={() => setLibraryQuery('')}
+                    aria-label="Limpiar búsqueda"
+                  >
+                    <Icon name="close" size={15} />
+                  </button>
+                )}
+              </div>
+              {libraryQuery.trim() && (
+                <div
+                  style={{
+                    fontSize: '0.75rem',
+                    color: 'var(--text-secondary)',
+                    paddingLeft: 4
+                  }}
+                >
+                  Tocá cualquier resultado para subirlo al #1 y reproducir tu librería desde ahí ({filteredLibraryTracks.length}{' '}
+                  {filteredLibraryTracks.length === 1 ? 'resultado' : 'resultados'})
+                </div>
+              )}
+            </div>
+          )}
+
           {activeLibraryTracks.length === 0 ? (
             <div className="empty">
               <div className="empty-title">Sin canciones todavía</div>
@@ -2702,9 +3007,14 @@ export default function HomePage() {
                   : 'Usá el menú (⋯) en cualquier canción para guardarla en esta librería.'}
               </p>
             </div>
+          ) : filteredLibraryTracks.length === 0 ? (
+            <div className="empty">
+              <div className="empty-title">Sin coincidencias en {activeLibraryTitle}</div>
+              <p>No encontramos «{libraryQuery}» en esta librería.</p>
+            </div>
           ) : (
             <div className="track-list">
-              {activeLibraryTracks.map((track, idx) =>
+              {filteredLibraryTracks.map((track, idx) =>
                 renderTrackRow(track, idx, activeLibraryTracks, selectedLibrary)
               )}
             </div>
@@ -3078,6 +3388,7 @@ export default function HomePage() {
         className="save-dialog"
         aria-labelledby="track-menu-title"
         onClose={() => setMenuTrack(null)}
+        onClick={e => handleDialogBackdropClick(e, closeTrackMenu)}
       >
         {menuTrack?.track && (
           <div>
@@ -3196,6 +3507,7 @@ export default function HomePage() {
         className="save-dialog"
         aria-labelledby="save-dialog-title"
         onClose={() => setTrackToSave(null)}
+        onClick={e => handleDialogBackdropClick(e, closeSaveModal)}
       >
         {trackToSave && (
           <div>
@@ -3287,6 +3599,7 @@ export default function HomePage() {
         closedby="any"
         className="save-dialog"
         aria-labelledby="spotify-dialog-title"
+        onClick={e => handleDialogBackdropClick(e, closeSpotifyImportModal)}
       >
         {pendingSpotifyImport && (
           <div>
@@ -3351,6 +3664,97 @@ export default function HomePage() {
                 <Icon name="plus" size={13} /> Crear y guardar
               </button>
             </form>
+          </div>
+        )}
+      </dialog>
+
+      {/* ==================== DIALOG 4: DOWNLOAD UNDOWNLOADED LIBRARY TRACK MODAL ==================== */}
+      <dialog
+        ref={downloadDialogRef}
+        closedby="any"
+        className="save-dialog"
+        aria-labelledby="download-dialog-title"
+        onClose={() => setDownloadPrompt(null)}
+        onClick={e => handleDialogBackdropClick(e, closeDownloadPromptModal)}
+      >
+        {downloadPrompt?.track && (
+          <div>
+            <div className="dialog-head">
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, minWidth: 0 }}>
+                <div className="track-cover" style={{ width: 40, height: 40 }}>
+                  <img
+                    src={downloadPrompt.track.artwork || '/icon.svg'}
+                    alt=""
+                    onError={e => {
+                      e.currentTarget.src = '/icon.svg';
+                    }}
+                  />
+                </div>
+                <div style={{ minWidth: 0 }}>
+                  <div id="download-dialog-title" className="dialog-title">
+                    ¿Deseás descargar esta canción?
+                  </div>
+                  <div className="dialog-sub">
+                    {downloadPrompt.track.title} · {downloadPrompt.track.artist}
+                  </div>
+                </div>
+              </div>
+              <button type="button" className="icon-btn" onClick={closeDownloadPromptModal}>
+                <Icon name="close" size={16} />
+              </button>
+            </div>
+
+            <p style={{ fontSize: '0.84rem', color: 'var(--text-muted)', margin: '0 0 12px' }}>
+              Esta canción de tu librería todavía no está descargada en el dispositivo para escuchar sin internet.
+            </p>
+
+            <div className="dialog-list">
+              <button
+                type="button"
+                className="dialog-option selected"
+                disabled={isOffline}
+                onClick={async () => {
+                  const target = downloadPrompt;
+                  closeDownloadPromptModal();
+                  const ok = await startDownload(target.track, true);
+                  if (ok && target.list?.length > 0) {
+                    playFromList(target.list, target.idx);
+                  }
+                }}
+              >
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+                  <Icon name="download" size={15} /> Sí, descargar y reproducir
+                </span>
+                <Icon name="arrow-right" size={14} />
+              </button>
+
+              {downloadPrompt.track.previewUrl && (
+                <button
+                  type="button"
+                  className="dialog-option"
+                  disabled={isOffline}
+                  onClick={() => {
+                    const target = downloadPrompt;
+                    closeDownloadPromptModal();
+                    playFromList(target.list, target.idx);
+                  }}
+                >
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+                    <Icon name="play" size={15} /> Solo escuchar vista previa (30 s)
+                  </span>
+                </button>
+              )}
+
+              <button
+                type="button"
+                className="dialog-option"
+                onClick={closeDownloadPromptModal}
+              >
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+                  <Icon name="close" size={15} /> Cancelar
+                </span>
+              </button>
+            </div>
           </div>
         )}
       </dialog>

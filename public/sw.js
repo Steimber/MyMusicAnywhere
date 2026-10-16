@@ -1,4 +1,4 @@
-const STATIC_CACHE = 'mymusic-shell-v8';
+const STATIC_CACHE = 'mymusic-shell-v10';
 const AUDIO_CACHE = 'my-music-offline-audio-v1';
 
 const PRECACHE_URLS = [
@@ -95,7 +95,13 @@ self.addEventListener('fetch', (event) => {
       const cached = await cache.match(event.request);
       const networkFetch = fetch(event.request)
         .then((response) => {
-          if (response && response.ok && (url.origin === self.location.origin || url.hostname.endsWith('.mzstatic.com'))) {
+          if (
+            response &&
+            response.ok &&
+            (url.origin === self.location.origin ||
+              url.hostname.endsWith('.mzstatic.com') ||
+              url.hostname.endsWith('.scdn.co'))
+          ) {
             cache.put(event.request, response.clone());
           }
           return response;
