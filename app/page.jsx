@@ -1616,11 +1616,15 @@ export default function HomePage() {
 
       // In bulk queue mode, wait until this track completes extraction + offline caching + VPS cleanup
       const startedAt = Date.now();
-      while (Date.now() - startedAt < 85000 && !cancelSyncRef.current) {
+      while (Date.now() - startedAt < 95000 && !cancelSyncRef.current) {
         await new Promise(r => setTimeout(r, 1500));
         try {
-          const checkRes = await fetch(`/api/download?id=${dlId}`);
-          if (!checkRes.ok) break;
+          const checkRes = await fetch(`/api/download?id=${dlId}`, { cache: 'no-store' });
+          if (checkRes.status === 404) {
+            setDownloads(prev => ({ ...prev, [key]: { status: 'error' } }));
+            return false;
+          }
+          if (!checkRes.ok) continue;
           const checkData = await checkRes.json();
           if (checkData.status === 'ready' && checkData.filename) {
             const streamUrl = `/api/stream?file=${encodeURIComponent(checkData.filename)}`;
@@ -1645,9 +1649,10 @@ export default function HomePage() {
             return false;
           }
         } catch {
-          break;
+          // Transient mobile network handoff: keep polling until timeout
         }
       }
+      setDownloads(prev => ({ ...prev, [key]: { status: 'error' } }));
       return false;
     } catch {
       setDownloads(prev => ({ ...prev, [key]: { status: 'error' } }));
@@ -1676,18 +1681,27 @@ export default function HomePage() {
 
     cancelSyncRef.current = false;
     setSyncingAll(true);
-    setSyncProgress({ done: 0, total: pending.length });
+    setSyncProgress({ done: 0, total: pending.length, currentTitle: pending[0]?.title || '' });
 
     let completed = 0;
     try {
       for (const track of pending) {
         if (cancelSyncRef.current) break;
+        setSyncProgress({
+          done: completed,
+          total: pending.length,
+          currentTitle: track.title || ''
+        });
         const streamUrl =
           track.streamUrl ||
           (track.filename ? `/api/stream?file=${encodeURIComponent(track.filename)}` : null);
         if (streamUrl && offlineUrls[streamUrl]) {
           completed += 1;
-          setSyncProgress({ done: completed, total: pending.length });
+          setSyncProgress({
+            done: completed,
+            total: pending.length,
+            currentTitle: track.title || ''
+          });
           continue;
         }
         if (streamUrl) {
@@ -1696,7 +1710,11 @@ export default function HomePage() {
           await startDownload(track, true);
         }
         completed += 1;
-        setSyncProgress({ done: completed, total: pending.length });
+        setSyncProgress({
+          done: completed,
+          total: pending.length,
+          currentTitle: track.title || ''
+        });
       }
     } finally {
       noSleepRef.current?.disable();
@@ -2954,19 +2972,23 @@ export default function HomePage() {
             <div className="playlist-header-info">
               <h1 className="playlist-header-title">{activeLibraryTitle}</h1>
               <div className="playlist-header-meta">
-                {activeLibraryTracks.length}{' '}
-                {activeLibraryTracks.length === 1 ? 'canción' : 'canciones'}
                 {syncingAll && syncProgress.total > 0
-                  ? ` · Descargando ${syncProgress.done}/${syncProgress.total} · Pantalla activa (tocá para pausar)`
+                  ? `⚡ ${syncProgress.done}/${syncProgress.total}${
+                      syncProgress.currentTitle ? ` · ${syncProgress.currentTitle}` : ''
+                    }`
                   : coverSync.active && coverSync.total > 0
-                  ? ` · Cargando portadas ${coverSync.done}/${coverSync.total} (~4 KB c/u)`
-                  : missingCoversInActiveLibrary.length > 0 && !isOffline
-                  ? ` · ${missingCoversInActiveLibrary.length} sin portada`
-                  : selectedLibrary === 'offline' && deviceQuota
-                  ? ` · ${deviceQuota.usedMB} MB en dispositivo`
-                  : isOffline && playableActiveLibraryTracks.length < activeLibraryTracks.length
-                  ? ` · ${playableActiveLibraryTracks.length} disponibles sin red`
-                  : ''}
+                  ? `🖼 Portadas ${coverSync.done}/${coverSync.total} · ${activeLibraryTracks.length} canciones`
+                  : `${activeLibraryTracks.length} ${
+                      activeLibraryTracks.length === 1 ? 'canción' : 'canciones'
+                    }${
+                      missingCoversInActiveLibrary.length > 0 && !isOffline
+                        ? ` · ${missingCoversInActiveLibrary.length} sin portada`
+                        : selectedLibrary === 'offline' && deviceQuota
+                        ? ` · ${deviceQuota.usedMB} MB en dispositivo`
+                        : isOffline && playableActiveLibraryTracks.length < activeLibraryTracks.length
+                        ? ` · ${playableActiveLibraryTracks.length} disponibles sin red`
+                        : ''
+                    }`}
               </div>
             </div>
 

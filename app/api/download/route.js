@@ -96,6 +96,14 @@ function sanitizeSlug(text) {
   return (clean || 'track').slice(0, 60);
 }
 
+function stripRemasterNoise(raw) {
+  return String(raw || '')
+    .replace(/\s*[-–—]\s*(remaster(ed)?(\s+\d{4})?|\d{4}\s+remaster(ed)?|radio\s+edit|album\s+version|single\s+version|explicit|clean).*/i, '')
+    .replace(/\s*\((remaster(ed)?(\s+\d{4})?|\d{4}\s+remaster(ed)?|feat\.?[^)]+|ft\.?[^)]+)\)/gi, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
 function runYtDlpAttempt(target, outputTemplate, isSearchPool, onProgress) {
   return new Promise(resolve => {
     // Transparent VBR compression (LAME -V 5 ~128kbps VBR + 44.1kHz joint stereo at compression_level 0):
@@ -107,13 +115,15 @@ function runYtDlpAttempt(target, outputTemplate, isSearchPool, onProgress) {
       '--postprocessor-args', 'ExtractAudio:-ac 2 -ar 44100 -compression_level 0',
       '--embed-metadata',
       '--no-cache-dir',
+      '--ignore-errors',
+      '--socket-timeout', '15',
       '--newline',
       '-o', outputTemplate
     ];
 
     if (isSearchPool) {
       // Skip 30-second SoundCloud Go+ previews and overly long mixes (>15 min)
-      ytdlpArgs.push('--match-filter', 'duration > 65 & duration < 900');
+      ytdlpArgs.push('--match-filter', 'duration > 60 & duration < 900');
       ytdlpArgs.push('--max-downloads', '1');
     } else {
       ytdlpArgs.push('--no-playlist');
@@ -128,6 +138,7 @@ function runYtDlpAttempt(target, outputTemplate, isSearchPool, onProgress) {
 
     const { cmd, args } = resolveYtDlpCommand(ytdlpArgs);
     let stderrText = '';
+    let settled = false;
 
     let child;
     try {
@@ -135,6 +146,21 @@ function runYtDlpAttempt(target, outputTemplate, isSearchPool, onProgress) {
     } catch (err) {
       return resolve({ ok: false, error: err.message });
     }
+
+    const finish = result => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(killTimer);
+      resolve(result);
+    };
+
+    // Guard against stuck connections so the extraction pool never deadlocks
+    const killTimer = setTimeout(() => {
+      try {
+        child.kill('SIGKILL');
+      } catch {}
+      finish({ ok: false, error: 'Tiempo de espera agotado en extracción' });
+    }, 45000);
 
     child.stdout.on('data', d => {
       const text = d.toString();
@@ -149,12 +175,12 @@ function runYtDlpAttempt(target, outputTemplate, isSearchPool, onProgress) {
     });
 
     child.on('error', err => {
-      resolve({ ok: false, error: err.message });
+      finish({ ok: false, error: err.message });
     });
 
     child.on('close', code => {
       // Exit code 101 in yt-dlp means --max-downloads limit was reached after downloading the 1st valid full song
-      resolve({ ok: code === 0 || code === 101, code, error: stderrText.slice(-300) });
+      finish({ ok: code === 0 || code === 101, code, error: stderrText.slice(-300) });
     });
   });
 }
@@ -187,18 +213,22 @@ async function runExtractionPipeline(downloadId, rawQuery, downloadsDir, baseSlu
       item.error = 'Búsqueda inválida.';
       return;
     }
+    const strippedQuery = sanitizeSearchQuery(stripRemasterNoise(rawQuery));
     targets = [
-      { url: `scsearch8:${safeQuery}`, isSearchPool: true },
-      { url: `ytsearch5:${safeQuery}`, isSearchPool: true }
+      { url: `scsearch10:${safeQuery}`, isSearchPool: true }
     ];
+    if (strippedQuery && strippedQuery.toLowerCase() !== safeQuery.toLowerCase()) {
+      targets.push({ url: `scsearch10:${strippedQuery}`, isSearchPool: true });
+    }
+    targets.push({ url: `ytsearch5:${strippedQuery || safeQuery} audio`, isSearchPool: true });
   }
 
   for (const t of targets) {
-    const res = await runYtDlpAttempt(t.url, outputTemplate, t.isSearchPool, updateProg);
-    if (res.ok && fs.existsSync(expectedMp3Path)) {
+    await runYtDlpAttempt(t.url, outputTemplate, t.isSearchPool, updateProg);
+    if (fs.existsSync(expectedMp3Path)) {
       const stat = fs.statSync(expectedMp3Path);
-      // Verify it's a real full track (> 480 KB at VBR V5) and not a 29-second preview snippet
-      if (stat.size > 480 * 1024) {
+      // Verify it's a real full track (> 400 KB at VBR V5) and not a 29-second preview snippet
+      if (stat.size > 400 * 1024) {
         enforceStorageQuota();
         scheduleFileCleanup(expectedMp3Path, 90000);
         item.status = 'ready';
