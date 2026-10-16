@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="grad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#818cf8"/>
+      <stop offset="50%" stop-color="#6366f1"/>
+      <stop offset="100%" stop-color="#4338ca"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" rx="128" fill="url(#grad)"/>
+  <!-- Musical note icon -->
+  <path d="M352 112v198.5c-9.6-6-21.7-9.5-35-9.5-37 0-67 25.5-67 57s30 57 67 57 67-25.5 67-57V188l80-24v-52l-112 0zM176 280c-37 0-67 25.5-67 57s30 57 67 57 67-25.5 67-57V144l112-32v-40L176 104v176z" fill="#ffffff" fill-opacity="0.95"/>
+</svg>

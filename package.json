@@ -1,0 +1,17 @@
+{
+  "name": "mymusicanywhere",
+  "version": "1.0.0",
+  "private": true,
+  "description": "myMusicAnywhere • Progressive Web App Audio Player & Offline Media Library",
+  "scripts": {
+    "dev": "next dev -H 0.0.0.0 -p 3333",
+    "build": "next build",
+    "start": "next start -H 0.0.0.0 -p 3333"
+  },
+  "dependencies": {
+    "lucide-react": "^0.453.0",
+    "next": "^14.2.15",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  }
+}

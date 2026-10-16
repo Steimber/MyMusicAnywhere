@@ -1,0 +1,29 @@
+# Dependencies
+node_modules/
+
+# Next.js build output
+.next/
+out/
+build/
+dist/
+
+# Media storage & local audio cache
+downloads/
+*.mp3
+*.m4a
+*.opus
+*.wav
+*.flac
+
+# Environment & secrets
+.env
+.env.*
+*.pem
+*.key
+
+# Logs & OS
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.DS_Store
+Thumbs.db
