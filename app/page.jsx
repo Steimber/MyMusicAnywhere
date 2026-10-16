@@ -268,6 +268,14 @@ function Icon({ name, size = 16, className = '' }) {
           <polyline points="12 5 19 12 12 19" />
         </svg>
       );
+    case 'image':
+      return (
+        <svg {...props}>
+          <rect x="3" y="3" width="18" height="18" rx="2" ry="2" />
+          <circle cx="8.5" cy="8.5" r="1.5" />
+          <polyline points="21 15 16 10 5 21" />
+        </svg>
+      );
     default:
       return null;
   }
@@ -305,8 +313,10 @@ export default function HomePage() {
   const [newPlaylistName, setNewPlaylistName] = useState('');
   const [creatingPlaylist, setCreatingPlaylist] = useState(false);
   const [libraryQuery, setLibraryQuery] = useState('');
+  const [coverSync, setCoverSync] = useState({ active: false, done: 0, total: 0 });
   const enrichedArtworkRef = useRef(new Set());
   const enrichingBusyRef = useRef(false);
+  const cancelCoverSyncRef = useRef(false);
 
   // Dialogs: Track options menu ('⋯'), Save-to-Library, Spotify Import Destination, Download Prompt
   const [menuTrack, setMenuTrack] = useState(null); // { track, contextLibrary }
@@ -1097,14 +1107,106 @@ export default function HomePage() {
     return [track];
   }
 
-  // Automatically resolve & compress missing album covers (~4 KB 100x100bb.jpg) for CSV-imported tracks
+  // Resolve & compress missing album covers (~4 KB 100x100bb.jpg) for already-imported CSV tracks
+  async function syncMissingCoversForList(targetTracks, manualClick = false) {
+    if (isOffline) return;
+    if (enrichingBusyRef.current) {
+      if (manualClick) {
+        cancelCoverSyncRef.current = true;
+      }
+      return;
+    }
+
+    const missing = (targetTracks || []).filter(
+      t =>
+        t &&
+        t.id &&
+        t.title &&
+        (!t.artwork || t.artwork === '/icon.svg') &&
+        (manualClick || !enrichedArtworkRef.current.has(String(t.id)))
+    );
+    if (missing.length === 0) return;
+
+    enrichingBusyRef.current = true;
+    cancelCoverSyncRef.current = false;
+    setCoverSync({ active: true, done: 0, total: missing.length });
+
+    try {
+      let done = 0;
+      for (const item of missing) {
+        if (cancelCoverSyncRef.current || (typeof navigator !== 'undefined' && navigator.onLine === false)) {
+          break;
+        }
+        enrichedArtworkRef.current.add(String(item.id));
+        try {
+          const cleanArtist =
+            item.artist && item.artist !== 'Artista' && item.artist !== 'Guardado en dispositivo'
+              ? item.artist.split(',')[0].trim()
+              : '';
+          const q = `${item.title} ${cleanArtist}`.trim();
+          let smallCover = null;
+          let previewUrl = null;
+
+          try {
+            const res = await fetch(
+              `https://itunes.apple.com/search?term=${encodeURIComponent(q)}&media=music&entity=song&limit=1`
+            );
+            if (res.ok) {
+              const data = await res.json();
+              const hit = data?.results?.[0];
+              if (hit?.artworkUrl100) {
+                smallCover = compressArtworkUrl(hit.artworkUrl100);
+                previewUrl = hit.previewUrl || null;
+              }
+            }
+          } catch {}
+
+          // Server fallback if browser direct lookup fails
+          if (!smallCover) {
+            const fallbackRes = await fetch(`/api/search?q=${encodeURIComponent(q)}`);
+            if (fallbackRes.ok) {
+              const fbData = await fallbackRes.json();
+              const fbHit = fbData?.results?.[0];
+              if (fbHit?.artwork) {
+                smallCover = compressArtworkUrl(fbHit.artwork);
+                previewUrl = fbHit.previewUrl || null;
+              }
+            }
+          }
+
+          if (smallCover) {
+            const patch = { artwork: smallCover };
+            if (!item.previewUrl && previewUrl) {
+              patch.previewUrl = previewUrl;
+            }
+            updateTrackMetadataAcrossLibraries(item.id, patch);
+            // Warm image into Service Worker cache (~4 KB)
+            if (typeof window !== 'undefined' && 'Image' in window) {
+              const img = new window.Image();
+              img.src = smallCover;
+            }
+          }
+        } catch {}
+
+        done += 1;
+        setCoverSync({ active: true, done, total: missing.length });
+        await new Promise(r => setTimeout(r, 260));
+      }
+    } finally {
+      enrichingBusyRef.current = false;
+      cancelCoverSyncRef.current = false;
+      setCoverSync({ active: false, done: 0, total: 0 });
+    }
+  }
+
   useEffect(() => {
     if (!user || isOffline || enrichingBusyRef.current) return;
     const activePl = customPlaylists.find(p => p.id === selectedLibrary);
     const pool = [
       ...(activePl ? activePl.tracks : []),
       ...likedTracks,
-      ...offlineCatalog
+      ...offlineCatalog,
+      ...customPlaylists.flatMap(p => p.tracks || [])
     ];
     const missing = pool.filter(
       t =>
@@ -1114,45 +1216,10 @@ export default function HomePage() {
         (!t.artwork || t.artwork === '/icon.svg') &&
         !enrichedArtworkRef.current.has(String(t.id))
     );
-    if (missing.length === 0) return;
-
-    enrichingBusyRef.current = true;
-
-    (async () => {
-      try {
-        const batch = missing.slice(0, 40);
-        for (const item of batch) {
-          if (typeof navigator !== 'undefined' && navigator.onLine === false) break;
-          enrichedArtworkRef.current.add(String(item.id));
-          try {
-            const cleanArtist =
-              item.artist && item.artist !== 'Artista' && item.artist !== 'Guardado en dispositivo'
-                ? item.artist.split(',')[0].trim()
-                : '';
-            const q = `${item.title} ${cleanArtist}`.trim();
-            const res = await fetch(
-              `https://itunes.apple.com/search?term=${encodeURIComponent(q)}&media=music&entity=song&limit=1`
-            );
-            if (res.ok) {
-              const data = await res.json();
-              const hit = data?.results?.[0];
-              if (hit?.artworkUrl100) {
-                const smallCover = compressArtworkUrl(hit.artworkUrl100);
-                const patch = { artwork: smallCover };
-                if (!item.previewUrl && hit.previewUrl) {
-                  patch.previewUrl = hit.previewUrl;
-                }
-                updateTrackMetadataAcrossLibraries(item.id, patch);
-              }
-            }
-          } catch {}
-          await new Promise(r => setTimeout(r, 320));
-        }
-      } finally {
-        enrichingBusyRef.current = false;
-      }
-    })();
-  }, [user, isOffline, selectedLibrary, likedTracks.length, customPlaylists]);
+    if (missing.length > 0) {
+      syncMissingCoversForList(missing, false);
+    }
+  }, [user, isOffline, selectedLibrary, likedTracks.length, customPlaylists.length]);
 
   async function refreshOfflineCacheList() {
     if (typeof window === 'undefined') return;
@@ -2482,6 +2549,10 @@ export default function HomePage() {
       ? activeCustomPlaylist.name
       : 'Favoritos';
 
+  const missingCoversInActiveLibrary = activeLibraryTracks.filter(
+    t => t && (!t.artwork || t.artwork === '/icon.svg')
+  );
+
   const normalizedLibQuery = libraryQuery
     .trim()
     .toLowerCase()
@@ -2887,6 +2958,10 @@ export default function HomePage() {
                 {activeLibraryTracks.length === 1 ? 'canción' : 'canciones'}
                 {syncingAll && syncProgress.total > 0
                   ? ` · Descargando ${syncProgress.done}/${syncProgress.total} · Pantalla activa (tocá para pausar)`
+                  : coverSync.active && coverSync.total > 0
+                  ? ` · Cargando portadas ${coverSync.done}/${coverSync.total} (~4 KB c/u)`
+                  : missingCoversInActiveLibrary.length > 0 && !isOffline
+                  ? ` · ${missingCoversInActiveLibrary.length} sin portada`
                   : selectedLibrary === 'offline' && deviceQuota
                   ? ` · ${deviceQuota.usedMB} MB en dispositivo`
                   : isOffline && playableActiveLibraryTracks.length < activeLibraryTracks.length
@@ -2913,6 +2988,26 @@ export default function HomePage() {
               >
                 <Icon name={repeatMode === 'one' ? 'repeat-1' : 'repeat'} size={17} />
               </button>
+
+              {(missingCoversInActiveLibrary.length > 0 || coverSync.active) && (
+                <button
+                  type="button"
+                  className={`icon-btn ${coverSync.active ? 'active' : ''}`}
+                  disabled={isOffline}
+                  onClick={() => syncMissingCoversForList(activeLibraryTracks, true)}
+                  title={
+                    coverSync.active
+                      ? `Pausar carga de portadas (${coverSync.done}/${coverSync.total})`
+                      : `Cargar y comprimir portadas faltantes (${missingCoversInActiveLibrary.length})`
+                  }
+                >
+                  <Icon
+                    name={coverSync.active ? 'loader' : 'image'}
+                    size={17}
+                    className={coverSync.active ? 'spin' : ''}
+                  />
+                </button>
+              )}
 
               {selectedLibrary !== 'offline' && activeLibraryTracks.length > 0 && (
                 <button
