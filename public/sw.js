@@ -1,10 +1,12 @@
-const STATIC_CACHE = 'mymusic-shell-v3';
+const STATIC_CACHE = 'mymusic-shell-v4';
 const AUDIO_CACHE = 'my-music-offline-audio-v1';
 
 const PRECACHE_URLS = [
   '/',
   '/manifest.json',
-  '/icon.svg'
+  '/icon.svg',
+  '/brand/logo.svg',
+  '/brand/logo-dark.svg'
 ];
 
 self.addEventListener('install', (event) => {

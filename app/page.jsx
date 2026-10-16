@@ -3,24 +3,33 @@
 import { useState, useEffect, useRef } from 'react';
 
 const AUDIO_CACHE_NAME = 'my-music-offline-audio-v1';
-const SHELL_CACHE_NAME = 'mymusic-shell-v3';
+const SHELL_CACHE_NAME = 'mymusic-shell-v4';
 const USER_STORAGE_KEY = 'mma_cached_user_v1';
 const LIKES_STORAGE_KEY = 'mma_liked_tracks_v1';
 const OFFLINE_CATALOG_KEY = 'mma_offline_catalog_v1';
 const PLAYLISTS_STORAGE_KEY = 'mma_custom_playlists_v1';
 
-const DISCOVERY_SEEDS = [
-  { term: 'Pop Latino Hits', label: 'Pop Latino' },
-  { term: 'Rock Clásico Español', label: 'Rock en Español' },
-  { term: 'Daft Punk Electronic Synth', label: 'Electrónica & Synth' },
-  { term: 'Indie Alternative Hits', label: 'Indie & Alternativo' },
-  { term: 'Reggaeton Urbano Latino', label: 'Urbano & Reggaetón' },
-  { term: 'The Weeknd R&B Soul', label: 'R&B & Soul' },
-  { term: 'Lo-Fi Chill Jazz Beats', label: 'Lo-Fi & Jazz' },
-  { term: 'Hip-Hop Rap Classics', label: 'Hip-Hop & Rap' }
+const EXPLORE_CHIPS = [
+  { id: 'for-you', label: 'Para vos', term: null },
+  { id: 'trending', label: 'Tendencias', term: 'Top Hits Global 2025' },
+  { id: 'latin', label: 'Pop Latino', term: 'Pop Latino Hits' },
+  { id: 'urbano', label: 'Urbano', term: 'Reggaeton Urbano Latino' },
+  { id: 'rock', label: 'Rock', term: 'Rock Clásico Español' },
+  { id: 'electro', label: 'Electrónica', term: 'Daft Punk Electronic Synth' },
+  { id: 'rnb', label: 'R&B & Soul', term: 'The Weeknd R&B Soul' },
+  { id: 'indie', label: 'Indie', term: 'Indie Alternative Hits' }
 ];
 
-function Icon({ name, size = 15, className = '' }) {
+function BrandMark() {
+  return (
+    <span className="brand-mark" aria-hidden="true">
+      <img src="/brand/logo.svg" alt="" className="brand-logo brand-logo-light" />
+      <img src="/brand/logo-dark.svg" alt="" className="brand-logo brand-logo-dark" />
+    </span>
+  );
+}
+
+function Icon({ name, size = 16, className = '' }) {
   const props = {
     width: size,
     height: size,
@@ -91,6 +100,20 @@ function Icon({ name, size = 15, className = '' }) {
           <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
         </svg>
       );
+    case 'loader':
+      return (
+        <svg {...props}>
+          <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83" />
+        </svg>
+      );
+    case 'more':
+      return (
+        <svg {...props}>
+          <circle cx="12" cy="5" r="1.5" fill="currentColor" />
+          <circle cx="12" cy="12" r="1.5" fill="currentColor" />
+          <circle cx="12" cy="19" r="1.5" fill="currentColor" />
+        </svg>
+      );
     case 'trash':
       return (
         <svg {...props}>
@@ -131,13 +154,6 @@ function Icon({ name, size = 15, className = '' }) {
           <path d="M1.42 9a15.91 15.91 0 0 1 4.7-2.88" />
           <path d="M8.53 16.11a6 6 0 0 1 6.95 0" />
           <line x1="12" y1="20" x2="12.01" y2="20" />
-        </svg>
-      );
-    case 'sparkles':
-      return (
-        <svg {...props}>
-          <path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3z" />
-          <path d="M19 15l.9 2.1L22 18l-2.1.9L19 21l-.9-2.1L16 18l2.1-.9L19 15z" />
         </svg>
       );
     case 'shuffle':
@@ -210,6 +226,13 @@ function Icon({ name, size = 15, className = '' }) {
           <path d="M21 19a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3zM3 19a2 2 0 0 0 2 2h1a2 2 0 0 0 2-2v-3a2 2 0 0 0-2-2H3z" />
         </svg>
       );
+    case 'disc':
+      return (
+        <svg {...props}>
+          <circle cx="12" cy="12" r="9" />
+          <circle cx="12" cy="12" r="2.5" />
+        </svg>
+      );
     case 'plus':
       return (
         <svg {...props}>
@@ -241,7 +264,7 @@ export default function HomePage() {
   const [user, setUser] = useState(null);
   const [authChecked, setAuthChecked] = useState(false);
   const [isOffline, setIsOffline] = useState(false);
-  const [authMode, setAuthMode] = useState('login'); // 'login' | 'register'
+  const [authMode, setAuthMode] = useState('login');
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [inviteCode, setInviteCode] = useState('');
@@ -252,27 +275,29 @@ export default function HomePage() {
 
   // Navigation: 'explore' | 'library' | 'files' | 'settings' | 'admin'
   const [activeTab, setActiveTab] = useState('explore');
-
-  // Sub-library selector inside 'library': 'liked' | 'offline' | <customPlaylistId>
   const [selectedLibrary, setSelectedLibrary] = useState('liked');
 
-  // Explore, Recommendations & Search
+  // Explore & Search
   const [query, setQuery] = useState('');
+  const [activeChip, setActiveChip] = useState('for-you');
   const [results, setResults] = useState([]);
   const [loading, setLoading] = useState(false);
-  const [feedInfo, setFeedInfo] = useState({ mode: 'random', label: 'Descubrimiento aleatorio' });
+  const [feedInfo, setFeedInfo] = useState({ mode: 'recommended', label: '' });
 
-  // Libraries & Offline Cache (strictly separated!)
-  const [likedTracks, setLikedTracks] = useState([]); // ONLY tracks with heart
-  const [offlineCatalog, setOfflineCatalog] = useState([]); // Metadata for tracks stored in device CacheStorage
-  const [customPlaylists, setCustomPlaylists] = useState([]); // [{ id, name, createdAt, tracks: [] }]
+  // Libraries & Offline Cache
+  const [likedTracks, setLikedTracks] = useState([]);
+  const [offlineCatalog, setOfflineCatalog] = useState([]);
+  const [customPlaylists, setCustomPlaylists] = useState([]);
   const [newPlaylistName, setNewPlaylistName] = useState('');
   const [creatingPlaylist, setCreatingPlaylist] = useState(false);
 
-  // Save-to-Library Modal Dialog state
+  // Dialogs: Track options menu ('⋯'), Save-to-Library, Spotify Import Destination
+  const [menuTrack, setMenuTrack] = useState(null); // { track, contextLibrary }
   const [trackToSave, setTrackToSave] = useState(null);
   const [modalNewPlaylistName, setModalNewPlaylistName] = useState('');
+  const menuDialogRef = useRef(null);
   const saveDialogRef = useRef(null);
+  const spotifyDialogRef = useRef(null);
 
   // Downloads & Server Files
   const [downloads, setDownloads] = useState({});
@@ -281,16 +306,14 @@ export default function HomePage() {
   const [deviceQuota, setDeviceQuota] = useState(null);
   const [syncingAll, setSyncingAll] = useState(false);
 
-  // Settings: Spotify Importer state
+  // Settings: Spotify Importer
   const [spotifyUrl, setSpotifyUrl] = useState('');
   const [spotifyBusy, setSpotifyBusy] = useState(false);
   const [spotifyMsg, setSpotifyMsg] = useState({ type: '', text: '' });
-  const [spotifyTargetLib, setSpotifyTargetLib] = useState('ask');
   const [pendingSpotifyImport, setPendingSpotifyImport] = useState(null);
   const [spotifyNewLibName, setSpotifyNewLibName] = useState('');
-  const spotifyDialogRef = useRef(null);
 
-  // Admin Panel state
+  // Admin Panel
   const [adminData, setAdminData] = useState({ users: [], invites: [], storage: null });
   const [inviteLabel, setInviteLabel] = useState('');
   const [inviteMaxUses, setInviteMaxUses] = useState(1);
@@ -305,15 +328,15 @@ export default function HomePage() {
   const [currentIndex, setCurrentIndex] = useState(-1);
   const [isPlaying, setIsPlaying] = useState(false);
   const [shuffle, setShuffle] = useState(false);
-  const [repeatMode, setRepeatMode] = useState('off'); // 'off' | 'all' | 'one'
+  const [repeatMode, setRepeatMode] = useState('off');
   const [progress, setProgress] = useState(0);
   const [duration, setDuration] = useState(0);
 
   const audioRef = useRef(null);
-  const savedDeviceIdsRef = useRef(new Set());
   const accountRef = useRef(null);
   const shuffleStateRef = useRef({ order: [], pos: -1, queueLen: 0 });
   const wasOfflineRef = useRef(false);
+  const probeInFlightRef = useRef(false);
 
   const currentTrack = currentIndex >= 0 && currentIndex < queue.length ? queue[currentIndex] : null;
 
@@ -328,35 +351,49 @@ export default function HomePage() {
     );
   }
 
-  // Active internet connectivity detector (Spotify-style automatic offline/online transition)
+  // Improved Offline Detector: fast HEAD check + retry before declaring offline so slow APIs never false-trigger
   async function verifyInternetConnection() {
     if (typeof window === 'undefined') return true;
     if (!navigator.onLine) {
       setIsOffline(true);
+      wasOfflineRef.current = true;
       return false;
     }
-    const ctrl = new AbortController();
-    const timer = setTimeout(() => ctrl.abort(), 3500);
-    try {
-      const r = await fetch('/api/auth', {
-        method: 'GET',
-        cache: 'no-store',
-        signal: ctrl.signal
-      });
-      clearTimeout(timer);
-      const data = await r.json().catch(() => ({}));
-      if (r.ok && data.user) {
-        setUser(data.user);
-        try {
-          localStorage.setItem(USER_STORAGE_KEY, JSON.stringify(data.user));
-        } catch {}
+    if (probeInFlightRef.current) return !isOffline;
+    probeInFlightRef.current = true;
+
+    const pingOnce = async timeoutMs => {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+      try {
+        const res = await fetch(`/manifest.json?_ping=${Date.now()}`, {
+          method: 'HEAD',
+          cache: 'no-store',
+          signal: ctrl.signal
+        });
+        clearTimeout(timer);
+        return res.ok || res.status === 304;
+      } catch {
+        clearTimeout(timer);
+        return false;
       }
-      setIsOffline(false);
-      return true;
-    } catch {
-      clearTimeout(timer);
+    };
+
+    try {
+      let alive = await pingOnce(3000);
+      if (!alive && navigator.onLine) {
+        // Retry once before declaring offline to prevent false positives on mobile handoffs
+        alive = await pingOnce(4000);
+      }
+      if (alive) {
+        setIsOffline(false);
+        return true;
+      }
       setIsOffline(true);
+      wasOfflineRef.current = true;
       return false;
+    } finally {
+      probeInFlightRef.current = false;
     }
   }
 
@@ -365,7 +402,7 @@ export default function HomePage() {
     if (typeof window === 'undefined' || !('caches' in window)) return;
     try {
       const cache = await caches.open(SHELL_CACHE_NAME);
-      const urlsToWarm = new Set(['/', '/manifest.json', '/icon.svg']);
+      const urlsToWarm = new Set(['/', '/manifest.json', '/icon.svg', '/brand/logo.svg', '/brand/logo-dark.svg']);
       document
         .querySelectorAll('script[src], link[rel="stylesheet"][href]')
         .forEach(el => {
@@ -389,7 +426,7 @@ export default function HomePage() {
   // Fallback for browsers without native <dialog closedby="any"> support (e.g. iOS Safari)
   useEffect(() => {
     if (typeof HTMLDialogElement === 'undefined' || 'closedBy' in HTMLDialogElement.prototype) return;
-    const dialogs = [saveDialogRef.current, spotifyDialogRef.current].filter(Boolean);
+    const dialogs = [menuDialogRef.current, saveDialogRef.current, spotifyDialogRef.current].filter(Boolean);
     const handlers = dialogs.map(dialog => {
       const fn = event => {
         if (event.target !== dialog) return;
@@ -408,7 +445,24 @@ export default function HomePage() {
     return () => {
       handlers.forEach(({ dialog, fn }) => dialog.removeEventListener('click', fn));
     };
-  }, [user]);
+  }, [user, menuTrack, trackToSave, pendingSpotifyImport]);
+
+  // Open Spotify import modal safely after React state renders (and after mobile file picker closes)
+  useEffect(() => {
+    if (!pendingSpotifyImport) return;
+    const t = setTimeout(() => {
+      try {
+        if (
+          spotifyDialogRef.current &&
+          !spotifyDialogRef.current.open &&
+          typeof spotifyDialogRef.current.showModal === 'function'
+        ) {
+          spotifyDialogRef.current.showModal();
+        }
+      } catch {}
+    }, 90);
+    return () => clearTimeout(t);
+  }, [pendingSpotifyImport]);
 
   // Check session & hydrate local collections on mount + auto-detect online/offline changes
   useEffect(() => {
@@ -448,7 +502,7 @@ export default function HomePage() {
       setActiveTab('library');
       setSelectedLibrary('offline');
       if (!cachedUser) {
-        setUser({ username: 'Modo Offline', is_admin: false, offline: true });
+        setUser({ username: 'Offline', is_admin: false, offline: true });
       }
       setAuthChecked(true);
     }
@@ -470,12 +524,13 @@ export default function HomePage() {
           } catch {}
         }
       })
-      .catch(() => {
-        setIsOffline(true);
-        wasOfflineRef.current = true;
-        setActiveTab('library');
-        setSelectedLibrary('offline');
-        setUser(prev => prev || cachedUser || { username: 'Modo Offline', is_admin: false, offline: true });
+      .catch(async () => {
+        const alive = await verifyInternetConnection();
+        if (!alive) {
+          setActiveTab('library');
+          setSelectedLibrary('offline');
+          setUser(prev => prev || cachedUser || { username: 'Offline', is_admin: false, offline: true });
+        }
       })
       .finally(() => setAuthChecked(true));
 
@@ -499,10 +554,9 @@ export default function HomePage() {
     window.addEventListener('offline', handleOffline);
     document.addEventListener('visibilitychange', handleVisibility);
 
-    // Periodic connectivity probe every 12s so captive portals or silent drops are auto-detected
     const probeTimer = setInterval(() => {
       verifyInternetConnection();
-    }, 12000);
+    }, 15000);
 
     const handleBeforeInstall = e => {
       e.preventDefault();
@@ -518,7 +572,7 @@ export default function HomePage() {
     };
   }, []);
 
-  // Load initial catalog & server files once logged in, or restore automatically when internet returns!
+  // Load initial catalog & server files once logged in, or restore automatically when internet returns
   useEffect(() => {
     if (!user) return;
     if (isOffline) {
@@ -553,7 +607,7 @@ export default function HomePage() {
     return () => document.removeEventListener('mousedown', onDocClick);
   }, [accountOpen]);
 
-  // Poll active downloads: when ready, save to Offline Cache & Offline Catalog ONLY (never force a heart!)
+  // Poll active downloads
   useEffect(() => {
     const activeIds = Object.values(downloads)
       .filter(d => d.status === 'downloading')
@@ -602,9 +656,7 @@ export default function HomePage() {
               )
             );
 
-            // Update file reference if this track already exists in Favoritos or a custom playlist
             updateTrackFileAcrossLibraries(trackKey, data.filename, streamUrl);
-
             fetchLibraryFiles();
             if (user?.is_admin) fetchAdminData();
           }
@@ -653,6 +705,7 @@ export default function HomePage() {
         setAuthError(data.error || 'Error de autenticación');
       } else {
         setUser(data.user);
+        setIsOffline(false);
         try {
           localStorage.setItem(USER_STORAGE_KEY, JSON.stringify(data.user));
         } catch {}
@@ -837,12 +890,31 @@ export default function HomePage() {
     persistCustomPlaylists(next);
   }
 
+  function openTrackMenu(track, contextLibrary = null) {
+    setMenuTrack({ track, contextLibrary });
+    setTimeout(() => {
+      if (menuDialogRef.current && !menuDialogRef.current.open && typeof menuDialogRef.current.showModal === 'function') {
+        menuDialogRef.current.showModal();
+      }
+    }, 10);
+  }
+
+  function closeTrackMenu() {
+    if (menuDialogRef.current && menuDialogRef.current.open) {
+      menuDialogRef.current.close();
+    }
+    setMenuTrack(null);
+  }
+
   function openSaveModal(track) {
+    closeTrackMenu();
     setTrackToSave(track);
     setModalNewPlaylistName('');
-    if (saveDialogRef.current && typeof saveDialogRef.current.showModal === 'function') {
-      saveDialogRef.current.showModal();
-    }
+    setTimeout(() => {
+      if (saveDialogRef.current && !saveDialogRef.current.open && typeof saveDialogRef.current.showModal === 'function') {
+        saveDialogRef.current.showModal();
+      }
+    }, 20);
   }
 
   function closeSaveModal() {
@@ -905,7 +977,6 @@ export default function HomePage() {
         }
         setOfflineUrls(map);
 
-        // Keep offlineCatalog synced with actual CacheStorage files (NEVER mutating likedTracks!)
         setOfflineCatalog(prev => {
           const validSet = new Set(cachedFilenames.map(c => c.streamUrl));
           const filtered = prev.filter(item => item.streamUrl && validSet.has(item.streamUrl));
@@ -980,7 +1051,6 @@ export default function HomePage() {
         }
         await refreshOfflineCacheList();
 
-        // Once cached on the client device, immediately delete the transient MP3 from the server
         const fileToDelete =
           trackMeta?.filename ||
           new URL(url, window.location.origin).searchParams.get('file');
@@ -997,7 +1067,6 @@ export default function HomePage() {
     return false;
   }
 
-  // Export MP3 file to device (reads from local CacheStorage blob first so it works even after server deleted the file)
   async function exportTrackFile(filename, streamUrl) {
     if (typeof window === 'undefined') return;
     const url = streamUrl || `/api/stream?file=${encodeURIComponent(filename)}`;
@@ -1030,7 +1099,6 @@ export default function HomePage() {
     setTimeout(() => document.body.removeChild(a), 1000);
   }
 
-  // Delete a track from device offline CacheStorage
   async function deleteOfflineTrack(track) {
     if (typeof window === 'undefined' || !('caches' in window)) return;
     const filename = track.filename || downloads[track.id]?.filename;
@@ -1057,7 +1125,6 @@ export default function HomePage() {
     await refreshOfflineCacheList();
   }
 
-  // Delete an MP3 file from the VPS server
   async function deleteServerFile(filename) {
     try {
       const res = await fetch(`/api/library?file=${encodeURIComponent(filename)}`, {
@@ -1118,6 +1185,7 @@ export default function HomePage() {
       'track',
       'pista',
       'spotify',
+      'spotify csv',
       'importado de spotify',
       'guardado en dispositivo',
       'artista'
@@ -1128,15 +1196,12 @@ export default function HomePage() {
   function getLikedCategories(tracksList = likedTracks) {
     const counts = {};
     const cleanTracks = sanitizeLikedTracksList(tracksList);
-    for (const t of cleanTracks) {
-      const artist = !isIgnoredTasteTerm(t.artist) ? t.artist.trim() : null;
-      const genre = !isIgnoredTasteTerm(t.genre) ? t.genre.trim() : null;
-      const primary = artist || genre;
-      if (primary) {
-        counts[primary] = (counts[primary] || 0) + 2;
-      }
-      if (genre && genre !== primary) {
-        counts[genre] = (counts[genre] || 0) + 1;
+    const playlistTracks = customPlaylists.flatMap(p => p.tracks || []);
+    const pool = cleanTracks.length > 0 ? cleanTracks : sanitizeLikedTracksList(playlistTracks);
+    for (const t of pool) {
+      const artist = !isIgnoredTasteTerm(t.artist) ? t.artist.split(',')[0].trim() : null;
+      if (artist) {
+        counts[artist] = (counts[artist] || 0) + 2;
       }
     }
     return Object.entries(counts)
@@ -1153,7 +1218,7 @@ export default function HomePage() {
     const genreCounts = {};
     for (const t of tastePool) {
       if (!isIgnoredTasteTerm(t.artist)) {
-        const a = t.artist.trim();
+        const a = t.artist.split(',')[0].trim();
         artistCounts[a] = (artistCounts[a] || 0) + 1;
       }
       if (!isIgnoredTasteTerm(t.genre)) {
@@ -1202,7 +1267,7 @@ export default function HomePage() {
         if (Array.isArray(data.tracks) && data.tracks.length > 0) {
           setFeedInfo({
             mode: data.mode || mode,
-            label: data.label || (mode === 'recommended' ? topArtists[0] || topGenres[0] : 'Mix variado')
+            label: data.label || (mode === 'recommended' ? topArtists.slice(0, 2).join(', ') : '')
           });
           setResults(data.tracks);
           setLoading(false);
@@ -1211,20 +1276,18 @@ export default function HomePage() {
       }
     } catch {}
 
-    // Fallback to direct catalog search if /api/recommend fails
-    if (mode === 'recommended') {
-      const pool = topArtists.length > 0 ? topArtists : topGenres;
-      const chosen = pool[Math.floor(Math.random() * pool.length)];
+    if (mode === 'recommended' && topArtists.length > 0) {
+      const chosen = topArtists[Math.floor(Math.random() * topArtists.length)];
       await searchTracks(chosen, { mode: 'recommended', label: chosen });
     } else {
-      const randomSeed = DISCOVERY_SEEDS[Math.floor(Math.random() * DISCOVERY_SEEDS.length)];
-      await searchTracks(randomSeed.term, { mode: 'random', label: randomSeed.label });
+      const fallbackChip = EXPLORE_CHIPS[Math.floor(Math.random() * (EXPLORE_CHIPS.length - 1)) + 1];
+      await searchTracks(fallbackChip.term, { mode: 'random', label: fallbackChip.label });
     }
     setLoading(false);
   }
 
   async function searchTracks(searchTerm, meta = null) {
-    if (!searchTerm.trim()) return;
+    if (!searchTerm || !searchTerm.trim()) return;
     setLoading(true);
     if (meta) {
       setFeedInfo(meta);
@@ -1305,14 +1368,182 @@ export default function HomePage() {
     setSyncingAll(false);
   }
 
-  // Open modal asking which library to save Spotify tracks into (Me gusta / existing / new)
+  // Robust CSV Parser for Exportify / Spotify CSV files (supports ',', ';', '\t', BOM, EN/ES headers, artwork & duration)
+  async function handleSpotifyCsvFile(file) {
+    if (!file) return;
+    setSpotifyMsg({ type: '', text: '' });
+    try {
+      const rawText = await file.text();
+      const text = rawText.replace(/^\uFEFF/, '');
+      const lines = text.split(/\r?\n/).filter(l => l.trim().length > 0);
+      if (lines.length < 2) {
+        setSpotifyMsg({
+          type: 'err',
+          text: 'El archivo CSV está vacío o no contiene filas de canciones.'
+        });
+        return;
+      }
+
+      // Auto-detect delimiter from header line (',' vs ';' vs '\t')
+      const headerLine = lines[0];
+      const commaCount = (headerLine.match(/,/g) || []).length;
+      const semiCount = (headerLine.match(/;/g) || []).length;
+      const tabCount = (headerLine.match(/\t/g) || []).length;
+      const delimiter =
+        tabCount > commaCount && tabCount > semiCount
+          ? '\t'
+          : semiCount > commaCount
+          ? ';'
+          : ',';
+
+      const parseCsvRow = row => {
+        const cols = [];
+        let cur = '';
+        let inQuotes = false;
+        for (let i = 0; i < row.length; i++) {
+          const ch = row[i];
+          if (ch === '"') {
+            if (inQuotes && row[i + 1] === '"') {
+              cur += '"';
+              i++;
+            } else {
+              inQuotes = !inQuotes;
+            }
+          } else if (ch === delimiter && !inQuotes) {
+            cols.push(cur.trim());
+            cur = '';
+          } else {
+            cur += ch;
+          }
+        }
+        cols.push(cur.trim());
+        return cols.map(c => c.replace(/^["']|["']$/g, '').trim());
+      };
+
+      const headers = parseCsvRow(lines[0]).map(h =>
+        h
+          .toLowerCase()
+          .normalize('NFD')
+          .replace(/[\u0300-\u036f]/g, '')
+          .trim()
+      );
+
+      let titleIdx = headers.findIndex(
+        h =>
+          h.includes('track name') ||
+          h.includes('nombre de la cancion') ||
+          h.includes('nombre de la pista') ||
+          h === 'title' ||
+          h === 'titulo' ||
+          h === 'cancion' ||
+          h === 'pista' ||
+          h === 'track' ||
+          h === 'song' ||
+          (h === 'name' && !headers.some(x => x.includes('track name')))
+      );
+
+      let artistIdx = headers.findIndex(
+        h =>
+          h.includes('artist name') ||
+          h.includes('nombre del artista') ||
+          h.includes('nombres del artista') ||
+          h.includes('artista') ||
+          h === 'artist' ||
+          h === 'artists' ||
+          h.includes('interprete')
+      );
+
+      const albumIdx = headers.findIndex(
+        h => h.includes('album name') || h.includes('nombre del album') || h === 'album'
+      );
+      const imageIdx = headers.findIndex(
+        h => h.includes('image url') || h.includes('imagen') || h === 'artwork' || h === 'cover'
+      );
+      const durationMsIdx = headers.findIndex(
+        h => h.includes('duration') || h.includes('duracion')
+      );
+      const genreIdx = headers.findIndex(h => h.includes('genre') || h.includes('genero'));
+
+      // Fallback if the CSV has no standard header row or custom 2-column CSV
+      let startRow = 1;
+      if (titleIdx === -1) {
+        if (headers.length >= 1 && headers.length <= 4) {
+          titleIdx = 0;
+          artistIdx = headers.length >= 2 ? 1 : -1;
+        } else {
+          setSpotifyMsg({
+            type: 'err',
+            text: `No se reconoció la columna de canción en «${file.name}». Columnas detectadas: ${headers
+              .slice(0, 5)
+              .join(', ')}`
+          });
+          return;
+        }
+      }
+
+      const formatMs = val => {
+        const ms = Number(val);
+        if (!ms || isNaN(ms) || ms < 1000) return '—';
+        const totalSec = Math.round(ms / 1000);
+        const m = Math.floor(totalSec / 60);
+        const s = (totalSec % 60).toString().padStart(2, '0');
+        return `${m}:${s}`;
+      };
+
+      const imported = [];
+      const seen = new Set();
+
+      for (let i = startRow; i < lines.length; i++) {
+        const cols = parseCsvRow(lines[i]);
+        const title = cols[titleIdx]?.trim();
+        const rawArtist = artistIdx >= 0 ? cols[artistIdx]?.trim() || '' : '';
+        if (!title) continue;
+        const artist = rawArtist.replace(/;/g, ', ') || 'Artista';
+        const k = `${title.toLowerCase()}|${artist.toLowerCase()}`;
+        if (seen.has(k)) continue;
+        seen.add(k);
+
+        const imgUrl = imageIdx >= 0 && cols[imageIdx]?.startsWith('http') ? cols[imageIdx] : '/icon.svg';
+        const dur = durationMsIdx >= 0 ? formatMs(cols[durationMsIdx]) : '—';
+
+        imported.push({
+          id: `csv_${Date.now()}_${i}`,
+          title,
+          artist,
+          album: albumIdx >= 0 && cols[albumIdx] ? cols[albumIdx] : 'Spotify CSV',
+          genre: genreIdx >= 0 && cols[genreIdx] ? cols[genreIdx].split(',')[0].trim() : 'Spotify',
+          artwork: imgUrl,
+          previewUrl: null,
+          duration: dur
+        });
+      }
+
+      if (imported.length === 0) {
+        setSpotifyMsg({
+          type: 'err',
+          text: `No se encontraron canciones válidas dentro de «${file.name}».`
+        });
+        return;
+      }
+
+      const csvName = file.name.replace(/\.csv$/i, '').replace(/_/g, ' ').trim() || 'Spotify CSV';
+      openSpotifyImportModal(imported, csvName);
+    } catch {
+      setSpotifyMsg({
+        type: 'err',
+        text: 'No se pudo leer el archivo CSV seleccionado.'
+      });
+    }
+  }
+
   function openSpotifyImportModal(tracks, sourceName = 'Playlist Spotify') {
     if (!tracks || tracks.length === 0) return;
     setPendingSpotifyImport({ tracks, sourceName });
     setSpotifyNewLibName(sourceName);
-    if (spotifyDialogRef.current && typeof spotifyDialogRef.current.showModal === 'function') {
-      spotifyDialogRef.current.showModal();
-    }
+    setSpotifyMsg({
+      type: 'ok',
+      text: `Se leyeron ${tracks.length} canciones de «${sourceName}». Elegí dónde guardarlas:`
+    });
   }
 
   function closeSpotifyImportModal() {
@@ -1338,7 +1569,7 @@ export default function HomePage() {
       setSelectedLibrary('liked');
       setSpotifyMsg({
         type: 'ok',
-        text: `Se guardaron ${filtered.length} canciones en «Favoritos (Me gusta)».`
+        text: `Listo: se guardaron ${filtered.length} canciones en Favoritos.`
       });
       closeSpotifyImportModal();
       return;
@@ -1350,7 +1581,7 @@ export default function HomePage() {
         setSelectedLibrary(created.id);
         setSpotifyMsg({
           type: 'ok',
-          text: `Se creó la librería «${created.name}» con ${freshTracks.length} canciones.`
+          text: `Listo: se creó la librería «${created.name}» con ${freshTracks.length} canciones.`
         });
       }
       closeSpotifyImportModal();
@@ -1372,7 +1603,7 @@ export default function HomePage() {
       setSelectedLibrary(targetPl.id);
       setSpotifyMsg({
         type: 'ok',
-        text: `Se guardaron ${filtered.length} canciones en «${targetPl.name}».`
+        text: `Listo: se guardaron ${filtered.length} canciones en «${targetPl.name}».`
       });
       closeSpotifyImportModal();
     }
@@ -1394,11 +1625,6 @@ export default function HomePage() {
     return Boolean(streamUrl && offlineUrls[streamUrl]);
   }
 
-  /**
-   * Smart Shuffle (Fisher-Yates + Artist Spread constraint):
-   * - Guarantees every track in the queue plays once before any track repeats.
-   * - Spreads tracks by the same artist across the queue so they don't play back-to-back.
-   */
   function buildSmartShuffleOrder(list, startIdx = -1, minArtistDistance = 2) {
     const n = Array.isArray(list) ? list.length : 0;
     if (n <= 1) return n === 1 ? [0] : [];
@@ -1408,13 +1634,11 @@ export default function HomePage() {
       if (i !== startIdx) pool.push(i);
     }
 
-    // Step 1: Unbiased Fisher-Yates shuffle
     for (let i = pool.length - 1; i > 0; i--) {
       const j = Math.floor(Math.random() * (i + 1));
       [pool[i], pool[j]] = [pool[j], pool[i]];
     }
 
-    // Step 2: Artist Spread sliding window constraint
     const normArtist = idx =>
       String(list[idx]?.artist || '')
         .trim()
@@ -1446,11 +1670,9 @@ export default function HomePage() {
     return order;
   }
 
-  // Player controls
   function playFromList(list, index, startRandom = false) {
     if (!Array.isArray(list) || list.length === 0) return;
 
-    // When offline, behave like Spotify: only queue tracks that are cached on the device
     if (isOffline) {
       const clickedTrack = list[index];
       if (clickedTrack && !isTrackAvailableOffline(clickedTrack) && !startRandom) {
@@ -1511,7 +1733,6 @@ export default function HomePage() {
         shuffleStateRef.current = { order, pos: nextPos, queueLen: queue.length };
         setCurrentIndex(order[nextPos]);
       } else {
-        // Completed full permutation without repeats; reshuffle for next cycle avoiding immediate repeat
         const freshOrder = buildSmartShuffleOrder(queue, -1);
         if (freshOrder.length > 1 && freshOrder[0] === currentIndex) {
           [freshOrder[0], freshOrder[1]] = [freshOrder[1], freshOrder[0]];
@@ -1579,209 +1800,346 @@ export default function HomePage() {
     setDeferredPrompt(null);
   }
 
+  // Unified Single-Line Track Row component used in Explore & Libraries
+  function renderTrackRow(track, idx, list, contextLib = null) {
+    const dl = downloads[track.id];
+    const offItem = offlineCatalog.find(
+      t =>
+        String(t.id) === String(track.id) ||
+        (track.filename && t.filename === track.filename)
+    );
+    const filename = track.filename || dl?.filename || offItem?.filename;
+    const streamUrl =
+      track.streamUrl ||
+      offItem?.streamUrl ||
+      (filename ? `/api/stream?file=${encodeURIComponent(filename)}` : null);
+    const isOfflineReady =
+      contextLib === 'offline' ||
+      dl?.status === 'ready' ||
+      Boolean(offItem) ||
+      Boolean(streamUrl && offlineUrls[streamUrl]);
+    const isGreyedOffline = isOffline && !isOfflineReady;
+    const isCurrent = currentTrack && String(currentTrack.id) === String(track.id);
+    const liked = isLiked(track.id);
+
+    const subtitleParts = [track.artist || 'Artista'];
+    if (track.duration && track.duration !== '—') {
+      subtitleParts.push(track.duration);
+    } else if (
+      track.album &&
+      track.album !== 'Offline PWA' &&
+      track.album !== 'Spotify CSV' &&
+      track.album !== 'Guardado en dispositivo'
+    ) {
+      subtitleParts.push(track.album);
+    }
+
+    return (
+      <div
+        key={`${contextLib || 'exp'}_${track.id}_${idx}`}
+        className={`track-row ${isCurrent ? 'playing' : ''} ${
+          isGreyedOffline ? 'offline-unavailable' : ''
+        }`.trim()}
+      >
+        <div
+          className="track-row-main"
+          onClick={() => {
+            if (isGreyedOffline) return;
+            if (isCurrent) {
+              togglePlayPause();
+            } else {
+              playFromList(list, idx);
+            }
+          }}
+          title={isGreyedOffline ? 'Disponible solo con conexión a internet' : 'Reproducir'}
+        >
+          <div className="track-cover">
+            <img
+              src={track.artwork || '/icon.svg'}
+              alt=""
+              loading="lazy"
+              onError={e => {
+                e.currentTarget.src = '/icon.svg';
+              }}
+            />
+            <div className="track-cover-overlay">
+              <Icon name={isCurrent && isPlaying ? 'pause' : 'play'} size={15} />
+            </div>
+          </div>
+
+          <div className="track-text">
+            <div className="track-title">{track.title}</div>
+            <div className="track-sub">
+              {isOfflineReady && (
+                <span className="offline-inline-dot" title="Descargada en el dispositivo">
+                  <Icon name="offline-pin" size={13} />
+                </span>
+              )}
+              <span className="track-sub-text">
+                {dl?.status === 'downloading'
+                  ? `Descargando ${Math.round(dl.progress || 8)}% · ${track.artist}`
+                  : subtitleParts.join(' · ')}
+              </span>
+            </div>
+          </div>
+        </div>
+
+        <div className="track-actions">
+          <button
+            type="button"
+            className={`icon-btn ${liked ? 'liked' : ''}`}
+            onClick={() => toggleLike(track)}
+            aria-label={liked ? 'Quitar de Favoritos' : 'Guardar en Favoritos'}
+            title={liked ? 'En Favoritos' : 'Agregar a Favoritos'}
+          >
+            <Icon name={liked ? 'heart-fill' : 'heart'} size={16} />
+          </button>
+
+          {isOfflineReady ? (
+            <button
+              type="button"
+              className="icon-btn offline-done"
+              onClick={() => openTrackMenu({ ...track, filename, streamUrl }, contextLib)}
+              aria-label="Opciones de pista offline"
+              title="Descargada en Offline"
+            >
+              <Icon name="offline-pin" size={16} />
+            </button>
+          ) : dl?.status === 'downloading' ? (
+            <button type="button" className="icon-btn" disabled aria-label="Descargando">
+              <Icon name="loader" size={16} className="spin" />
+            </button>
+          ) : (
+            <button
+              type="button"
+              className="icon-btn"
+              disabled={isOffline}
+              onClick={() => startDownload(track)}
+              aria-label="Descargar para escuchar sin internet"
+              title="Descargar MP3 Offline"
+            >
+              <Icon name={dl?.status === 'error' ? 'refresh' : 'download'} size={16} />
+            </button>
+          )}
+
+          <button
+            type="button"
+            className="icon-btn"
+            onClick={() => openTrackMenu({ ...track, filename, streamUrl }, contextLib)}
+            aria-label="Más opciones"
+            title="Más opciones"
+          >
+            <Icon name="more" size={16} />
+          </button>
+        </div>
+
+        {dl?.status === 'downloading' && (
+          <div className="track-row-progress">
+            <div style={{ width: `${dl.progress || 8}%` }} />
+          </div>
+        )}
+      </div>
+    );
+  }
+
   if (!authChecked) {
     return (
-      <main className="shell">
+      <main className="app-shell">
         <div className="empty" style={{ marginTop: 48 }}>
-          <div className="empty-title">Cargando estudio musical…</div>
-          <div>Verificando sesión activa</div>
+          <div className="empty-title">mineral music</div>
+          <div>Abriendo tu biblioteca…</div>
         </div>
       </main>
     );
   }
 
-  // ==================== UNAUTHENTICATED VIEW (LOGIN + INVITE REGISTER) ====================
+  // ==================== UNAUTHENTICATED VIEW ====================
   if (!user) {
     return (
-      <>
-        <header className="site-header">
+      <div className="app-shell">
+        <header className="topbar">
           <div className="brand">
-            <img src="/icon.svg" alt="MyMusicAnywhere" className="brand-logo" />
-            <div className="brand-text">
-              <span className="brand-name">MyMusicAnywhere</span>
-              <span className="brand-sub">Estudio privado &amp; PWA offline</span>
-            </div>
+            <BrandMark />
+            <span className="brand-word">
+              mineral<small className="brand-sub">music</small>
+            </span>
           </div>
-          <span className="badge cobalt">Solo con invitación</span>
+          <span className="badge lavender">Por invitación</span>
         </header>
 
-        <main className="shell">
-          <div className="auth-wrap">
-            <div className="page-head">
-              <div>
-                <h1 className="page-title">
-                  {authMode === 'login' ? 'Entrar al estudio' : 'Activar invitación'}
-                </h1>
-                <p className="page-sub">
-                  {authMode === 'login'
-                    ? 'Accede a tu catálogo, descargas MP3 y fonoteca offline.'
-                    : 'Regístrate usando un código de invitación generado por el administrador.'}
-                </p>
-              </div>
+        <div className="auth-wrap">
+          <div style={{ marginBottom: 16 }}>
+            <h1 className="section-bar-title" style={{ fontSize: '1.65rem' }}>
+              {authMode === 'login' ? 'Iniciar sesión' : 'Activar invitación'}
+            </h1>
+            <p className="section-bar-sub">
+              {authMode === 'login'
+                ? 'Tu música, librerías y descargas offline en cualquier dispositivo.'
+                : 'Creá tu cuenta con un código de invitación.'}
+            </p>
+          </div>
+
+          <div className="card">
+            <div className="auth-tabs" role="tablist">
+              <button
+                type="button"
+                className={authMode === 'login' ? 'active' : ''}
+                onClick={() => {
+                  setAuthMode('login');
+                  setAuthError('');
+                }}
+              >
+                Entrar
+              </button>
+              <button
+                type="button"
+                className={authMode === 'register' ? 'active' : ''}
+                onClick={() => {
+                  setAuthMode('register');
+                  setAuthError('');
+                }}
+              >
+                Código de invitación
+              </button>
             </div>
 
-            <div className="card">
-              <div className="auth-tabs" role="tablist">
-                <button
-                  type="button"
-                  className={authMode === 'login' ? 'active' : ''}
-                  onClick={() => {
-                    setAuthMode('login');
-                    setAuthError('');
-                  }}
-                >
-                  Iniciar sesión
-                </button>
-                <button
-                  type="button"
-                  className={authMode === 'register' ? 'active' : ''}
-                  onClick={() => {
-                    setAuthMode('register');
-                    setAuthError('');
-                  }}
-                >
-                  Tengo código de invitación
-                </button>
-              </div>
+            {authError && <div className="alert err">{authError}</div>}
 
-              {authError && <div className="alert err">{authError}</div>}
+            <div className={isOffline ? 'offline-section-disabled' : ''}>
+              {authMode === 'login' ? (
+                <form className="form" onSubmit={handleAuthSubmit}>
+                  <div className="field">
+                    <label htmlFor="signin-username">Usuario</label>
+                    <input
+                      id="signin-username"
+                      name="username"
+                      type="text"
+                      autoComplete="username"
+                      enterKeyHint="next"
+                      required
+                      value={username}
+                      onChange={e => setUsername(e.target.value)}
+                      placeholder="tu_usuario"
+                    />
+                  </div>
 
-              <div className={isOffline ? 'offline-section-disabled' : ''}>
-                {authMode === 'login' ? (
-                  <form className="form" onSubmit={handleAuthSubmit}>
-                    <div className="field">
-                      <label htmlFor="signin-username">Usuario</label>
+                  <div className="field">
+                    <label htmlFor="current-password">Contraseña</label>
+                    <div className="input-row">
                       <input
-                        id="signin-username"
-                        name="username"
-                        type="text"
-                        autoComplete="username"
-                        enterKeyHint="next"
+                        id="current-password"
+                        name="password"
+                        type={showPassword ? 'text' : 'password'}
+                        autoComplete="current-password"
+                        enterKeyHint="done"
                         required
-                        value={username}
-                        onChange={e => setUsername(e.target.value)}
-                        placeholder="tu_usuario"
+                        value={password}
+                        onChange={e => setPassword(e.target.value)}
+                        placeholder="••••••••"
                       />
+                      <button
+                        type="button"
+                        className="btn secondary sm"
+                        onClick={() => setShowPassword(v => !v)}
+                      >
+                        {showPassword ? 'Ocultar' : 'Ver'}
+                      </button>
                     </div>
+                  </div>
 
-                    <div className="field">
-                      <label htmlFor="current-password">Contraseña</label>
-                      <div className="input-row">
-                        <input
-                          id="current-password"
-                          name="password"
-                          type={showPassword ? 'text' : 'password'}
-                          autoComplete="current-password"
-                          enterKeyHint="done"
-                          required
-                          value={password}
-                          onChange={e => setPassword(e.target.value)}
-                          placeholder="••••••••"
-                        />
-                        <button
-                          type="button"
-                          className="btn secondary sm"
-                          onClick={() => setShowPassword(v => !v)}
-                        >
-                          {showPassword ? 'Ocultar' : 'Mostrar'}
-                        </button>
-                      </div>
-                    </div>
-
-                    <button type="submit" className="btn" disabled={authBusy || isOffline}>
-                      {authBusy ? 'Verificando…' : 'Entrar a MyMusicAnywhere'}
-                    </button>
-                  </form>
-                ) : (
-                  <form className="form" onSubmit={handleAuthSubmit}>
-                    <div className="field">
-                      <label htmlFor="invite-code">Código de invitación</label>
-                      <input
-                        id="invite-code"
-                        name="inviteCode"
-                        type="text"
-                        autoCapitalize="characters"
-                        enterKeyHint="next"
-                        required
-                        value={inviteCode}
-                        onChange={e => setInviteCode(e.target.value.toUpperCase())}
-                        placeholder="MMA-XXXX-XXXX"
-                      />
-                    </div>
-
-                    <div className="field">
-                      <label htmlFor="signup-username">Elige tu usuario</label>
-                      <input
-                        id="signup-username"
-                        name="username"
-                        type="text"
-                        autoComplete="username"
-                        enterKeyHint="next"
-                        minLength={3}
-                        maxLength={32}
-                        required
-                        value={username}
-                        onChange={e => setUsername(e.target.value)}
-                        placeholder="nuevo_usuario"
-                      />
-                    </div>
-
-                    <div className="field">
-                      <label htmlFor="new-password">Crea una contraseña (mín. 6 caracteres)</label>
-                      <div className="input-row">
-                        <input
-                          id="new-password"
-                          name="new-password"
-                          type={showPassword ? 'text' : 'password'}
-                          autoComplete="new-password"
-                          enterKeyHint="done"
-                          minLength={6}
-                          required
-                          value={password}
-                          onChange={e => setPassword(e.target.value)}
-                          placeholder="••••••••"
-                        />
-                        <button
-                          type="button"
-                          className="btn secondary sm"
-                          onClick={() => setShowPassword(v => !v)}
-                        >
-                          {showPassword ? 'Ocultar' : 'Mostrar'}
-                        </button>
-                      </div>
-                    </div>
-
-                    <button type="submit" className="btn" disabled={authBusy || isOffline}>
-                      {authBusy ? 'Activando cuenta…' : 'Crear cuenta e ingresar'}
-                    </button>
-                  </form>
-                )}
-              </div>
-
-              {offlineCatalog.length > 0 && (
-                <div style={{ marginTop: 14, paddingTop: 12, borderTop: '1px solid var(--line)' }}>
-                  <button
-                    type="button"
-                    className="btn secondary"
-                    style={{ width: '100%' }}
-                    onClick={() => {
-                      setUser({ username: 'Modo Offline', is_admin: false, offline: true });
-                      setActiveTab('library');
-                      setSelectedLibrary('offline');
-                    }}
-                  >
-                    <Icon name="headphones" size={16} /> Abrir mis canciones Offline ({offlineCatalog.length}) sin conexión
+                  <button type="submit" className="btn" disabled={authBusy || isOffline}>
+                    {authBusy ? 'Entrando…' : 'Entrar a mineral music'}
                   </button>
-                </div>
+                </form>
+              ) : (
+                <form className="form" onSubmit={handleAuthSubmit}>
+                  <div className="field">
+                    <label htmlFor="invite-code">Código de invitación</label>
+                    <input
+                      id="invite-code"
+                      name="inviteCode"
+                      type="text"
+                      autoCapitalize="characters"
+                      enterKeyHint="next"
+                      required
+                      value={inviteCode}
+                      onChange={e => setInviteCode(e.target.value.toUpperCase())}
+                      placeholder="MMA-XXXX-XXXX"
+                    />
+                  </div>
+
+                  <div className="field">
+                    <label htmlFor="signup-username">Usuario</label>
+                    <input
+                      id="signup-username"
+                      name="username"
+                      type="text"
+                      autoComplete="username"
+                      enterKeyHint="next"
+                      minLength={3}
+                      maxLength={32}
+                      required
+                      value={username}
+                      onChange={e => setUsername(e.target.value)}
+                      placeholder="nuevo_usuario"
+                    />
+                  </div>
+
+                  <div className="field">
+                    <label htmlFor="new-password">Contraseña (mín. 6 caracteres)</label>
+                    <div className="input-row">
+                      <input
+                        id="new-password"
+                        name="new-password"
+                        type={showPassword ? 'text' : 'password'}
+                        autoComplete="new-password"
+                        enterKeyHint="done"
+                        minLength={6}
+                        required
+                        value={password}
+                        onChange={e => setPassword(e.target.value)}
+                        placeholder="••••••••"
+                      />
+                      <button
+                        type="button"
+                        className="btn secondary sm"
+                        onClick={() => setShowPassword(v => !v)}
+                      >
+                        {showPassword ? 'Ocultar' : 'Ver'}
+                      </button>
+                    </div>
+                  </div>
+
+                  <button type="submit" className="btn" disabled={authBusy || isOffline}>
+                    {authBusy ? 'Activando…' : 'Crear cuenta'}
+                  </button>
+                </form>
               )}
             </div>
+
+            {offlineCatalog.length > 0 && (
+              <div style={{ marginTop: 14, paddingTop: 12, borderTop: '1px solid var(--border)' }}>
+                <button
+                  type="button"
+                  className="btn secondary"
+                  style={{ width: '100%' }}
+                  onClick={() => {
+                    setUser({ username: 'Offline', is_admin: false, offline: true });
+                    setActiveTab('library');
+                    setSelectedLibrary('offline');
+                  }}
+                >
+                  <Icon name="headphones" size={16} /> Escuchar mis canciones Offline ({offlineCatalog.length})
+                </button>
+              </div>
+            )}
           </div>
-        </main>
-      </>
+        </div>
+      </div>
     );
   }
 
-  // ==================== COMPUTE ACTIVE LIBRARY VIEW ====================
+  // ==================== AUTHENTICATED APP SHELL ====================
   const initial = (user.username || 'U').trim().charAt(0).toUpperCase();
   const activeCustomPlaylist = customPlaylists.find(p => p.id === selectedLibrary) || null;
   const activeLibraryTracks =
@@ -1799,1285 +2157,1072 @@ export default function HomePage() {
 
   const activeLibraryTitle =
     selectedLibrary === 'liked'
-      ? 'Favoritos (Con corazón)'
+      ? 'Favoritos'
       : selectedLibrary === 'offline'
-      ? 'Offline (Guardadas en este dispositivo)'
+      ? 'Descargadas (Offline)'
       : activeCustomPlaylist
       ? activeCustomPlaylist.name
       : 'Favoritos';
 
+  const topFrequentArtists = getLikedCategories().slice(0, 5);
+
   return (
-    <>
-      <header className="site-header">
-        <button type="button" className="brand" onClick={() => setActiveTab(isOffline ? 'library' : 'explore')}>
-          <img src="/icon.svg" alt="MyMusicAnywhere" className="brand-logo" />
-          <div className="brand-text">
-            <span className="brand-name">MyMusicAnywhere</span>
-            <span className="brand-sub">Studio &amp; Offline Player</span>
-          </div>
+    <div className="app-shell">
+      <header className="topbar">
+        <button
+          type="button"
+          className="brand"
+          onClick={() => setActiveTab(isOffline ? 'library' : 'explore')}
+        >
+          <BrandMark />
+          <span className="brand-word">
+            mineral<small className="brand-sub">music</small>
+          </span>
         </button>
 
-        <nav className="site-nav" aria-label="Principal">
+        <nav className="topbar-nav" aria-label="Navegación principal">
           <button
             type="button"
-            className={`${activeTab === 'explore' ? 'active' : ''} ${isOffline ? 'offline-nav-item' : ''}`.trim()}
+            className={`nav-link ${activeTab === 'explore' ? 'active' : ''} ${
+              isOffline ? 'offline-nav-item' : ''
+            }`.trim()}
             onClick={() => setActiveTab('explore')}
           >
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <circle cx="11" cy="11" r="7" />
-              <path d="M20 20l-3.5-3.5" strokeLinecap="round" />
-            </svg>
+            <Icon name="search" size={15} />
             <span>Explorar</span>
           </button>
 
           <button
             type="button"
-            className={activeTab === 'library' ? 'active' : ''}
+            className={`nav-link ${activeTab === 'library' ? 'active' : ''}`}
             onClick={() => setActiveTab('library')}
           >
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <path d="M12 21s-7-4.5-7-10a4 4 0 0 1 7-2.6A4 4 0 0 1 19 11c0 5.5-7 10-7 10z" />
-            </svg>
-            <span>Librerías</span>
+            <Icon name="heart" size={15} />
+            <span>Biblioteca</span>
             {(likedTracks.length + offlineCatalog.length) > 0 && (
-              <span className="nav-count">{likedTracks.length || offlineCatalog.length}</span>
+              <span className="nav-badge">{likedTracks.length || offlineCatalog.length}</span>
             )}
           </button>
 
           <button
             type="button"
-            className={`${activeTab === 'files' ? 'active' : ''} ${isOffline ? 'offline-nav-item' : ''}`.trim()}
+            className={`nav-link ${activeTab === 'files' ? 'active' : ''} ${
+              isOffline ? 'offline-nav-item' : ''
+            }`.trim()}
             onClick={() => setActiveTab('files')}
           >
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <circle cx="12" cy="12" r="9" />
-              <circle cx="12" cy="12" r="2.5" />
-            </svg>
+            <Icon name="disc" size={15} />
             <span>Servidor</span>
-            {libraryFiles.length > 0 && <span className="nav-count">{libraryFiles.length}</span>}
+            {libraryFiles.length > 0 && <span className="nav-badge">{libraryFiles.length}</span>}
           </button>
 
           <button
             type="button"
-            className={activeTab === 'settings' ? 'active' : ''}
+            className={`nav-link ${activeTab === 'settings' ? 'active' : ''}`}
             onClick={() => setActiveTab('settings')}
           >
-            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-              <circle cx="12" cy="12" r="3" />
-              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9c.26.6.77 1.02 1.41 1.09H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
-            </svg>
+            <Icon name="settings" size={15} />
             <span>Ajustes</span>
           </button>
 
           {user.is_admin && (
             <button
               type="button"
-              className={`${activeTab === 'admin' ? 'active' : ''} ${isOffline ? 'offline-nav-item' : ''}`.trim()}
+              className={`nav-link ${activeTab === 'admin' ? 'active' : ''} ${
+                isOffline ? 'offline-nav-item' : ''
+              }`.trim()}
               onClick={() => {
                 setActiveTab('admin');
                 if (!isOffline) fetchAdminData();
               }}
             >
-              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
-                <path d="M12 2l7 4v6c0 5-3.5 8.5-7 10-3.5-1.5-7-5-7-10V6l7-4z" />
-              </svg>
+              <Icon name="shield" size={15} />
               <span>Admin</span>
             </button>
           )}
         </nav>
 
-        <div className="account" ref={accountRef}>
-          <button
-            type="button"
-            className="account-btn"
-            onClick={() => setAccountOpen(o => !o)}
-            aria-expanded={accountOpen}
-          >
-            <span className="account-avatar">{initial}</span>
-            <span className="account-name">{user.username}</span>
-          </button>
+        <div className="topbar-right">
+          {isOffline && (
+            <span className="badge lavender" title="Sin conexión a internet">
+              <Icon name="wifi-off" size={12} /> Offline
+            </span>
+          )}
 
-          {accountOpen && (
-            <div className="account-menu" role="menu">
-              <div className="account-meta">
-                <span className="account-user">@{user.username}</span>
-                <span className={`badge ${user.is_admin ? 'cobalt' : 'mint'}`}>
-                  {user.is_admin ? 'Admin' : 'Miembro'}
-                </span>
-              </div>
+          <div className="account" ref={accountRef}>
+            <button
+              type="button"
+              className="account-btn"
+              onClick={() => setAccountOpen(o => !o)}
+              aria-expanded={accountOpen}
+            >
+              <span className="account-avatar">{initial}</span>
+              <span className="account-name">{user.username}</span>
+            </button>
 
-              <button
-                type="button"
-                className="account-item"
-                onClick={() => {
-                  setActiveTab('settings');
-                  setAccountOpen(false);
-                }}
-              >
-                <Icon name="settings" size={15} /> Configuración e Importar Spotify
-              </button>
+            {accountOpen && (
+              <div className="account-menu" role="menu">
+                <div className="account-meta">
+                  <span className="account-user">@{user.username}</span>
+                  <span className={`badge ${user.is_admin ? 'lavender' : 'lime'}`}>
+                    {user.is_admin ? 'Admin' : 'Miembro'}
+                  </span>
+                </div>
 
-              {user.is_admin && (
                 <button
                   type="button"
-                  className={`account-item ${isOffline ? 'offline-section-disabled' : ''}`.trim()}
+                  className="account-item"
                   onClick={() => {
-                    setActiveTab('admin');
+                    setActiveTab('settings');
                     setAccountOpen(false);
-                    if (!isOffline) fetchAdminData();
                   }}
                 >
-                  <Icon name="shield" size={15} /> Panel de invitaciones
+                  <Icon name="settings" size={15} /> Ajustes e Importar Spotify
                 </button>
-              )}
 
-              {deferredPrompt && (
-                <button type="button" className="account-item" onClick={handleInstallPwa}>
-                  <Icon name="smartphone" size={15} /> Instalar app en dispositivo
+                {user.is_admin && (
+                  <button
+                    type="button"
+                    className={`account-item ${isOffline ? 'offline-section-disabled' : ''}`.trim()}
+                    onClick={() => {
+                      setActiveTab('admin');
+                      setAccountOpen(false);
+                      if (!isOffline) fetchAdminData();
+                    }}
+                  >
+                    <Icon name="shield" size={15} /> Invitaciones y usuarios
+                  </button>
+                )}
+
+                {deferredPrompt && (
+                  <button type="button" className="account-item" onClick={handleInstallPwa}>
+                    <Icon name="smartphone" size={15} /> Instalar app
+                  </button>
+                )}
+
+                <button type="button" className="account-item danger" onClick={handleLogout}>
+                  Cerrar sesión
                 </button>
-              )}
-
-              <button type="button" className="account-item danger" onClick={handleLogout}>
-                Cerrar sesión
-              </button>
-            </div>
-          )}
+              </div>
+            )}
+          </div>
         </div>
       </header>
 
-      <main className="shell">
-        {isOffline && (
-          <div className="storage-banner" style={{ marginBottom: 14 }}>
-            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
-              <Icon name="wifi-off" size={16} />
-              <span>
-                <strong>Sin conexión a internet:</strong> Las funciones online aparecen en gris. Tu música descargada en Offline sigue disponible con normalidad.
-              </span>
-            </span>
-            {activeTab !== 'library' && (
+      {isOffline && (
+        <div className="offline-pill-bar">
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+            <Icon name="wifi-off" size={15} />
+            <span>Modo sin conexión · Reproduciendo música guardada en tu dispositivo</span>
+          </span>
+          <div className="offline-pill-actions">
+            {activeTab !== 'library' || selectedLibrary !== 'offline' ? (
               <button
                 type="button"
-                className="btn secondary sm"
                 onClick={() => {
                   setActiveTab('library');
                   setSelectedLibrary('offline');
                 }}
               >
-                <Icon name="offline-pin" size={14} /> Ir a mis Offline ({offlineCatalog.length})
+                Mis Offline ({offlineCatalog.length})
+              </button>
+            ) : null}
+            <button type="button" onClick={() => verifyInternetConnection()}>
+              Reconectar
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* ==================== TAB 1: EXPLORAR ==================== */}
+      {activeTab === 'explore' && (
+        <section>
+          <form
+            className={`search-bar ${isOffline ? 'offline-section-disabled' : ''}`.trim()}
+            onSubmit={e => {
+              e.preventDefault();
+              if (!isOffline && query.trim()) {
+                setActiveChip('');
+                searchTracks(query);
+              }
+            }}
+          >
+            <Icon name="search" size={16} className="search-icon" />
+            <input
+              type="search"
+              className="search-input"
+              enterKeyHint="search"
+              placeholder={
+                isOffline
+                  ? 'Sin conexión a internet…'
+                  : '¿Qué querés escuchar hoy? Canción, artista o álbum…'
+              }
+              value={query}
+              onChange={e => setQuery(e.target.value)}
+              disabled={isOffline}
+            />
+            {query && (
+              <button
+                type="button"
+                className="icon-btn"
+                onClick={() => {
+                  setQuery('');
+                  setActiveChip('for-you');
+                  loadRecommendedOrRandomFeed(likedTracks, false);
+                }}
+                aria-label="Limpiar búsqueda"
+              >
+                <Icon name="close" size={15} />
               </button>
             )}
-          </div>
-        )}
+            <button type="submit" className="btn sm" disabled={loading || isOffline}>
+              {loading ? '…' : 'Buscar'}
+            </button>
+          </form>
 
-        {/* ==================== TAB 1: EXPLORAR ==================== */}
-        {activeTab === 'explore' && (
-          <section>
-            <div className="page-head">
-              <div>
-                <h1 className="page-title">Catálogo musical</h1>
-                <p className="page-sub">
-                  Busca por canción, álbum o artista, elije en qué librería guardarla o descarga el MP3 completo.
-                </p>
-              </div>
-              {deferredPrompt && (
-                <button type="button" className="btn secondary sm" onClick={handleInstallPwa}>
-                  <Icon name="plus" size={14} /> Instalar PWA
-                </button>
-              )}
+          {/* Horizontal Category / Mood Strip */}
+          <div className={`chip-Strip ${isOffline ? 'offline-section-disabled' : ''}`.trim()}>
+            {EXPLORE_CHIPS.map(chip => (
+              <button
+                key={chip.id}
+                type="button"
+                className={`chip-pill ${activeChip === chip.id ? 'active' : ''}`}
+                disabled={isOffline}
+                onClick={() => {
+                  setQuery('');
+                  setActiveChip(chip.id);
+                  if (chip.id === 'for-you') {
+                    loadRecommendedOrRandomFeed(likedTracks, false);
+                  } else {
+                    searchTracks(chip.term, { mode: 'genre', label: chip.label });
+                  }
+                }}
+              >
+                {chip.label}
+              </button>
+            ))}
+
+            {topFrequentArtists.map(artist => (
+              <button
+                key={artist}
+                type="button"
+                className={`chip-pill ${activeChip === `artist_${artist}` ? 'active' : ''}`}
+                disabled={isOffline}
+                onClick={() => {
+                  setQuery('');
+                  setActiveChip(`artist_${artist}`);
+                  searchTracks(artist, { mode: 'artist', label: artist });
+                }}
+              >
+                {artist}
+              </button>
+            ))}
+          </div>
+
+          {/* Clean Section Header (No debug badges!) */}
+          <div className="section-bar">
+            <div>
+              <h1 className="section-bar-title">
+                {feedInfo.mode === 'search'
+                  ? `Resultados para «${feedInfo.label}»`
+                  : feedInfo.mode === 'genre' || feedInfo.mode === 'artist'
+                  ? feedInfo.label
+                  : likedTracks.length > 0 || customPlaylists.length > 0
+                  ? 'Recomendado para vos'
+                  : 'Descubrimiento del día'}
+              </h1>
+              <p className="section-bar-sub">
+                {feedInfo.mode === 'search'
+                  ? `${results.length} canciones encontradas`
+                  : feedInfo.mode === 'recommended' && feedInfo.label
+                  ? `Inspirado en ${feedInfo.label}`
+                  : 'Tocá cualquier canción para reproducir o descargar en Offline'}
+              </p>
             </div>
 
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              {results.length > 0 && (
+                <button
+                  type="button"
+                  className="icon-btn"
+                  disabled={isOffline}
+                  onClick={() => playFromList(results, 0, true)}
+                  title="Reproducir mezcla aleatoria"
+                >
+                  <Icon name="shuffle" size={16} />
+                </button>
+              )}
+              <button
+                type="button"
+                className="icon-btn"
+                disabled={loading || isOffline}
+                onClick={() =>
+                  activeChip === 'for-you'
+                    ? loadRecommendedOrRandomFeed(likedTracks, false)
+                    : loadRecommendedOrRandomFeed(likedTracks, true)
+                }
+                title="Actualizar recomendaciones"
+              >
+                <Icon name="refresh" size={16} className={loading ? 'spin' : ''} />
+              </button>
+            </div>
+          </div>
+
+          {results.length === 0 ? (
+            <div className="empty">
+              <div className="empty-title">
+                {loading ? 'Cargando recomendaciones…' : 'Sin resultados por ahora'}
+              </div>
+              <p>Probá buscando otro artista o tocá actualizar.</p>
+            </div>
+          ) : (
+            <div className="track-list">
+              {results.map((track, idx) => renderTrackRow(track, idx, results, null))}
+            </div>
+          )}
+        </section>
+      )}
+
+      {/* ==================== TAB 2: BIBLIOTECA (FAVORITOS / OFFLINE / PROPIAS) ==================== */}
+      {activeTab === 'library' && (
+        <section>
+          <div className="library-switcher" role="tablist" aria-label="Tus librerías">
+            <button
+              type="button"
+              className={`library-pill ${selectedLibrary === 'liked' ? 'active' : ''}`}
+              onClick={() => setSelectedLibrary('liked')}
+            >
+              <Icon name="heart-fill" size={13} />
+              <span>Favoritos</span>
+              <span className="library-pill-count">{likedTracks.length}</span>
+            </button>
+
+            <button
+              type="button"
+              className={`library-pill ${selectedLibrary === 'offline' ? 'active' : ''}`}
+              onClick={() => setSelectedLibrary('offline')}
+            >
+              <Icon name="offline-pin" size={13} />
+              <span>Offline</span>
+              <span className="library-pill-count">{offlineCatalog.length}</span>
+            </button>
+
+            {customPlaylists.map(pl => (
+              <button
+                key={pl.id}
+                type="button"
+                className={`library-pill ${selectedLibrary === pl.id ? 'active' : ''}`}
+                onClick={() => setSelectedLibrary(pl.id)}
+              >
+                <Icon name="folder" size={13} />
+                <span>{pl.name}</span>
+                <span className="library-pill-count">{pl.tracks.length}</span>
+              </button>
+            ))}
+
+            <button
+              type="button"
+              className="library-pill"
+              onClick={() => setCreatingPlaylist(v => !v)}
+              title="Crear nueva librería"
+            >
+              <Icon name={creatingPlaylist ? 'close' : 'plus'} size={13} />
+              <span>{creatingPlaylist ? 'Cancelar' : 'Nueva'}</span>
+            </button>
+          </div>
+
+          {creatingPlaylist && (
             <form
-              className={`search-bar ${isOffline ? 'offline-section-disabled' : ''}`.trim()}
+              className="search-bar"
+              style={{ marginBottom: 12 }}
               onSubmit={e => {
                 e.preventDefault();
-                if (!isOffline) searchTracks(query);
+                const created = createCustomPlaylist(newPlaylistName);
+                if (created) {
+                  setNewPlaylistName('');
+                  setCreatingPlaylist(false);
+                  setSelectedLibrary(created.id);
+                }
               }}
             >
               <input
-                type="search"
+                type="text"
                 className="search-input"
-                enterKeyHint="search"
-                placeholder={
-                  isOffline
-                    ? 'Búsqueda deshabilitada sin conexión a internet…'
-                    : 'Buscar canción, artista o álbum…'
-                }
-                value={query}
-                onChange={e => setQuery(e.target.value)}
-                disabled={isOffline}
+                placeholder="Nombre de la librería (ej. Entrenamiento, Viaje)…"
+                value={newPlaylistName}
+                onChange={e => setNewPlaylistName(e.target.value)}
+                required
               />
-              <button type="submit" className="btn" disabled={loading || isOffline}>
-                <Icon name="search" size={15} />
-                {loading ? 'Buscando…' : 'Buscar'}
+              <button type="submit" className="btn sm">
+                Crear
               </button>
             </form>
+          )}
 
-            <div className={`toolbar ${isOffline ? 'offline-section-disabled' : ''}`.trim()}>
-              <div className="toolbar-group">
-                {feedInfo.mode === 'recommended' ? (
-                  <span className="badge coral">
-                    <Icon name="heart-fill" size={12} /> Recomendado por tu gusto: {feedInfo.label}
-                  </span>
-                ) : feedInfo.mode === 'random' ? (
-                  <span className="badge cobalt">
-                    <Icon name="shuffle" size={12} /> Selección aleatoria: {feedInfo.label}
-                  </span>
-                ) : (
-                  <span className="badge neutral">
-                    <Icon name="search" size={12} /> Búsqueda: {feedInfo.label}
-                  </span>
-                )}
-
-                {getLikedCategories().slice(0, 3).map(cat => (
-                  <button
-                    key={cat}
-                    type="button"
-                    className="btn secondary sm"
-                    disabled={isOffline}
-                    onClick={() => searchTracks(cat, { mode: 'recommended', label: cat })}
-                  >
-                    <Icon name="heart-fill" size={12} /> {cat}
-                  </button>
-                ))}
-              </div>
-
-              <div className="toolbar-group">
-                {likedTracks.length > 0 && (
-                  <button
-                    type="button"
-                    className="btn secondary sm"
-                    disabled={isOffline}
-                    onClick={() => loadRecommendedOrRandomFeed(likedTracks, false)}
-                  >
-                    <Icon name="sparkles" size={14} /> Para mí
-                  </button>
-                )}
-                <button
-                  type="button"
-                  className="btn secondary sm"
-                  disabled={isOffline}
-                  onClick={() => loadRecommendedOrRandomFeed(likedTracks, true)}
-                >
-                  <Icon name="shuffle" size={14} /> Música aleatoria
-                </button>
+          {/* Sleek Spotify/Apple-Music-style Playlist Header */}
+          <div className="playlist-header">
+            <div className="playlist-header-info">
+              <h1 className="playlist-header-title">{activeLibraryTitle}</h1>
+              <div className="playlist-header-meta">
+                {activeLibraryTracks.length}{' '}
+                {activeLibraryTracks.length === 1 ? 'canción' : 'canciones'}
+                {selectedLibrary === 'offline' && deviceQuota
+                  ? ` · ${deviceQuota.usedMB} MB en dispositivo`
+                  : isOffline && playableActiveLibraryTracks.length < activeLibraryTracks.length
+                  ? ` · ${playableActiveLibraryTracks.length} disponibles sin red`
+                  : ''}
               </div>
             </div>
 
-            <div className="grid">
-              {results.map((track, idx) => {
-                const dl = downloads[track.id];
-                const liked = isLiked(track.id);
-                const savedPlaylistCount = customPlaylists.filter(p =>
-                  p.tracks.some(t => String(t.id) === String(track.id))
-                ).length;
-                const isCurrent = currentTrack?.id === track.id;
-                const isOfflineReady = dl?.status === 'ready' || isTrackAvailableOffline(track);
-                const isGreyedOffline = isOffline && !isOfflineReady;
+            <div className="playlist-header-actions">
+              <button
+                type="button"
+                className={`icon-btn ${shuffle ? 'active' : ''}`}
+                onClick={() => setShuffle(s => !s)}
+                title={shuffle ? 'Aleatorio activado' : 'Activar aleatorio'}
+              >
+                <Icon name="shuffle" size={17} />
+              </button>
+
+              <button
+                type="button"
+                className={`icon-btn ${repeatMode !== 'off' ? 'active' : ''}`}
+                onClick={cycleRepeatMode}
+                title="Modo repetición"
+              >
+                <Icon name={repeatMode === 'one' ? 'repeat-1' : 'repeat'} size={17} />
+              </button>
+
+              {selectedLibrary !== 'offline' && activeLibraryTracks.length > 0 && (
+                <button
+                  type="button"
+                  className={`icon-btn ${syncingAll ? 'active' : ''}`}
+                  disabled={syncingAll || isOffline}
+                  onClick={() => downloadCollectionForOffline(activeLibraryTracks)}
+                  title="Descargar toda esta librería a Offline"
+                >
+                  <Icon
+                    name={syncingAll ? 'loader' : 'download'}
+                    size={17}
+                    className={syncingAll ? 'spin' : ''}
+                  />
+                </button>
+              )}
+
+              {activeCustomPlaylist && (
+                <button
+                  type="button"
+                  className="icon-btn"
+                  onClick={() => deleteCustomPlaylist(activeCustomPlaylist.id)}
+                  title="Eliminar esta librería"
+                >
+                  <Icon name="trash" size={16} />
+                </button>
+              )}
+
+              <button
+                type="button"
+                className="icon-btn play-circle"
+                disabled={playableActiveLibraryTracks.length === 0}
+                onClick={() => playFromList(activeLibraryTracks, 0)}
+                title="Reproducir librería"
+              >
+                <Icon name="play" size={18} />
+              </button>
+            </div>
+          </div>
+
+          {activeLibraryTracks.length === 0 ? (
+            <div className="empty">
+              <div className="empty-title">Sin canciones todavía</div>
+              <p>
+                {selectedLibrary === 'liked'
+                  ? 'Tocá el corazón en cualquier canción para sumarla a Favoritos.'
+                  : selectedLibrary === 'offline'
+                  ? 'Las canciones que descargues aparecerán acá para escuchar sin internet.'
+                  : 'Usá el menú (⋯) en cualquier canción para guardarla en esta librería.'}
+              </p>
+            </div>
+          ) : (
+            <div className="track-list">
+              {activeLibraryTracks.map((track, idx) =>
+                renderTrackRow(track, idx, activeLibraryTracks, selectedLibrary)
+              )}
+            </div>
+          )}
+        </section>
+      )}
+
+      {/* ==================== TAB 3: ARCHIVOS EN SERVIDOR ==================== */}
+      {activeTab === 'files' && (
+        <section className={isOffline ? 'offline-section-disabled' : ''}>
+          <div className="section-bar">
+            <div>
+              <h1 className="section-bar-title">Puente del servidor</h1>
+              <p className="section-bar-sub">
+                Los archivos MP3 temporales se eliminan automáticamente apenas pasan a tu dispositivo.
+              </p>
+            </div>
+            <button
+              type="button"
+              className="icon-btn"
+              disabled={isOffline}
+              onClick={fetchLibraryFiles}
+              title="Actualizar"
+            >
+              <Icon name="refresh" size={16} />
+            </button>
+          </div>
+
+          {libraryFiles.length === 0 ? (
+            <div className="empty">
+              <div className="empty-title">Servidor limpio (0 archivos en cola)</div>
+              <p>Cada MP3 se purga automáticamente después de guardarse en tu caché Offline.</p>
+            </div>
+          ) : (
+            <div className="track-list">
+              {libraryFiles.map((file, idx) => {
+                const isCached = offlineUrls[file.url];
+                const cleanTitle = file.filename
+                  .replace(/_\d+\.mp3$/i, '')
+                  .replace(/\.mp3$/i, '')
+                  .replace(/_/g, ' ');
+                const formattedList = libraryFiles.map(f => ({
+                  id: f.filename,
+                  title: f.filename.replace(/\.mp3$/i, ''),
+                  artist: `${f.sizeMB} MB · Servidor`,
+                  artwork: '/icon.svg',
+                  filename: f.filename,
+                  streamUrl: f.url
+                }));
 
                 return (
-                  <article
-                    key={track.id}
-                    className={`card item ${isCurrent ? 'playing' : ''} ${
-                      isGreyedOffline ? 'offline-unavailable' : ''
-                    }`.trim()}
-                  >
-                    <div className="item-head">
-                      <div className="item-media">
-                        <div
-                          className="artwork-wrap"
-                          onClick={() => {
-                            if (!isGreyedOffline) playFromList(results, idx);
-                          }}
-                          title={isGreyedOffline ? 'Requiere conexión a internet' : 'Reproducir pista'}
-                        >
-                          <img
-                            src={track.artwork || '/icon.svg'}
-                            alt={track.title}
-                            loading="lazy"
-                            onError={e => {
-                              e.currentTarget.src = '/icon.svg';
-                            }}
-                          />
-                          <div className="artwork-play-overlay">
-                            <Icon name={isCurrent && isPlaying ? 'pause' : 'play'} size={18} />
-                          </div>
-                        </div>
-                        <div className="item-info">
-                          <div className="item-title">{track.title}</div>
-                          <div className="item-sub">
-                            {track.artist} {track.album ? `· ${track.album}` : ''}
-                          </div>
+                  <div key={file.filename} className="track-row">
+                    <div
+                      className="track-row-main"
+                      onClick={() => playFromList(formattedList, idx)}
+                    >
+                      <div className="track-cover">
+                        <img src="/icon.svg" alt="" />
+                        <div className="track-cover-overlay">
+                          <Icon name="play" size={15} />
                         </div>
                       </div>
-
-                      <div className="item-actions">
-                        <button
-                          type="button"
-                          className={`btn heart ${liked ? 'liked' : ''}`}
-                          onClick={() => toggleLike(track)}
-                          title={liked ? 'Quitar corazón' : 'Dar corazón (Favoritos)'}
-                        >
-                          <Icon name={liked ? 'heart-fill' : 'heart'} size={14} />
-                        </button>
-
-                        <button
-                          type="button"
-                          className="btn secondary sm"
-                          onClick={() => openSaveModal(track)}
-                          title="Elegir en qué librería guardar"
-                        >
-                          <Icon name="folder" size={14} /> Guardar
-                          {savedPlaylistCount > 0 ? ` (${savedPlaylistCount})` : ''}
-                        </button>
-
-                        {isOfflineReady ? (
-                          <>
-                            <span className="badge mint">
-                              <Icon name="offline-pin" size={13} /> Offline
-                            </span>
-                            <button
-                              type="button"
-                              onClick={() => exportTrackFile(dl?.filename || track.filename)}
-                              className="btn secondary sm"
-                              title="Exportar archivo MP3 al teléfono o PC"
-                            >
-                              <Icon name="file-audio" size={14} /> Archivo
-                            </button>
-                          </>
-                        ) : isGreyedOffline ? (
-                          <span className="badge neutral">
-                            <Icon name="wifi-off" size={12} /> Sin internet
-                          </span>
-                        ) : dl?.status === 'downloading' ? (
-                          <span className="badge amber">
-                            Extrayendo {Math.round(dl.progress || 0)}%
-                          </span>
-                        ) : (
-                          <button
-                            type="button"
-                            className="btn sm"
-                            disabled={isOffline}
-                            onClick={() => startDownload(track)}
-                          >
-                            <Icon name={dl?.status === 'error' ? 'refresh' : 'download'} size={14} />
-                            {dl?.status === 'error' ? 'Reintentar MP3' : 'MP3'}
-                          </button>
-                        )}
+                      <div className="track-text">
+                        <div className="track-title">{cleanTitle}</div>
+                        <div className="track-sub">{file.sizeMB} MB · MP3 temporal</div>
                       </div>
                     </div>
 
-                    {dl?.status === 'downloading' && (
-                      <div className="progress-track">
-                        <div
-                          className="progress-fill"
-                          style={{ width: `${dl.progress || 8}%` }}
-                        />
-                      </div>
-                    )}
+                    <div className="track-actions">
+                      <button
+                        type="button"
+                        className={`icon-btn ${isCached ? 'offline-done' : ''}`}
+                        onClick={() =>
+                          saveUrlToOfflineCache(file.url, {
+                            id: `offline_${file.filename}`,
+                            title: cleanTitle,
+                            artist: 'Guardado desde servidor',
+                            artwork: '/icon.svg',
+                            filename: file.filename,
+                            streamUrl: file.url
+                          })
+                        }
+                        title={isCached ? 'En Offline' : 'Pasar a Offline'}
+                      >
+                        <Icon name={isCached ? 'offline-pin' : 'download'} size={16} />
+                      </button>
 
-                    <dl className="meta">
-                      <div>
-                        <dt>Duración</dt>
-                        <dd>{track.duration || '—'}</dd>
-                      </div>
-                      <div>
-                        <dt>Género</dt>
-                        <dd>{track.genre || 'Música'}</dd>
-                      </div>
-                      <div>
-                        <dt>Estado</dt>
-                        <dd>
-                          {isOfflineReady
-                            ? 'En librería Offline'
-                            : isGreyedOffline
-                            ? 'Requiere internet'
-                            : liked
-                            ? 'En Favoritos'
-                            : savedPlaylistCount > 0
-                            ? `En ${savedPlaylistCount} librería(s)`
-                            : 'Streaming disponible'}
-                        </dd>
-                      </div>
-                    </dl>
-                  </article>
+                      <button
+                        type="button"
+                        className="icon-btn"
+                        onClick={() => deleteServerFile(file.filename)}
+                        title="Borrar del servidor"
+                      >
+                        <Icon name="trash" size={16} />
+                      </button>
+                    </div>
+                  </div>
                 );
               })}
             </div>
-          </section>
-        )}
+          )}
+        </section>
+      )}
 
-        {/* ==================== TAB 2: LIBRERÍAS (FAVORITOS / OFFLINE / PROPIAS) ==================== */}
-        {activeTab === 'library' && (
-          <section>
-            <div className="page-head">
+      {/* ==================== TAB 4: AJUSTES & SPOTIFY SYNC ==================== */}
+      {activeTab === 'settings' && (
+        <section>
+          <div className="section-bar">
+            <div>
+              <h1 className="section-bar-title">Ajustes y sincronización</h1>
+              <p className="section-bar-sub">
+                Importá colecciones desde Spotify o CSV y administrá tu espacio Offline.
+              </p>
+            </div>
+          </div>
+
+          <div className="card" style={{ marginBottom: 14 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 10, marginBottom: 12 }}>
               <div>
-                <h1 className="page-title">Mis librerías</h1>
-                <p className="page-sub">
-                  Tu colección separada entre Favoritos, Offline en el dispositivo y las librerías que vos crees.
-                </p>
+                <div className="track-title" style={{ fontSize: '1rem' }}>
+                  Importar desde Spotify
+                </div>
+                <div className="section-bar-sub">
+                  Pegá un link público de Spotify o subí tu archivo <code>.csv</code> de Exportify. Podrás elegir en qué librería guardarlo.
+                </div>
               </div>
-              <button
-                type="button"
-                className="btn secondary sm"
-                onClick={() => setCreatingPlaylist(v => !v)}
-              >
-                {creatingPlaylist ? (
-                  <>
-                    <Icon name="close" size={13} /> Cancelar
-                  </>
-                ) : (
-                  <>
-                    <Icon name="plus" size={13} /> Nueva librería
-                  </>
-                )}
+              <span className="badge lime">Sync</span>
+            </div>
+
+            {spotifyMsg.text && (
+              <div className={`alert ${spotifyMsg.type === 'err' ? 'err' : 'ok'}`}>
+                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap' }}>
+                  <span>{spotifyMsg.text}</span>
+                  {spotifyMsg.type === 'ok' && !pendingSpotifyImport && (
+                    <button
+                      type="button"
+                      className="btn secondary sm"
+                      onClick={() => setActiveTab('library')}
+                    >
+                      Ver en Biblioteca <Icon name="arrow-right" size={13} />
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
+
+            <form
+              className={`search-bar ${isOffline ? 'offline-section-disabled' : ''}`.trim()}
+              style={{ marginBottom: 12 }}
+              onSubmit={async e => {
+                e.preventDefault();
+                if (!spotifyUrl.trim() || spotifyBusy || isOffline) return;
+                setSpotifyBusy(true);
+                setSpotifyMsg({ type: '', text: '' });
+                try {
+                  const res = await fetch('/api/spotify', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ url: spotifyUrl.trim() })
+                  });
+                  const data = await res.json();
+                  if (!res.ok) {
+                    setSpotifyMsg({
+                      type: 'err',
+                      text: data.error || 'No se pudo importar desde Spotify.'
+                    });
+                  } else {
+                    setSpotifyUrl('');
+                    openSpotifyImportModal(
+                      data.tracks || [],
+                      data.playlistName || 'Playlist Spotify'
+                    );
+                  }
+                } catch {
+                  setSpotifyMsg({ type: 'err', text: 'Error de red al importar playlist.' });
+                } finally {
+                  setSpotifyBusy(false);
+                }
+              }}
+            >
+              <input
+                type="url"
+                className="search-input"
+                placeholder="https://open.spotify.com/playlist/..."
+                value={spotifyUrl}
+                onChange={e => setSpotifyUrl(e.target.value)}
+                disabled={isOffline}
+                required
+              />
+              <button type="submit" className="btn sm" disabled={spotifyBusy || isOffline}>
+                {spotifyBusy ? 'Leyendo…' : 'Importar link'}
+              </button>
+            </form>
+
+            {/* CSV Upload works even offline because it parses locally! */}
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                flexWrap: 'wrap',
+                gap: 10,
+                fontSize: '0.8rem',
+                color: 'var(--muted)'
+              }}
+            >
+              <span>
+                ¿Tenés un archivo <code>.csv</code> de{' '}
+                <a
+                  href="https://exportify.net"
+                  target="_blank"
+                  rel="noreferrer"
+                  style={{ textDecoration: 'underline', fontWeight: 700 }}
+                >
+                  exportify.net
+                </a>
+                ?
+              </span>
+              <label className="btn secondary sm" style={{ cursor: 'pointer' }}>
+                <Icon name="folder" size={14} /> Subir CSV de Spotify
+                <input
+                  type="file"
+                  accept=".csv,text/csv,text/plain,application/vnd.ms-excel"
+                  style={{ display: 'none' }}
+                  onChange={async e => {
+                    const file = e.target.files?.[0];
+                    e.target.value = '';
+                    if (file) {
+                      await handleSpotifyCsvFile(file);
+                    }
+                  }}
+                />
+              </label>
+            </div>
+
+            {/* Inline destination picker so mobile browsers that block <dialog> after file input still work 100% */}
+            {pendingSpotifyImport && (
+              <div className="import-destination-box">
+                <div className="dialog-head" style={{ marginBottom: 8 }}>
+                  <div>
+                    <div className="dialog-title">
+                      ¿En qué librería querés guardar estas {pendingSpotifyImport.tracks.length} canciones?
+                    </div>
+                    <div className="dialog-sub">
+                      Origen: «{pendingSpotifyImport.sourceName}»
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    className="icon-btn"
+                    onClick={closeSpotifyImportModal}
+                    title="Cancelar"
+                  >
+                    <Icon name="close" size={15} />
+                  </button>
+                </div>
+
+                <div className="dialog-list">
+                  <button
+                    type="button"
+                    className="dialog-option selected"
+                    onClick={() => confirmSpotifyImport('liked')}
+                  >
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 7 }}>
+                      <Icon name="heart-fill" size={14} /> Guardar en Favoritos (Con corazón)
+                    </span>
+                    <Icon name="arrow-right" size={14} />
+                  </button>
+
+                  {customPlaylists.map(pl => (
+                    <button
+                      key={pl.id}
+                      type="button"
+                      className="dialog-option"
+                      onClick={() => confirmSpotifyImport(pl.id)}
+                    >
+                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 7 }}>
+                        <Icon name="folder" size={14} /> Guardar en «{pl.name}» ({pl.tracks.length})
+                      </span>
+                      <Icon name="arrow-right" size={14} />
+                    </button>
+                  ))}
+                </div>
+
+                <form
+                  className="search-bar"
+                  style={{ marginTop: 8, marginBottom: 0 }}
+                  onSubmit={e => {
+                    e.preventDefault();
+                    confirmSpotifyImport('new_playlist', spotifyNewLibName);
+                  }}
+                >
+                  <input
+                    type="text"
+                    className="search-input"
+                    placeholder="O escribir nombre de nueva librería…"
+                    value={spotifyNewLibName}
+                    onChange={e => setSpotifyNewLibName(e.target.value)}
+                    required
+                  />
+                  <button type="submit" className="btn sm">
+                    <Icon name="plus" size={13} /> Crear y guardar
+                  </button>
+                </form>
+              </div>
+            )}
+          </div>
+
+          <div className="card">
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
+              <div>
+                <div className="track-title" style={{ fontSize: '1rem' }}>
+                  Almacenamiento Offline
+                </div>
+                <div className="section-bar-sub">
+                  {deviceQuota
+                    ? `${deviceQuota.usedMB} MB usados de ~${deviceQuota.quotaGB} GB (${offlineCatalog.length} canciones en caché).`
+                    : `${offlineCatalog.length} canciones guardadas en este dispositivo.`}
+                </div>
+              </div>
+              {offlineCatalog.length > 0 && (
+                <button
+                  type="button"
+                  className="btn danger sm"
+                  onClick={async () => {
+                    if ('caches' in window) {
+                      await caches.delete(AUDIO_CACHE_NAME);
+                    }
+                    persistOfflineCatalog([]);
+                    await refreshOfflineCacheList();
+                  }}
+                >
+                  <Icon name="trash" size={14} /> Vaciar Offline
+                </button>
+              )}
+            </div>
+          </div>
+        </section>
+      )}
+
+      {/* ==================== TAB 5: ADMIN PANEL ==================== */}
+      {activeTab === 'admin' && user.is_admin && (
+        <section className={isOffline ? 'offline-section-disabled' : ''}>
+          <div className="section-bar">
+            <div>
+              <h1 className="section-bar-title">Administración</h1>
+              <p className="section-bar-sub">
+                Códigos de invitación, usuarios y estado del servidor.
+              </p>
+            </div>
+          </div>
+
+          <div className="grid three" style={{ marginBottom: 16 }}>
+            <div className="stat">
+              <div className="stat-label">Usuarios</div>
+              <div className="stat-value">{adminData.users.length}</div>
+              <div className="stat-hint">
+                {adminData.users.filter(u => u.active).length} activos
+              </div>
+            </div>
+
+            <div className="stat">
+              <div className="stat-label">Invitaciones</div>
+              <div className="stat-value">
+                {adminData.invites.filter(i => !i.revoked && i.used_count < i.max_uses).length}
+              </div>
+              <div className="stat-hint">Disponibles</div>
+            </div>
+
+            <div className="stat">
+              <div className="stat-label">Disco VPS</div>
+              <div className="stat-value">
+                {adminData.storage
+                  ? `${adminData.storage.usedMB} / ${adminData.storage.maxMB} MB`
+                  : '—'}
+              </div>
+              <div className="stat-hint">
+                {adminData.storage ? `${adminData.storage.fileCount} archivos` : 'Calculando…'}
+              </div>
+            </div>
+          </div>
+
+          <div className="card" style={{ marginBottom: 16 }}>
+            <div className="track-title" style={{ fontSize: '1rem', marginBottom: 10 }}>
+              Crear código de invitación
+            </div>
+            {adminMsg && <div className="alert ok">{adminMsg}</div>}
+            <form className="form" onSubmit={handleCreateInvite}>
+              <div className="grid two">
+                <div className="field">
+                  <label htmlFor="invite-label">Etiqueta</label>
+                  <input
+                    id="invite-label"
+                    type="text"
+                    placeholder="Ej. Amigos, Móvil…"
+                    value={inviteLabel}
+                    onChange={e => setInviteLabel(e.target.value)}
+                  />
+                </div>
+                <div className="field">
+                  <label htmlFor="invite-uses">Usos permitidos</label>
+                  <input
+                    id="invite-uses"
+                    type="number"
+                    min={1}
+                    max={100}
+                    value={inviteMaxUses}
+                    onChange={e => setInviteMaxUses(e.target.value)}
+                  />
+                </div>
+              </div>
+              <div>
+                <button type="submit" className="btn sm">
+                  <Icon name="plus" size={14} /> Generar código
+                </button>
+              </div>
+            </form>
+          </div>
+
+          <div className="track-list" style={{ marginBottom: 16 }}>
+            {adminData.invites.map(inv => {
+              const exhausted = inv.used_count >= inv.max_uses;
+              return (
+                <div key={inv.code} className="track-row">
+                  <div className="track-text">
+                    <div className="track-title" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                      <span className="code-pill">{inv.code}</span>
+                      <span>{inv.label}</span>
+                    </div>
+                    <div className="track-sub">
+                      Usos: {inv.used_count}/{inv.max_uses} ·{' '}
+                      {inv.revoked ? 'Revocado' : exhausted ? 'Agotado' : 'Activo'}
+                    </div>
+                  </div>
+                  <div className="track-actions">
+                    <button
+                      type="button"
+                      className="btn secondary sm"
+                      onClick={() => copyInviteCode(inv.code)}
+                    >
+                      {copiedCode === inv.code ? 'Copiado' : 'Copiar'}
+                    </button>
+                    <button
+                      type="button"
+                      className="icon-btn"
+                      onClick={() => handleAdminAction({ action: 'delete_invite', code: inv.code })}
+                      title="Eliminar invitación"
+                    >
+                      <Icon name="trash" size={15} />
+                    </button>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </section>
+      )}
+
+      {/* ==================== DIALOG 1: TRACK OPTIONS SHEET (⋯) ==================== */}
+      <dialog
+        ref={menuDialogRef}
+        closedby="any"
+        className="save-dialog"
+        aria-labelledby="track-menu-title"
+        onClose={() => setMenuTrack(null)}
+      >
+        {menuTrack?.track && (
+          <div>
+            <div className="dialog-head">
+              <div style={{ minWidth: 0 }}>
+                <div id="track-menu-title" className="dialog-title">
+                  {menuTrack.track.title}
+                </div>
+                <div className="dialog-sub">{menuTrack.track.artist}</div>
+              </div>
+              <button type="button" className="icon-btn" onClick={closeTrackMenu}>
+                <Icon name="close" size={16} />
               </button>
             </div>
 
-            {creatingPlaylist && (
-              <form
-                className="search-bar"
-                style={{ marginBottom: 14 }}
-                onSubmit={e => {
-                  e.preventDefault();
-                  const created = createCustomPlaylist(newPlaylistName);
-                  if (created) {
-                    setNewPlaylistName('');
-                    setCreatingPlaylist(false);
-                    setSelectedLibrary(created.id);
-                  }
+            <div className="dialog-list">
+              <button
+                type="button"
+                className="dialog-option"
+                onClick={() => {
+                  toggleLike(menuTrack.track);
+                  closeTrackMenu();
                 }}
               >
-                <input
-                  type="text"
-                  className="search-input"
-                  placeholder="Nombre de tu nueva librería (ej. Gym, Viaje, Rock)…"
-                  value={newPlaylistName}
-                  onChange={e => setNewPlaylistName(e.target.value)}
-                  required
-                />
-                <button type="submit" className="btn sm">
-                  Crear librería
-                </button>
-              </form>
-            )}
-
-            {/* Switcher between Favoritos, Offline, and Custom Libraries */}
-            <div className="library-switcher" role="tablist" aria-label="Selector de librería">
-              <button
-                type="button"
-                className={`library-pill ${selectedLibrary === 'liked' ? 'active' : ''}`}
-                onClick={() => setSelectedLibrary('liked')}
-              >
-                <Icon name="heart-fill" size={14} />
-                <span>Favoritos</span>
-                <span className="library-pill-count">{likedTracks.length}</span>
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+                  <Icon
+                    name={isLiked(menuTrack.track.id) ? 'heart-fill' : 'heart'}
+                    size={15}
+                  />
+                  {isLiked(menuTrack.track.id)
+                    ? 'Quitar de Favoritos'
+                    : 'Agregar a Favoritos'}
+                </span>
               </button>
 
               <button
                 type="button"
-                className={`library-pill ${selectedLibrary === 'offline' ? 'active' : ''}`}
-                onClick={() => setSelectedLibrary('offline')}
+                className="dialog-option"
+                onClick={() => openSaveModal(menuTrack.track)}
               >
-                <Icon name="offline-pin" size={14} />
-                <span>Offline</span>
-                <span className="library-pill-count">{offlineCatalog.length}</span>
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+                  <Icon name="folder" size={15} /> Guardar en una librería…
+                </span>
+                <Icon name="arrow-right" size={14} />
               </button>
 
-              {customPlaylists.map(pl => (
-                <button
-                  key={pl.id}
-                  type="button"
-                  className={`library-pill ${selectedLibrary === pl.id ? 'active' : ''}`}
-                  onClick={() => setSelectedLibrary(pl.id)}
-                >
-                  <Icon name="folder" size={14} />
-                  <span>{pl.name}</span>
-                  <span className="library-pill-count">{pl.tracks.length}</span>
-                </button>
-              ))}
-            </div>
-
-            <div className="storage-banner">
-              <span>
-                <strong>Vista activa:</strong> {activeLibraryTitle} ·{' '}
-                {deviceQuota
-                  ? `${deviceQuota.usedMB} MB usados de ~${deviceQuota.quotaGB} GB en dispositivo`
-                  : 'Caché offline del navegador activo'}
-              </span>
-              <span className="badge mint">
-                <Icon name="offline-pin" size={12} /> {offlineCatalog.length} pistas offline
-              </span>
-            </div>
-
-            <div className="toolbar">
-              <div className="toolbar-group">
+              {isTrackAvailableOffline(menuTrack.track) ? (
                 <button
                   type="button"
-                  className="btn sm"
-                  disabled={playableActiveLibraryTracks.length === 0}
-                  onClick={() => playFromList(activeLibraryTracks, 0)}
+                  className="dialog-option"
+                  onClick={() => {
+                    exportTrackFile(menuTrack.track.filename, menuTrack.track.streamUrl);
+                    closeTrackMenu();
+                  }}
                 >
-                  <Icon name="play" size={13} /> Reproducir librería
-                  {isOffline && playableActiveLibraryTracks.length < activeLibraryTracks.length
-                    ? ` (${playableActiveLibraryTracks.length} offline)`
-                    : ''}
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+                    <Icon name="file-audio" size={15} /> Exportar archivo MP3 al dispositivo
+                  </span>
                 </button>
+              ) : (
                 <button
                   type="button"
-                  className={`btn secondary sm ${shuffle ? 'cobalt' : ''}`}
-                  onClick={() => setShuffle(s => !s)}
+                  className="dialog-option"
+                  disabled={isOffline}
+                  onClick={() => {
+                    startDownload(menuTrack.track);
+                    closeTrackMenu();
+                  }}
                 >
-                  <Icon name="shuffle" size={13} /> Aleatorio: {shuffle ? 'ON' : 'OFF'}
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+                    <Icon name="download" size={15} /> Descargar para escuchar Offline
+                  </span>
                 </button>
-                <button type="button" className="btn secondary sm" onClick={cycleRepeatMode}>
-                  <Icon name={repeatMode === 'one' ? 'repeat-1' : 'repeat'} size={13} /> Bucle:{' '}
-                  {repeatMode === 'off' ? 'No' : repeatMode === 'all' ? 'Todo' : '1 pista'}
-                </button>
-              </div>
-
-              <div className="toolbar-group">
-                {selectedLibrary !== 'offline' && (
-                  <button
-                    type="button"
-                    className={`btn secondary sm ${isOffline ? 'offline-section-disabled' : ''}`.trim()}
-                    disabled={activeLibraryTracks.length === 0 || syncingAll || isOffline}
-                    onClick={() => downloadCollectionForOffline(activeLibraryTracks)}
-                  >
-                    <Icon name="download" size={13} />
-                    {syncingAll ? 'Sincronizando…' : 'Bajar toda esta librería a Offline'}
-                  </button>
-                )}
-
-                {activeCustomPlaylist && (
-                  <button
-                    type="button"
-                    className="btn danger sm"
-                    onClick={() => deleteCustomPlaylist(activeCustomPlaylist.id)}
-                  >
-                    <Icon name="trash" size={13} /> Eliminar librería
-                  </button>
-                )}
-              </div>
-            </div>
-
-            {activeLibraryTracks.length === 0 ? (
-              <div className="empty">
-                <div className="empty-title">Esta librería está vacía</div>
-                <p>
-                  {selectedLibrary === 'liked'
-                    ? 'Toca el icono de corazón en cualquier canción de Explorar para guardarla en Favoritos.'
-                    : selectedLibrary === 'offline'
-                    ? 'Cuando descargues cualquier MP3 aparecerá automáticamente aquí para escuchar sin internet.'
-                    : 'Usa el botón «Guardar» en Explorar para agregar canciones a esta librería.'}
-                </p>
-              </div>
-            ) : (
-              <div className="grid">
-                {activeLibraryTracks.map((track, idx) => {
-                  const dl = downloads[track.id];
-                  const offItem = offlineCatalog.find(
-                    t =>
-                      String(t.id) === String(track.id) ||
-                      (track.filename && t.filename === track.filename)
-                  );
-                  const filename = track.filename || dl?.filename || offItem?.filename;
-                  const streamUrl =
-                    track.streamUrl ||
-                    offItem?.streamUrl ||
-                    (filename ? `/api/stream?file=${encodeURIComponent(filename)}` : null);
-                  const isOfflineReady =
-                    selectedLibrary === 'offline' ||
-                    Boolean(offItem) ||
-                    Boolean(streamUrl && offlineUrls[streamUrl]);
-                  const isGreyedOffline = isOffline && !isOfflineReady;
-                  const isCurrent = currentTrack?.id === track.id;
-                  const liked = isLiked(track.id);
-
-                  return (
-                    <article
-                      key={`${selectedLibrary}_${track.id}`}
-                      className={`card item ${isCurrent ? 'playing' : ''} ${
-                        isGreyedOffline ? 'offline-unavailable' : ''
-                      }`.trim()}
-                    >
-                      <div className="item-head">
-                        <div className="item-media">
-                          <div
-                            className="artwork-wrap"
-                            onClick={() => {
-                              if (!isGreyedOffline) playFromList(activeLibraryTracks, idx);
-                            }}
-                            title={
-                              isGreyedOffline
-                                ? 'No descargada en el dispositivo (requiere internet)'
-                                : 'Reproducir pista'
-                            }
-                          >
-                            <img
-                              src={track.artwork || '/icon.svg'}
-                              alt={track.title}
-                              loading="lazy"
-                              onError={e => {
-                                e.currentTarget.src = '/icon.svg';
-                              }}
-                            />
-                            <div className="artwork-play-overlay">
-                              <Icon name={isCurrent && isPlaying ? 'pause' : 'play'} size={18} />
-                            </div>
-                          </div>
-                          <div className="item-info">
-                            <div className="item-title">{track.title}</div>
-                            <div className="item-sub">{track.artist}</div>
-                          </div>
-                        </div>
-
-                        <div className="item-actions">
-                          {isOfflineReady ? (
-                            <span className="badge mint">
-                              <Icon name="offline-pin" size={13} /> Offline
-                            </span>
-                          ) : isGreyedOffline ? (
-                            <span className="badge neutral">
-                              <Icon name="wifi-off" size={12} /> Requiere internet
-                            </span>
-                          ) : dl?.status === 'downloading' ? (
-                            <span className="badge amber">
-                              Extrayendo {Math.round(dl.progress || 0)}%
-                            </span>
-                          ) : (
-                            <button
-                              type="button"
-                              className="btn sm"
-                              disabled={isOffline}
-                              onClick={() => startDownload(track)}
-                            >
-                              <Icon
-                                name={dl?.status === 'error' ? 'refresh' : 'download'}
-                                size={14}
-                              />
-                              {dl?.status === 'error' ? 'Reintentar MP3' : 'Obtener MP3'}
-                            </button>
-                          )}
-
-                          {filename && isOfflineReady && (
-                            <button
-                              type="button"
-                              onClick={() => exportTrackFile(filename, streamUrl)}
-                              className="btn secondary sm"
-                              title="Exportar archivo MP3"
-                            >
-                              <Icon name="file-audio" size={14} /> Archivo
-                            </button>
-                          )}
-
-                          <button
-                            type="button"
-                            className={`btn heart ${liked ? 'liked' : ''}`}
-                            onClick={() => toggleLike(track)}
-                            title={liked ? 'Quitar de Favoritos' : 'Agregar a Favoritos'}
-                          >
-                            <Icon name={liked ? 'heart-fill' : 'heart'} size={14} />
-                          </button>
-
-                          <button
-                            type="button"
-                            className="btn secondary sm"
-                            onClick={() => openSaveModal(track)}
-                            title="Guardar en otra librería"
-                          >
-                            <Icon name="folder" size={14} />
-                          </button>
-
-                          {/* Delete / Remove action depending on current library */}
-                          {selectedLibrary === 'offline' ? (
-                            <button
-                              type="button"
-                              className="btn danger sm"
-                              onClick={() => deleteOfflineTrack(track)}
-                              title="Borrar MP3 del almacenamiento offline del dispositivo"
-                            >
-                              <Icon name="trash" size={14} /> Borrar
-                            </button>
-                          ) : selectedLibrary === 'liked' ? (
-                            <button
-                              type="button"
-                              className="btn danger sm"
-                              onClick={() => toggleLike(track)}
-                              title="Quitar canción de Favoritos"
-                            >
-                              <Icon name="trash" size={14} /> Quitar
-                            </button>
-                          ) : (
-                            <button
-                              type="button"
-                              className="btn danger sm"
-                              onClick={() =>
-                                removeTrackFromPlaylist(selectedLibrary, track.id)
-                              }
-                              title="Quitar canción de esta librería"
-                            >
-                              <Icon name="trash" size={14} /> Quitar
-                            </button>
-                          )}
-                        </div>
-                      </div>
-                    </article>
-                  );
-                })}
-              </div>
-            )}
-          </section>
-        )}
-
-        {/* ==================== TAB 3: ARCHIVOS EN SERVIDOR ==================== */}
-        {activeTab === 'files' && (
-          <section className={isOffline ? 'offline-section-disabled' : ''}>
-            <div className="page-head">
-              <div>
-                <h1 className="page-title">Archivos MP3 en servidor</h1>
-                <p className="page-sub">
-                  Puente temporal de descargas: el servidor elimina el MP3 automáticamente apenas tu dispositivo termina de bajarlo.
-                </p>
-              </div>
-              <button
-                type="button"
-                className="btn secondary sm"
-                disabled={isOffline}
-                onClick={fetchLibraryFiles}
-              >
-                <Icon name="refresh" size={13} /> Actualizar lista
-              </button>
-            </div>
-
-            {libraryFiles.length === 0 ? (
-              <div className="empty">
-                <div className="empty-title">Servidor limpio (0 archivos residuales)</div>
-                <p>El servidor borra automáticamente cada MP3 en cuanto pasa a tu teléfono o PC.</p>
-              </div>
-            ) : (
-              <div className="grid">
-                {libraryFiles.map((file, idx) => {
-                  const isCached = offlineUrls[file.url];
-                  const cleanTitle = file.filename
-                    .replace(/_\d+\.mp3$/i, '')
-                    .replace(/\.mp3$/i, '')
-                    .replace(/_/g, ' ');
-                  const formattedList = libraryFiles.map(f => ({
-                    id: f.filename,
-                    title: f.filename.replace(/\.mp3$/i, ''),
-                    artist: `${f.sizeMB} MB · Servidor`,
-                    artwork: '/icon.svg',
-                    filename: f.filename,
-                    streamUrl: f.url
-                  }));
-
-                  return (
-                    <article key={file.filename} className="card item">
-                      <div className="item-head">
-                        <div className="item-media">
-                          <div
-                            className="artwork-wrap"
-                            onClick={() => playFromList(formattedList, idx)}
-                          >
-                            <img src="/icon.svg" alt="MP3" />
-                            <div className="artwork-play-overlay">
-                              <Icon name="play" size={18} />
-                            </div>
-                          </div>
-                          <div className="item-info">
-                            <div className="item-title">{cleanTitle}</div>
-                            <div className="item-sub">{file.sizeMB} MB · Audio MP3</div>
-                          </div>
-                        </div>
-
-                        <div className="item-actions">
-                          <button
-                            type="button"
-                            className="btn secondary sm"
-                            onClick={() =>
-                              saveUrlToOfflineCache(file.url, {
-                                id: `offline_${file.filename}`,
-                                title: cleanTitle,
-                                artist: 'Guardado desde servidor',
-                                artwork: '/icon.svg',
-                                filename: file.filename,
-                                streamUrl: file.url
-                              })
-                            }
-                          >
-                            <Icon name={isCached ? 'offline-pin' : 'download'} size={14} />
-                            {isCached ? 'En Offline' : 'Guardar Offline'}
-                          </button>
-                          <a
-                            href={`${file.url}&download=1`}
-                            download={file.filename}
-                            className="btn sm"
-                          >
-                            <Icon name="file-audio" size={14} /> Archivo
-                          </a>
-                          <button
-                            type="button"
-                            className="btn danger sm"
-                            onClick={() => deleteServerFile(file.filename)}
-                            title="Borrar archivo del servidor"
-                          >
-                            <Icon name="trash" size={14} /> Borrar
-                          </button>
-                        </div>
-                      </div>
-                    </article>
-                  );
-                })}
-              </div>
-            )}
-          </section>
-        )}
-
-        {/* ==================== TAB 4: CONFIGURACIÓN (SPOTIFY SYNC & CACHÉ) ==================== */}
-        {activeTab === 'settings' && (
-          <section>
-            <div className="page-head">
-              <div>
-                <h1 className="page-title">Configuración y sincronización</h1>
-                <p className="page-sub">
-                  Importa playlists o álbumes desde Spotify, sube archivos CSV de Exportify y administra el almacenamiento de tu PWA.
-                </p>
-              </div>
-            </div>
-
-            <div
-              className={`card ${isOffline ? 'offline-section-disabled' : ''}`.trim()}
-              style={{ marginBottom: 16 }}
-            >
-              <div className="item-head" style={{ marginBottom: 12 }}>
-                <div>
-                  <div className="item-title">Importar música desde Spotify</div>
-                  <div className="item-sub">
-                    Pega el enlace de una playlist/álbum de Spotify o sube tu CSV: al cargar te preguntará si querés guardarlo en Me gusta (Favoritos) o en otra librería.
-                  </div>
-                </div>
-                <span className="badge mint">Spotify Sync</span>
-              </div>
-
-              {spotifyMsg.text && (
-                <div className={`alert ${spotifyMsg.type === 'err' ? 'err' : 'ok'}`}>
-                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap' }}>
-                    <span>{spotifyMsg.text}</span>
-                    {spotifyMsg.type === 'ok' && (
-                      <button
-                        type="button"
-                        className="btn secondary sm"
-                        onClick={() => setActiveTab('library')}
-                      >
-                        Ir a Mis librerías <Icon name="arrow-right" size={13} />
-                      </button>
-                    )}
-                  </div>
-                </div>
               )}
 
-              <form
-                className="search-bar"
-                style={{ marginBottom: 12 }}
-                onSubmit={async e => {
-                  e.preventDefault();
-                  if (!spotifyUrl.trim() || spotifyBusy || isOffline) return;
-                  setSpotifyBusy(true);
-                  setSpotifyMsg({ type: '', text: '' });
-                  try {
-                    const res = await fetch('/api/spotify', {
-                      method: 'POST',
-                      headers: { 'Content-Type': 'application/json' },
-                      body: JSON.stringify({ url: spotifyUrl.trim() })
-                    });
-                    const data = await res.json();
-                    if (!res.ok) {
-                      setSpotifyMsg({
-                        type: 'err',
-                        text: data.error || 'No se pudo importar desde Spotify.'
-                      });
-                    } else {
-                      setSpotifyUrl('');
-                      openSpotifyImportModal(
-                        data.tracks || [],
-                        data.playlistName || 'Playlist Spotify'
-                      );
-                    }
-                  } catch {
-                    setSpotifyMsg({ type: 'err', text: 'Error de red al importar playlist.' });
-                  } finally {
-                    setSpotifyBusy(false);
-                  }
-                }}
-              >
-                <input
-                  type="url"
-                  className="search-input"
-                  placeholder="https://open.spotify.com/playlist/..."
-                  value={spotifyUrl}
-                  onChange={e => setSpotifyUrl(e.target.value)}
-                  disabled={isOffline}
-                  required
-                />
-                <button type="submit" className="btn sm" disabled={spotifyBusy || isOffline}>
-                  {spotifyBusy ? 'Leyendo…' : 'Importar link'}
-                </button>
-              </form>
-
-              <div
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  justifyContent: 'space-between',
-                  flexWrap: 'wrap',
-                  gap: 8,
-                  fontSize: 12,
-                  color: 'var(--muted)'
-                }}
-              >
-                <span>
-                  ¿Tus «Me gusta» privados? Exportalos en{' '}
-                  <a href="https://exportify.net" target="_blank" rel="noreferrer">
-                    exportify.net
-                  </a>{' '}
-                  y subí el archivo <code>.csv</code>:
-                </span>
-                <label className="btn secondary sm" style={{ cursor: 'pointer' }}>
-                  <Icon name="folder" size={14} /> Subir CSV de Spotify
-                  <input
-                    type="file"
-                    accept=".csv,text/csv"
-                    style={{ display: 'none' }}
-                    onChange={async e => {
-                      const file = e.target.files?.[0];
-                      if (!file) return;
-                      const text = await file.text();
-                      const lines = text.split(/\r?\n/).filter(l => l.trim());
-                      if (lines.length < 2) return;
-
-                      const parseCsvRow = row => {
-                        const cols = [];
-                        let cur = '';
-                        let inQuotes = false;
-                        for (let i = 0; i < row.length; i++) {
-                          const ch = row[i];
-                          if (ch === '"') {
-                            inQuotes = !inQuotes;
-                          } else if (ch === ',' && !inQuotes) {
-                            cols.push(cur.trim());
-                            cur = '';
-                          } else {
-                            cur += ch;
-                          }
-                        }
-                        cols.push(cur.trim());
-                        return cols;
-                      };
-
-                      const headers = parseCsvRow(lines[0]).map(h => h.toLowerCase());
-                      const titleIdx = headers.findIndex(
-                        h => h.includes('track name') || h.includes('canción') || h === 'title'
-                      );
-                      const artistIdx = headers.findIndex(
-                        h => h.includes('artist name') || h.includes('artista') || h === 'artist'
-                      );
-                      const albumIdx = headers.findIndex(h => h.includes('album'));
-                      const genreIdx = headers.findIndex(h => h.includes('genre'));
-
-                      if (titleIdx === -1) {
-                        setSpotifyMsg({
-                          type: 'err',
-                          text: 'No se encontró la columna "Track Name" en el CSV.'
-                        });
-                        return;
-                      }
-
-                      const imported = [];
-                      const seen = new Set();
-
-                      for (let i = 1; i < lines.length; i++) {
-                        const cols = parseCsvRow(lines[i]);
-                        const title = cols[titleIdx];
-                        const artist = artistIdx >= 0 ? cols[artistIdx] : '';
-                        if (!title) continue;
-                        const k = `${title.toLowerCase()}|${artist.toLowerCase()}`;
-                        if (seen.has(k)) continue;
-                        seen.add(k);
-                        imported.push({
-                          id: `csv_${Date.now()}_${i}`,
-                          title,
-                          artist: artist.replace(/;/g, ', '),
-                          album: albumIdx >= 0 ? cols[albumIdx] : 'Spotify CSV',
-                          genre:
-                            genreIdx >= 0 && cols[genreIdx]
-                              ? cols[genreIdx].split(',')[0]
-                              : 'Spotify',
-                          artwork: '/icon.svg',
-                          previewUrl: null,
-                          duration: '—'
-                        });
-                      }
-
-                      const csvName = file.name.replace(/\.csv$/i, '') || 'Spotify CSV';
-                      openSpotifyImportModal(imported, csvName);
-                      e.target.value = '';
-                    }}
-                  />
-                </label>
-              </div>
-            </div>
-
-            <div className="card">
-              <div className="item-head">
-                <div>
-                  <div className="item-title">Almacenamiento Offline de este dispositivo</div>
-                  <div className="item-sub">
-                    {deviceQuota
-                      ? `Usando ${deviceQuota.usedMB} MB de ~${deviceQuota.quotaGB} GB disponibles (${offlineCatalog.length} canciones en caché).`
-                      : `${offlineCatalog.length} canciones guardadas en el caché offline de tu navegador.`}
-                  </div>
-                </div>
-                {offlineCatalog.length > 0 && (
+              {menuTrack.contextLibrary &&
+                menuTrack.contextLibrary !== 'offline' &&
+                menuTrack.contextLibrary !== 'liked' && (
                   <button
                     type="button"
-                    className="btn danger sm"
-                    onClick={async () => {
-                      if ('caches' in window) {
-                        await caches.delete(AUDIO_CACHE_NAME);
-                      }
-                      persistOfflineCatalog([]);
-                      await refreshOfflineCacheList();
+                    className="dialog-option danger"
+                    onClick={() => {
+                      removeTrackFromPlaylist(menuTrack.contextLibrary, menuTrack.track.id);
+                      closeTrackMenu();
                     }}
                   >
-                    <Icon name="trash" size={14} /> Vaciar todo el caché Offline
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+                      <Icon name="trash" size={15} /> Quitar de esta librería
+                    </span>
                   </button>
                 )}
-              </div>
+
+              {isTrackAvailableOffline(menuTrack.track) && (
+                <button
+                  type="button"
+                  className="dialog-option danger"
+                  onClick={() => {
+                    deleteOfflineTrack(menuTrack.track);
+                    closeTrackMenu();
+                  }}
+                >
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+                    <Icon name="trash" size={15} /> Borrar descarga Offline del dispositivo
+                  </span>
+                </button>
+              )}
             </div>
-          </section>
+          </div>
         )}
+      </dialog>
 
-        {/* ==================== TAB 5: ADMIN PANEL (SOLO ADMIN) ==================== */}
-        {activeTab === 'admin' && user.is_admin && (
-          <section className={isOffline ? 'offline-section-disabled' : ''}>
-            <div className="page-head">
-              <div>
-                <h1 className="page-title">Administración e invitaciones</h1>
-                <p className="page-sub">
-                  Genera códigos de invitación para nuevos usuarios y supervisa el espacio en disco del VPS.
-                </p>
-              </div>
-            </div>
-
-            <div className="grid three" style={{ marginBottom: 20 }}>
-              <div className="stat">
-                <div className="stat-label">Usuarios registrados</div>
-                <div className="stat-value">{adminData.users.length}</div>
-                <div className="stat-hint">
-                  {adminData.users.filter(u => u.active).length} cuentas activas
-                </div>
-              </div>
-
-              <div className="stat">
-                <div className="stat-label">Códigos de invitación</div>
-                <div className="stat-value">
-                  {adminData.invites.filter(i => !i.revoked && i.used_count < i.max_uses).length}
-                </div>
-                <div className="stat-hint">Disponibles para usar</div>
-              </div>
-
-              <div className="stat">
-                <div className="stat-label">Almacenamiento MP3</div>
-                <div className="stat-value">
-                  {adminData.storage
-                    ? `${adminData.storage.usedMB} / ${adminData.storage.maxMB} MB`
-                    : '—'}
-                </div>
-                <div className="stat-hint">
-                  {adminData.storage
-                    ? `${adminData.storage.fileCount} archivos (limpieza FIFO automática)`
-                    : 'Calculando…'}
-                </div>
-              </div>
-            </div>
-
-            <div className="card">
-              <h2 className="section-title" style={{ marginTop: 0 }}>
-                <span>Generar nuevo código de invitación</span>
-              </h2>
-              {adminMsg && <div className="alert ok">{adminMsg}</div>}
-              <form className="form" onSubmit={handleCreateInvite}>
-                <div className="grid two">
-                  <div className="field">
-                    <label htmlFor="invite-label">Etiqueta / Para quién es</label>
-                    <input
-                      id="invite-label"
-                      type="text"
-                      placeholder="Ej. Amigos uni, Dispositivo móvil…"
-                      value={inviteLabel}
-                      onChange={e => setInviteLabel(e.target.value)}
-                    />
-                  </div>
-                  <div className="field">
-                    <label htmlFor="invite-uses">Límite de registros permitidos</label>
-                    <input
-                      id="invite-uses"
-                      type="number"
-                      min={1}
-                      max={100}
-                      value={inviteMaxUses}
-                      onChange={e => setInviteMaxUses(e.target.value)}
-                    />
-                  </div>
-                </div>
-                <div>
-                  <button type="submit" className="btn">
-                    <Icon name="plus" size={14} /> Generar código de invitación
-                  </button>
-                </div>
-              </form>
-            </div>
-
-            <h2 className="section-title">
-              <span>Códigos de invitación</span>
-              <span className="count">{adminData.invites.length}</span>
-            </h2>
-
-            {adminData.invites.length === 0 ? (
-              <div className="empty">
-                <div className="empty-title">No hay códigos creados todavía</div>
-                <p>Usa el formulario superior para crear tu primer código de invitación.</p>
-              </div>
-            ) : (
-              <div className="grid">
-                {adminData.invites.map(inv => {
-                  const exhausted = inv.used_count >= inv.max_uses;
-                  return (
-                    <article key={inv.code} className="card item">
-                      <div className="item-head">
-                        <div>
-                          <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
-                            <span className="code-pill">{inv.code}</span>
-                            <span
-                              className={`badge ${
-                                inv.revoked ? 'coral' : exhausted ? 'amber' : 'mint'
-                              }`}
-                            >
-                              {inv.revoked
-                                ? 'Revocado'
-                                : exhausted
-                                ? 'Agotado'
-                                : 'Disponible'}
-                            </span>
-                          </div>
-                          <div className="item-sub" style={{ marginTop: 6 }}>
-                            Etiqueta: <strong>{inv.label}</strong>
-                          </div>
-                        </div>
-
-                        <div className="item-actions">
-                          <button
-                            type="button"
-                            className="btn secondary sm"
-                            onClick={() => copyInviteCode(inv.code)}
-                          >
-                            {copiedCode === inv.code ? (
-                              <>
-                                <Icon name="check" size={13} /> Copiado
-                              </>
-                            ) : (
-                              'Copiar código'
-                            )}
-                          </button>
-                          <button
-                            type="button"
-                            className="btn secondary sm"
-                            onClick={() =>
-                              handleAdminAction({ action: 'revoke_invite', code: inv.code })
-                            }
-                          >
-                            {inv.revoked ? 'Reactivar' : 'Revocar'}
-                          </button>
-                          <button
-                            type="button"
-                            className="btn ghost sm"
-                            onClick={() =>
-                              handleAdminAction({ action: 'delete_invite', code: inv.code })
-                            }
-                          >
-                            Eliminar
-                          </button>
-                        </div>
-                      </div>
-
-                      <dl className="meta">
-                        <div>
-                          <dt>Usos</dt>
-                          <dd>
-                            {inv.used_count} / {inv.max_uses}
-                          </dd>
-                        </div>
-                        <div>
-                          <dt>Usado por</dt>
-                          <dd>
-                            {inv.used_by?.length
-                              ? inv.used_by.map(u => `@${u.username}`).join(', ')
-                              : 'Nadie aún'}
-                          </dd>
-                        </div>
-                        <div>
-                          <dt>Creado</dt>
-                          <dd>{new Date(inv.created_at).toLocaleDateString('es')}</dd>
-                        </div>
-                      </dl>
-                    </article>
-                  );
-                })}
-              </div>
-            )}
-
-            <h2 className="section-title">
-              <span>Usuarios registrados</span>
-              <span className="count">{adminData.users.length}</span>
-            </h2>
-
-            <div className="grid">
-              {adminData.users.map(u => (
-                <article key={u.id} className="card item">
-                  <div className="item-head">
-                    <div>
-                      <div className="item-title">@{u.username}</div>
-                      <div className="item-sub">
-                        {u.is_admin
-                          ? 'Administrador principal'
-                          : `Invitado con código: ${u.invited_by_code || '—'}`}
-                      </div>
-                    </div>
-                    <div className="item-actions">
-                      <span className={`badge ${u.is_admin ? 'cobalt' : u.active ? 'mint' : 'coral'}`}>
-                        {u.is_admin ? 'Admin' : u.active ? 'Activo' : 'Suspendido'}
-                      </span>
-                      {!u.is_admin && (
-                        <button
-                          type="button"
-                          className="btn secondary sm"
-                          onClick={() =>
-                            handleAdminAction({ action: 'toggle_user', userId: u.id })
-                          }
-                        >
-                          {u.active ? 'Suspender' : 'Activar'}
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                </article>
-              ))}
-            </div>
-          </section>
-        )}
-      </main>
-
-      {/* ==================== MODAL DIALOG: CHOOSE LIBRARY TO SAVE TRACK ==================== */}
+      {/* ==================== DIALOG 2: SAVE TRACK TO LIBRARY ==================== */}
       <dialog
         ref={saveDialogRef}
         closedby="any"
@@ -3087,17 +3232,17 @@ export default function HomePage() {
       >
         {trackToSave && (
           <div>
-            <div className="item-head" style={{ marginBottom: 8 }}>
-              <div>
-                <h2 id="save-dialog-title" className="item-title" style={{ margin: 0 }}>
+            <div className="dialog-head">
+              <div style={{ minWidth: 0 }}>
+                <div id="save-dialog-title" className="dialog-title">
                   Guardar en librería
-                </h2>
-                <div className="item-sub">
+                </div>
+                <div className="dialog-sub">
                   {trackToSave.title} · {trackToSave.artist}
                 </div>
               </div>
-              <button type="button" className="btn ghost sm" onClick={closeSaveModal}>
-                <Icon name="close" size={15} />
+              <button type="button" className="icon-btn" onClick={closeSaveModal}>
+                <Icon name="close" size={16} />
               </button>
             </div>
 
@@ -3108,7 +3253,7 @@ export default function HomePage() {
                 onClick={() => toggleLike(trackToSave)}
               >
                 <span style={{ display: 'inline-flex', alignItems: 'center', gap: 7 }}>
-                  <Icon name="heart-fill" size={14} /> Favoritos (Con corazón)
+                  <Icon name="heart-fill" size={14} /> Favoritos
                 </span>
                 <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
                   <Icon name={isLiked(trackToSave.id) ? 'check' : 'plus'} size={13} />
@@ -3162,34 +3307,33 @@ export default function HomePage() {
                 required
               />
               <button type="submit" className="btn sm">
-                <Icon name="plus" size={13} /> Crear y guardar
+                <Icon name="plus" size={13} /> Crear
               </button>
             </form>
           </div>
         )}
       </dialog>
 
-      {/* ==================== MODAL DIALOG: CHOOSE LIBRARY FOR SPOTIFY IMPORT ==================== */}
+      {/* ==================== DIALOG 3: SPOTIFY IMPORT DESTINATION MODAL ==================== */}
       <dialog
         ref={spotifyDialogRef}
         closedby="any"
         className="save-dialog"
         aria-labelledby="spotify-dialog-title"
-        onClose={() => setPendingSpotifyImport(null)}
       >
         {pendingSpotifyImport && (
           <div>
-            <div className="item-head" style={{ marginBottom: 8 }}>
-              <div>
-                <h2 id="spotify-dialog-title" className="item-title" style={{ margin: 0 }}>
+            <div className="dialog-head">
+              <div style={{ minWidth: 0 }}>
+                <div id="spotify-dialog-title" className="dialog-title">
                   ¿Dónde guardar la importación?
-                </h2>
-                <div className="item-sub">
+                </div>
+                <div className="dialog-sub">
                   {pendingSpotifyImport.tracks.length} canciones de «{pendingSpotifyImport.sourceName}»
                 </div>
               </div>
-              <button type="button" className="btn ghost sm" onClick={closeSpotifyImportModal}>
-                <Icon name="close" size={15} />
+              <button type="button" className="icon-btn" onClick={closeSpotifyImportModal}>
+                <Icon name="close" size={16} />
               </button>
             </div>
 
@@ -3200,11 +3344,9 @@ export default function HomePage() {
                 onClick={() => confirmSpotifyImport('liked')}
               >
                 <span style={{ display: 'inline-flex', alignItems: 'center', gap: 7 }}>
-                  <Icon name="heart-fill" size={14} /> Guardar en Me gusta (Favoritos)
+                  <Icon name="heart-fill" size={14} /> Guardar en Favoritos (Me gusta)
                 </span>
-                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
-                  Elegir <Icon name="arrow-right" size={13} />
-                </span>
+                <Icon name="arrow-right" size={14} />
               </button>
 
               {customPlaylists.map(pl => (
@@ -3217,9 +3359,7 @@ export default function HomePage() {
                   <span style={{ display: 'inline-flex', alignItems: 'center', gap: 7 }}>
                     <Icon name="folder" size={14} /> Guardar en «{pl.name}» ({pl.tracks.length})
                   </span>
-                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
-                    Elegir <Icon name="arrow-right" size={13} />
-                  </span>
+                  <Icon name="arrow-right" size={14} />
                 </button>
               ))}
             </div>
@@ -3241,19 +3381,41 @@ export default function HomePage() {
                 required
               />
               <button type="submit" className="btn sm">
-                <Icon name="plus" size={13} /> Crear nueva y guardar
+                <Icon name="plus" size={13} /> Crear y guardar
               </button>
             </form>
           </div>
         )}
       </dialog>
 
-      {/* ==================== EDITORIAL FLOATING PLAYER DOCK ==================== */}
+      {/* ==================== COMPACT FLOATING MINI-PLAYER DOCK ==================== */}
       {currentTrack && (
         <div className="player-dock">
+          <div className="player-scrubber">
+            <span>{formatSec(progress)}</span>
+            <input
+              type="range"
+              min="0"
+              max={duration || 100}
+              value={progress}
+              onChange={e => {
+                const val = Number(e.target.value);
+                setProgress(val);
+                if (audioRef.current) audioRef.current.currentTime = val;
+              }}
+            />
+            <span>{formatSec(duration)}</span>
+          </div>
+
           <div className="player-main">
             <div className="player-track">
-              <img src={currentTrack.artwork || '/icon.svg'} alt={currentTrack.title} />
+              <img
+                src={currentTrack.artwork || '/icon.svg'}
+                alt=""
+                onError={e => {
+                  e.currentTarget.src = '/icon.svg';
+                }}
+              />
               <div style={{ minWidth: 0 }}>
                 <div className="player-track-title">{currentTrack.title}</div>
                 <div className="player-track-sub">{currentTrack.artist}</div>
@@ -3261,6 +3423,14 @@ export default function HomePage() {
             </div>
 
             <div className="player-controls">
+              <button
+                type="button"
+                className={`ctrl-btn ${isLiked(currentTrack.id) ? 'active' : ''}`}
+                onClick={() => toggleLike(currentTrack)}
+                title="Favorito"
+              >
+                <Icon name={isLiked(currentTrack.id) ? 'heart-fill' : 'heart'} size={15} />
+              </button>
               <button
                 type="button"
                 className={`ctrl-btn ${shuffle ? 'active' : ''}`}
@@ -3278,7 +3448,7 @@ export default function HomePage() {
                 onClick={togglePlayPause}
                 title={isPlaying ? 'Pausar' : 'Reproducir'}
               >
-                <Icon name={isPlaying ? 'pause' : 'play'} size={16} />
+                <Icon name={isPlaying ? 'pause' : 'play'} size={15} />
               </button>
               <button type="button" className="ctrl-btn" onClick={playNext} title="Siguiente">
                 <Icon name="skip-forward" size={15} />
@@ -3287,27 +3457,11 @@ export default function HomePage() {
                 type="button"
                 className={`ctrl-btn ${repeatMode !== 'off' ? 'active' : ''}`}
                 onClick={cycleRepeatMode}
-                title="Modo bucle"
+                title="Repetir"
               >
                 <Icon name={repeatMode === 'one' ? 'repeat-1' : 'repeat'} size={15} />
               </button>
             </div>
-          </div>
-
-          <div className="player-seek">
-            <span>{formatSec(progress)}</span>
-            <input
-              type="range"
-              min="0"
-              max={duration || 100}
-              value={progress}
-              onChange={e => {
-                const val = Number(e.target.value);
-                setProgress(val);
-                if (audioRef.current) audioRef.current.currentTime = val;
-              }}
-            />
-            <span>{formatSec(duration)}</span>
           </div>
 
           <audio
@@ -3320,6 +3474,69 @@ export default function HomePage() {
           />
         </div>
       )}
-    </>
+
+      {/* ==================== MOBILE BOTTOM NAV (MINERAL TAREAS STYLE) ==================== */}
+      <nav
+        className="bottom-nav"
+        style={{ '--nav-cols': user.is_admin ? 5 : 4 }}
+        aria-label="Navegación móvil"
+      >
+        <button
+          type="button"
+          className={`${activeTab === 'explore' ? 'active' : ''} ${
+            isOffline ? 'offline-nav-item' : ''
+          }`.trim()}
+          onClick={() => setActiveTab('explore')}
+        >
+          <Icon name="search" size={17} />
+          <span>Explorar</span>
+        </button>
+
+        <button
+          type="button"
+          className={activeTab === 'library' ? 'active' : ''}
+          onClick={() => setActiveTab('library')}
+        >
+          <Icon name="heart" size={17} />
+          <span>Biblioteca</span>
+        </button>
+
+        <button
+          type="button"
+          className={`${activeTab === 'files' ? 'active' : ''} ${
+            isOffline ? 'offline-nav-item' : ''
+          }`.trim()}
+          onClick={() => setActiveTab('files')}
+        >
+          <Icon name="disc" size={17} />
+          <span>Servidor</span>
+        </button>
+
+        <button
+          type="button"
+          className={activeTab === 'settings' ? 'active' : ''}
+          onClick={() => setActiveTab('settings')}
+        >
+          <Icon name="settings" size={17} />
+          <span>Ajustes</span>
+        </button>
+
+        {user.is_admin && (
+          <button
+            type="button"
+            className={`${activeTab === 'admin' ? 'active' : ''} ${
+              isOffline ? 'offline-nav-item' : ''
+            }`.trim()}
+            onClick={() => {
+              setActiveTab('admin');
+              if (!isOffline) fetchAdminData();
+            }}
+          >
+            <Icon name="shield" size={17} />
+            <span>Admin</span>
+          </button>
+        )}
+      </nav>
+    </div>
   );
 }

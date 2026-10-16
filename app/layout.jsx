@@ -1,13 +1,31 @@
+import { Manrope, Syne } from 'next/font/google';
 import './globals.css';
 
+const syne = Syne({
+  subsets: ['latin'],
+  weight: ['600', '700', '800'],
+  variable: '--font-syne',
+  display: 'swap'
+});
+
+const manrope = Manrope({
+  subsets: ['latin'],
+  weight: ['400', '500', '600', '700', '800'],
+  variable: '--font-manrope',
+  display: 'swap'
+});
+
 export const metadata = {
-  title: 'MyMusicAnywhere — Studio & Offline Player',
-  description: 'Catálogo musical privado, descargas MP3 y reproductor offline con acceso por invitación.',
+  title: {
+    default: 'mineral music',
+    template: '%s · mineral music'
+  },
+  description: 'Tu música, colecciones y modo offline sin interrupciones.',
   manifest: '/manifest.json',
   appleWebApp: {
     capable: true,
     statusBarStyle: 'black-translucent',
-    title: 'MyMusic'
+    title: 'mineral music'
   }
 };
 
@@ -16,14 +34,18 @@ export const viewport = {
   initialScale: 1,
   maximumScale: 1,
   userScalable: false,
-  themeColor: '#2b44ff'
+  themeColor: [
+    { media: '(prefers-color-scheme: light)', color: '#f5f2e9' },
+    { media: '(prefers-color-scheme: dark)', color: '#000000' }
+  ]
 };
 
 export default function RootLayout({ children }) {
   return (
-    <html lang="es">
+    <html lang="es" className={`${syne.variable} ${manrope.variable}`}>
       <head>
-        <link rel="icon" type="image/svg+xml" href="/icon.svg" />
+        <link rel="icon" type="image/svg+xml" href="/brand/logo.svg" media="(prefers-color-scheme: light)" />
+        <link rel="icon" type="image/svg+xml" href="/brand/logo-dark.svg" media="(prefers-color-scheme: dark)" />
         <link rel="apple-touch-icon" href="/icon.svg" />
       </head>
       <body>
