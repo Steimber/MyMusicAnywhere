@@ -4,6 +4,17 @@ import { useState, useEffect, useRef } from 'react';
 
 const AUDIO_CACHE_NAME = 'my-music-offline-audio-v1';
 
+const DISCOVERY_SEEDS = [
+  { term: 'Pop Latino Hits', label: 'Pop Latino' },
+  { term: 'Rock Clásico Español', label: 'Rock en Español' },
+  { term: 'Daft Punk Electronic Synth', label: 'Electrónica & Synth' },
+  { term: 'Indie Alternative Hits', label: 'Indie & Alternativo' },
+  { term: 'Reggaeton Urbano Latino', label: 'Urbano & Reggaetón' },
+  { term: 'The Weeknd R&B Soul', label: 'R&B & Soul' },
+  { term: 'Lo-Fi Chill Jazz Beats', label: 'Lo-Fi & Jazz' },
+  { term: 'Hip-Hop Rap Classics', label: 'Hip-Hop & Rap' }
+];
+
 export default function HomePage() {
   // Auth state
   const [user, setUser] = useState(null);
@@ -20,10 +31,11 @@ export default function HomePage() {
   // Navigation
   const [activeTab, setActiveTab] = useState('explore'); // 'explore' | 'library' | 'files' | 'admin'
 
-  // Explore & Search
+  // Explore, Recommendations & Search
   const [query, setQuery] = useState('');
   const [results, setResults] = useState([]);
   const [loading, setLoading] = useState(false);
+  const [feedInfo, setFeedInfo] = useState({ mode: 'random', label: 'Descubrimiento aleatorio' });
 
   // Library & Offline Cache
   const [likedTracks, setLikedTracks] = useState([]);
@@ -84,11 +96,16 @@ export default function HomePage() {
     return () => window.removeEventListener('beforeinstallprompt', handleBeforeInstall);
   }, []);
 
-  // Load initial catalog & server files once logged in
+  // Load initial catalog (recommended by liked genres, or random if none) & server files once logged in
   useEffect(() => {
     if (!user) return;
     fetchLibraryFiles();
-    searchTracks('Daft Punk');
+    let initialLikes = likedTracks;
+    try {
+      const raw = localStorage.getItem('mma_liked_tracks_v1');
+      if (raw) initialLikes = JSON.parse(raw);
+    } catch {}
+    loadRecommendedOrRandomFeed(initialLikes, false);
     if (user.is_admin) {
       fetchAdminData();
     }
@@ -359,13 +376,49 @@ export default function HomePage() {
     return track.previewUrl || null;
   }
 
-  async function searchTracks(searchTerm) {
+  function getLikedCategories(tracksList = likedTracks) {
+    const counts = {};
+    for (const t of tracksList) {
+      const cat = t.genre && t.genre !== 'Música' ? t.genre : t.artist;
+      if (cat) {
+        counts[cat] = (counts[cat] || 0) + 1;
+      }
+    }
+    return Object.entries(counts)
+      .sort((a, b) => b[1] - a[1])
+      .map(([name]) => name);
+  }
+
+  function loadRecommendedOrRandomFeed(tracksList = likedTracks, forceRandom = false) {
+    const categories = getLikedCategories(tracksList);
+    if (!forceRandom && categories.length > 0) {
+      const topPool = categories.slice(0, 4);
+      const chosenCategory = topPool[Math.floor(Math.random() * topPool.length)];
+      searchTracks(chosenCategory, {
+        mode: 'recommended',
+        label: chosenCategory
+      });
+    } else {
+      const randomSeed = DISCOVERY_SEEDS[Math.floor(Math.random() * DISCOVERY_SEEDS.length)];
+      searchTracks(randomSeed.term, {
+        mode: 'random',
+        label: randomSeed.label
+      });
+    }
+  }
+
+  async function searchTracks(searchTerm, meta = null) {
     if (!searchTerm.trim()) return;
     setLoading(true);
+    if (meta) {
+      setFeedInfo(meta);
+    } else {
+      setFeedInfo({ mode: 'search', label: searchTerm.trim() });
+    }
     try {
       const res = await fetch(`/api/search?q=${encodeURIComponent(searchTerm)}`);
       const data = await res.json();
-      setResults(data.tracks || []);
+      setResults(data.results || data.tracks || []);
     } catch {}
     setLoading(false);
   }
@@ -843,6 +896,54 @@ export default function HomePage() {
                 {loading ? 'Buscando…' : 'Buscar'}
               </button>
             </form>
+
+            <div className="toolbar">
+              <div className="toolbar-group">
+                {feedInfo.mode === 'recommended' ? (
+                  <span className="badge coral">
+                    ♥ Recomendado por tu gusto: {feedInfo.label}
+                  </span>
+                ) : feedInfo.mode === 'random' ? (
+                  <span className="badge cobalt">
+                    🎲 Selección aleatoria: {feedInfo.label}
+                  </span>
+                ) : (
+                  <span className="badge neutral">
+                    🔎 Búsqueda: {feedInfo.label}
+                  </span>
+                )}
+
+                {getLikedCategories().slice(0, 3).map(cat => (
+                  <button
+                    key={cat}
+                    type="button"
+                    className="btn secondary sm"
+                    onClick={() => searchTracks(cat, { mode: 'recommended', label: cat })}
+                  >
+                    ♥ {cat}
+                  </button>
+                ))}
+              </div>
+
+              <div className="toolbar-group">
+                {likedTracks.length > 0 && (
+                  <button
+                    type="button"
+                    className="btn secondary sm"
+                    onClick={() => loadRecommendedOrRandomFeed(likedTracks, false)}
+                  >
+                    ✨ Para mí
+                  </button>
+                )}
+                <button
+                  type="button"
+                  className="btn secondary sm"
+                  onClick={() => loadRecommendedOrRandomFeed(likedTracks, true)}
+                >
+                  🎲 Música aleatoria
+                </button>
+              </div>
+            </div>
 
             <div className="grid">
               {results.map((track, idx) => {

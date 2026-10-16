@@ -1,6 +1,6 @@
 import fs from 'fs';
 import path from 'path';
-import { getDownloadsDir } from '../../../lib/store';
+import { getDownloadsDir, scheduleFileCleanup } from '../../../lib/store';
 
 export async function GET(request) {
   const { searchParams } = new URL(request.url);
@@ -28,6 +28,7 @@ export async function GET(request) {
 
   if (isDownload) {
     headers['Content-Disposition'] = `attachment; filename="${encodeURIComponent(path.basename(safePath))}"`;
+    scheduleFileCleanup(safePath, 25000);
   }
 
   if (range) {

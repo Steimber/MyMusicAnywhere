@@ -5,7 +5,8 @@ import { spawn } from 'child_process';
 import {
   getDownloadsDir,
   getSessionUser,
-  enforceStorageQuota
+  enforceStorageQuota,
+  scheduleFileCleanup
 } from '../../../lib/store';
 
 if (!global.__activeDownloads) {
@@ -61,6 +62,7 @@ export async function POST(request) {
       '--embed-metadata',
       '--embed-thumbnail',
       '--no-playlist',
+      '--no-cache-dir',
       '-o', outputTemplate
     ];
 
@@ -111,10 +113,14 @@ export async function POST(request) {
           if (files.length > 0) detectedFilename = files[0].name;
         }
         enforceStorageQuota();
+        if (detectedFilename) {
+          scheduleFileCleanup(path.join(downloadsDir, detectedFilename), 90000);
+        }
         item.status = 'ready';
         item.progress = 100;
         item.filename = detectedFilename;
       } else {
+        enforceStorageQuota();
         item.status = 'error';
         item.error = `yt-dlp finalizó con código ${code}`;
       }
