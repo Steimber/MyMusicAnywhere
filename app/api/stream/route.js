@@ -38,8 +38,10 @@ export async function GET(request) {
 
   if (isDownload) {
     headers['Content-Disposition'] = `attachment; filename="${encodeURIComponent(cleanFile)}"`;
-    scheduleFileCleanup(safePath, 25000);
   }
+
+  // Always schedule server file deletion once it has been served to the client
+  scheduleFileCleanup(safePath, 15000);
 
   if (range) {
     const parts = range.replace(/bytes=/, '').split('-');
@@ -48,6 +50,9 @@ export async function GET(request) {
     const chunksize = end - start + 1;
 
     const stream = fs.createReadStream(safePath, { start, end });
+    if (end >= stat.size - 1) {
+      stream.on('close', () => scheduleFileCleanup(safePath, 5000));
+    }
 
     return new Response(stream, {
       status: 206,
@@ -60,5 +65,6 @@ export async function GET(request) {
   }
 
   const stream = fs.createReadStream(safePath);
+  stream.on('close', () => scheduleFileCleanup(safePath, 5000));
   return new Response(stream, { headers });
 }

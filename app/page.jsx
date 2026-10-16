@@ -69,7 +69,10 @@ export default function HomePage() {
   const [spotifyUrl, setSpotifyUrl] = useState('');
   const [spotifyBusy, setSpotifyBusy] = useState(false);
   const [spotifyMsg, setSpotifyMsg] = useState({ type: '', text: '' });
-  const [spotifyTargetLib, setSpotifyTargetLib] = useState('new_playlist'); // 'liked' | 'new_playlist' | <playlistId>
+  const [spotifyTargetLib, setSpotifyTargetLib] = useState('ask'); // 'ask' | 'liked' | 'new_playlist' | <playlistId>
+  const [pendingSpotifyImport, setPendingSpotifyImport] = useState(null); // { tracks: [], sourceName: '' }
+  const [spotifyNewLibName, setSpotifyNewLibName] = useState('');
+  const spotifyDialogRef = useRef(null);
 
   // Admin Panel state
   const [adminData, setAdminData] = useState({ users: [], invites: [], storage: null });
@@ -124,10 +127,10 @@ export default function HomePage() {
 
   // Fallback for browsers without native <dialog closedby="any"> support (e.g. iOS Safari)
   useEffect(() => {
-    const dialog = saveDialogRef.current;
-    if (!dialog) return;
-    if (typeof HTMLDialogElement !== 'undefined' && !('closedBy' in HTMLDialogElement.prototype)) {
-      const handleBackdropClick = event => {
+    if (typeof HTMLDialogElement === 'undefined' || 'closedBy' in HTMLDialogElement.prototype) return;
+    const dialogs = [saveDialogRef.current, spotifyDialogRef.current].filter(Boolean);
+    const handlers = dialogs.map(dialog => {
+      const fn = event => {
         if (event.target !== dialog) return;
         const rect = dialog.getBoundingClientRect();
         const isDialogContent =
@@ -138,9 +141,12 @@ export default function HomePage() {
         if (isDialogContent) return;
         dialog.close();
       };
-      dialog.addEventListener('click', handleBackdropClick);
-      return () => dialog.removeEventListener('click', handleBackdropClick);
-    }
+      dialog.addEventListener('click', fn);
+      return { dialog, fn };
+    });
+    return () => {
+      handlers.forEach(({ dialog, fn }) => dialog.removeEventListener('click', fn));
+    };
   }, [user]);
 
   // Check session & hydrate local collections on mount
@@ -691,10 +697,55 @@ export default function HomePage() {
           });
         }
         await refreshOfflineCacheList();
+
+        // Once cached on the client device, immediately delete the transient MP3 from the server
+        const fileToDelete =
+          trackMeta?.filename ||
+          new URL(url, window.location.origin).searchParams.get('file');
+        if (fileToDelete) {
+          fetch(`/api/library?file=${encodeURIComponent(fileToDelete)}`, {
+            method: 'DELETE'
+          })
+            .then(() => fetchLibraryFiles())
+            .catch(() => {});
+        }
         return true;
       }
     } catch {}
     return false;
+  }
+
+  // Export MP3 file to device (reads from local CacheStorage blob first so it works even after server deleted the file)
+  async function exportTrackFile(filename, streamUrl) {
+    if (typeof window === 'undefined') return;
+    const url = streamUrl || `/api/stream?file=${encodeURIComponent(filename)}`;
+    if ('caches' in window) {
+      try {
+        const cache = await caches.open(AUDIO_CACHE_NAME);
+        const fullUrl = new URL(url, window.location.origin).href;
+        const cachedResp = (await cache.match(url)) || (await cache.match(fullUrl));
+        if (cachedResp) {
+          const blob = await cachedResp.blob();
+          const blobUrl = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = blobUrl;
+          a.download = filename || 'track.mp3';
+          document.body.appendChild(a);
+          a.click();
+          setTimeout(() => {
+            document.body.removeChild(a);
+            URL.revokeObjectURL(blobUrl);
+          }, 1500);
+          return;
+        }
+      } catch {}
+    }
+    const a = document.createElement('a');
+    a.href = `${url}&download=1`;
+    a.download = filename || 'track.mp3';
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => document.body.removeChild(a), 1000);
   }
 
   // Delete a track from device offline CacheStorage
@@ -881,11 +932,29 @@ export default function HomePage() {
     setSyncingAll(false);
   }
 
-  // Save imported tracks (from Spotify URL or CSV) into chosen target library
-  function saveImportedTracksToTarget(freshTracks, defaultName = 'Spotify Import') {
-    if (!freshTracks || freshTracks.length === 0) return { count: 0, targetName: '' };
+  // Open modal asking which library to save Spotify tracks into (Me gusta / existing / new)
+  function openSpotifyImportModal(tracks, sourceName = 'Playlist Spotify') {
+    if (!tracks || tracks.length === 0) return;
+    setPendingSpotifyImport({ tracks, sourceName });
+    setSpotifyNewLibName(sourceName);
+    if (spotifyDialogRef.current && typeof spotifyDialogRef.current.showModal === 'function') {
+      spotifyDialogRef.current.showModal();
+    }
+  }
 
-    if (spotifyTargetLib === 'liked') {
+  function closeSpotifyImportModal() {
+    if (spotifyDialogRef.current && spotifyDialogRef.current.open) {
+      spotifyDialogRef.current.close();
+    }
+    setPendingSpotifyImport(null);
+  }
+
+  function confirmSpotifyImport(targetType, customName = '') {
+    if (!pendingSpotifyImport) return;
+    const freshTracks = pendingSpotifyImport.tracks || [];
+    const fallbackName = (customName || pendingSpotifyImport.sourceName || 'Spotify Import').trim();
+
+    if (targetType === 'liked') {
       const existingKeys = new Set(
         likedTracks.map(t => `${t.title?.toLowerCase()}|${t.artist?.toLowerCase()}`)
       );
@@ -893,18 +962,29 @@ export default function HomePage() {
         t => !existingKeys.has(`${t.title?.toLowerCase()}|${t.artist?.toLowerCase()}`)
       );
       persistLikes([...filtered, ...likedTracks]);
-      return { count: filtered.length, targetName: '♥ Favoritos' };
+      setSelectedLibrary('liked');
+      setSpotifyMsg({
+        type: 'ok',
+        text: `✓ Se guardaron ${filtered.length} canciones en «♥ Favoritos (Me gusta)».`
+      });
+      closeSpotifyImportModal();
+      return;
     }
 
-    if (spotifyTargetLib === 'new_playlist') {
-      const created = createCustomPlaylist(defaultName, freshTracks);
+    if (targetType === 'new_playlist') {
+      const created = createCustomPlaylist(fallbackName, freshTracks);
       if (created) {
         setSelectedLibrary(created.id);
-        return { count: freshTracks.length, targetName: created.name };
+        setSpotifyMsg({
+          type: 'ok',
+          text: `✓ Se creó la librería «${created.name}» con ${freshTracks.length} canciones.`
+        });
       }
+      closeSpotifyImportModal();
+      return;
     }
 
-    const targetPl = customPlaylists.find(p => p.id === spotifyTargetLib);
+    const targetPl = customPlaylists.find(p => p.id === targetType);
     if (targetPl) {
       const existingKeys = new Set(
         targetPl.tracks.map(t => `${t.title?.toLowerCase()}|${t.artist?.toLowerCase()}`)
@@ -917,10 +997,12 @@ export default function HomePage() {
       );
       persistCustomPlaylists(next);
       setSelectedLibrary(targetPl.id);
-      return { count: filtered.length, targetName: targetPl.name };
+      setSpotifyMsg({
+        type: 'ok',
+        text: `✓ Se guardaron ${filtered.length} canciones en «${targetPl.name}».`
+      });
+      closeSpotifyImportModal();
     }
-
-    return { count: 0, targetName: '' };
   }
 
   // Player controls
@@ -1518,14 +1600,14 @@ export default function HomePage() {
                         ) : dl?.status === 'ready' ? (
                           <>
                             <span className="badge mint">✓ Offline</span>
-                            <a
-                              href={`/api/stream?file=${encodeURIComponent(dl.filename)}&download=1`}
-                              download={dl.filename}
+                            <button
+                              type="button"
+                              onClick={() => exportTrackFile(dl.filename)}
                               className="btn secondary sm"
                               title="Exportar archivo MP3 al teléfono o PC"
                             >
                               💾 Archivo
-                            </a>
+                            </button>
                           </>
                         ) : (
                           <button
@@ -1791,14 +1873,14 @@ export default function HomePage() {
                           )}
 
                           {filename && (
-                            <a
-                              href={`/api/stream?file=${encodeURIComponent(filename)}&download=1`}
-                              download={filename}
+                            <button
+                              type="button"
+                              onClick={() => exportTrackFile(filename, streamUrl)}
                               className="btn secondary sm"
                               title="Exportar archivo MP3"
                             >
                               💾 Archivo
-                            </a>
+                            </button>
                           )}
 
                           <button
@@ -1867,7 +1949,7 @@ export default function HomePage() {
               <div>
                 <h1 className="page-title">Archivos MP3 en servidor</h1>
                 <p className="page-sub">
-                  Pistas extraídas temporalmente en el servidor listas para cachear en tu dispositivo o eliminar.
+                  Puente temporal de descargas: el servidor elimina el MP3 automáticamente apenas tu dispositivo termina de bajarlo.
                 </p>
               </div>
               <button type="button" className="btn secondary sm" onClick={fetchLibraryFiles}>
@@ -1877,8 +1959,8 @@ export default function HomePage() {
 
             {libraryFiles.length === 0 ? (
               <div className="empty">
-                <div className="empty-title">Sin archivos MP3 todavía</div>
-                <p>Descarga cualquier canción desde Explorar o Librerías.</p>
+                <div className="empty-title">Servidor limpio (0 archivos residuales)</div>
+                <p>El servidor borra automáticamente cada MP3 en cuanto pasa a tu teléfono o PC.</p>
               </div>
             ) : (
               <div className="grid">
@@ -1973,7 +2055,7 @@ export default function HomePage() {
                 <div>
                   <div className="item-title">Importar música desde Spotify</div>
                   <div className="item-sub">
-                    Pega el enlace de cualquier playlist o álbum público de Spotify, o sube un archivo CSV de Exportify.
+                    Pega el enlace de una playlist/álbum de Spotify o sube tu CSV: al cargar te preguntará si querés guardarlo en ♥ Me gusta (Favoritos) o en otra librería.
                   </div>
                 </div>
                 <span className="badge mint">Spotify Sync</span>
@@ -1981,26 +2063,20 @@ export default function HomePage() {
 
               {spotifyMsg.text && (
                 <div className={`alert ${spotifyMsg.type === 'err' ? 'err' : 'ok'}`}>
-                  {spotifyMsg.text}
+                  <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap' }}>
+                    <span>{spotifyMsg.text}</span>
+                    {spotifyMsg.type === 'ok' && (
+                      <button
+                        type="button"
+                        className="btn secondary sm"
+                        onClick={() => setActiveTab('library')}
+                      >
+                        Ir a Mis librerías →
+                      </button>
+                    )}
+                  </div>
                 </div>
               )}
-
-              <div className="field" style={{ marginBottom: 12 }}>
-                <label htmlFor="spotify-target-select">¿En qué librería querés guardar lo importado?</label>
-                <select
-                  id="spotify-target-select"
-                  value={spotifyTargetLib}
-                  onChange={e => setSpotifyTargetLib(e.target.value)}
-                >
-                  <option value="new_playlist">✨ Crear una nueva librería con el nombre de la playlist</option>
-                  <option value="liked">♥ Guardar en Favoritos (Con corazón)</option>
-                  {customPlaylists.map(pl => (
-                    <option key={pl.id} value={pl.id}>
-                      📁 Guardar en «{pl.name}» ({pl.tracks.length} pistas)
-                    </option>
-                  ))}
-                </select>
-              </div>
 
               <form
                 className="search-bar"
@@ -2023,15 +2099,11 @@ export default function HomePage() {
                         text: data.error || 'No se pudo importar desde Spotify.'
                       });
                     } else {
-                      const { count, targetName } = saveImportedTracksToTarget(
+                      setSpotifyUrl('');
+                      openSpotifyImportModal(
                         data.tracks || [],
                         data.playlistName || 'Playlist Spotify'
                       );
-                      setSpotifyUrl('');
-                      setSpotifyMsg({
-                        type: 'ok',
-                        text: `✓ Se guardaron ${count} canciones en «${targetName}».`
-                      });
                     }
                   } catch {
                     setSpotifyMsg({ type: 'err', text: 'Error de red al importar playlist.' });
@@ -2049,7 +2121,7 @@ export default function HomePage() {
                   required
                 />
                 <button type="submit" className="btn sm" disabled={spotifyBusy}>
-                  {spotifyBusy ? 'Importando…' : 'Importar link'}
+                  {spotifyBusy ? 'Leyendo…' : 'Importar link'}
                 </button>
               </form>
 
@@ -2148,11 +2220,7 @@ export default function HomePage() {
                       }
 
                       const csvName = file.name.replace(/\.csv$/i, '') || 'Spotify CSV';
-                      const { count, targetName } = saveImportedTracksToTarget(imported, csvName);
-                      setSpotifyMsg({
-                        type: 'ok',
-                        text: `✓ Se importaron ${count} canciones del CSV en «${targetName}».`
-                      });
+                      openSpotifyImportModal(imported, csvName);
                       e.target.value = '';
                     }}
                   />
@@ -2480,6 +2548,77 @@ export default function HomePage() {
               />
               <button type="submit" className="btn sm">
                 + Crear y guardar
+              </button>
+            </form>
+          </div>
+        )}
+      </dialog>
+
+      {/* ==================== MODAL DIALOG: CHOOSE LIBRARY FOR SPOTIFY IMPORT ==================== */}
+      <dialog
+        ref={spotifyDialogRef}
+        closedby="any"
+        className="save-dialog"
+        aria-labelledby="spotify-dialog-title"
+        onClose={() => setPendingSpotifyImport(null)}
+      >
+        {pendingSpotifyImport && (
+          <div>
+            <div className="item-head" style={{ marginBottom: 8 }}>
+              <div>
+                <h2 id="spotify-dialog-title" className="item-title" style={{ margin: 0 }}>
+                  ¿Dónde guardar la importación?
+                </h2>
+                <div className="item-sub">
+                  {pendingSpotifyImport.tracks.length} canciones de «{pendingSpotifyImport.sourceName}»
+                </div>
+              </div>
+              <button type="button" className="btn ghost sm" onClick={closeSpotifyImportModal}>
+                ✕
+              </button>
+            </div>
+
+            <div className="dialog-list">
+              <button
+                type="button"
+                className="dialog-option selected"
+                onClick={() => confirmSpotifyImport('liked')}
+              >
+                <span>♥ Guardar en Me gusta (Favoritos)</span>
+                <span>Elegir →</span>
+              </button>
+
+              {customPlaylists.map(pl => (
+                <button
+                  key={pl.id}
+                  type="button"
+                  className="dialog-option"
+                  onClick={() => confirmSpotifyImport(pl.id)}
+                >
+                  <span>📁 Guardar en «{pl.name}» ({pl.tracks.length})</span>
+                  <span>Elegir →</span>
+                </button>
+              ))}
+            </div>
+
+            <form
+              className="search-bar"
+              style={{ marginTop: 10, marginBottom: 0 }}
+              onSubmit={e => {
+                e.preventDefault();
+                confirmSpotifyImport('new_playlist', spotifyNewLibName);
+              }}
+            >
+              <input
+                type="text"
+                className="search-input"
+                placeholder="Nombre para nueva librería…"
+                value={spotifyNewLibName}
+                onChange={e => setSpotifyNewLibName(e.target.value)}
+                required
+              />
+              <button type="submit" className="btn sm">
+                + Crear nueva y guardar
               </button>
             </form>
           </div>
