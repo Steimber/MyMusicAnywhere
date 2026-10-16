@@ -1,9 +1,10 @@
 'use client';
 
 import { useState, useEffect, useRef } from 'react';
+import { NoSleepController } from '../lib/nosleep';
 
 const AUDIO_CACHE_NAME = 'my-music-offline-audio-v1';
-const SHELL_CACHE_NAME = 'mymusic-shell-v7';
+const SHELL_CACHE_NAME = 'mymusic-shell-v8';
 const USER_STORAGE_KEY = 'mma_cached_user_v1';
 const LIKES_STORAGE_KEY = 'mma_liked_tracks_v1';
 const OFFLINE_CATALOG_KEY = 'mma_offline_catalog_v1';
@@ -307,6 +308,7 @@ export default function HomePage() {
   const [syncingAll, setSyncingAll] = useState(false);
   const [syncProgress, setSyncProgress] = useState({ done: 0, total: 0 });
   const cancelSyncRef = useRef(false);
+  const noSleepRef = useRef(null);
 
   // Settings: Spotify Importer
   const [spotifyUrl, setSpotifyUrl] = useState('');
@@ -1395,9 +1397,14 @@ export default function HomePage() {
   }
 
   async function downloadCollectionForOffline(tracksList) {
+    if (!noSleepRef.current && typeof window !== 'undefined') {
+      noSleepRef.current = new NoSleepController();
+    }
+
     if (syncingAll) {
-      // Tapping again cancels/pauses the bulk queue gracefully
+      // Tapping again cancels/pauses the bulk queue gracefully and releases NoSleep
       cancelSyncRef.current = true;
+      noSleepRef.current?.disable();
       return;
     }
     if (!tracksList || tracksList.length === 0) return;
@@ -1405,32 +1412,38 @@ export default function HomePage() {
     const pending = tracksList.filter(t => !isTrackAvailableOffline(t));
     if (pending.length === 0) return;
 
+    // Activate NoSleep synchronously inside user gesture so screen stays awake during bulk download
+    noSleepRef.current?.enable();
+
     cancelSyncRef.current = false;
     setSyncingAll(true);
     setSyncProgress({ done: 0, total: pending.length });
 
     let completed = 0;
-    for (const track of pending) {
-      if (cancelSyncRef.current) break;
-      const streamUrl =
-        track.streamUrl ||
-        (track.filename ? `/api/stream?file=${encodeURIComponent(track.filename)}` : null);
-      if (streamUrl && offlineUrls[streamUrl]) {
+    try {
+      for (const track of pending) {
+        if (cancelSyncRef.current) break;
+        const streamUrl =
+          track.streamUrl ||
+          (track.filename ? `/api/stream?file=${encodeURIComponent(track.filename)}` : null);
+        if (streamUrl && offlineUrls[streamUrl]) {
+          completed += 1;
+          setSyncProgress({ done: completed, total: pending.length });
+          continue;
+        }
+        if (streamUrl) {
+          await saveUrlToOfflineCache(streamUrl, track);
+        } else {
+          await startDownload(track, true);
+        }
         completed += 1;
         setSyncProgress({ done: completed, total: pending.length });
-        continue;
       }
-      if (streamUrl) {
-        await saveUrlToOfflineCache(streamUrl, track);
-      } else {
-        await startDownload(track, true);
-      }
-      completed += 1;
-      setSyncProgress({ done: completed, total: pending.length });
+    } finally {
+      noSleepRef.current?.disable();
+      setSyncingAll(false);
+      cancelSyncRef.current = false;
     }
-
-    setSyncingAll(false);
-    cancelSyncRef.current = false;
   }
 
   // Robust CSV Parser for Exportify / Spotify CSV files (supports ',', ';', '\t', BOM, EN/ES headers, artwork & duration)
@@ -2607,7 +2620,7 @@ export default function HomePage() {
                 {activeLibraryTracks.length}{' '}
                 {activeLibraryTracks.length === 1 ? 'canción' : 'canciones'}
                 {syncingAll && syncProgress.total > 0
-                  ? ` · Descargando ${syncProgress.done}/${syncProgress.total} (tocá para pausar)`
+                  ? ` · Descargando ${syncProgress.done}/${syncProgress.total} · Pantalla activa (tocá para pausar)`
                   : selectedLibrary === 'offline' && deviceQuota
                   ? ` · ${deviceQuota.usedMB} MB en dispositivo`
                   : isOffline && playableActiveLibraryTracks.length < activeLibraryTracks.length
