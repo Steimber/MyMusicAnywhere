@@ -10,7 +10,7 @@ const USER_STORAGE_KEY = 'mma_cached_user_v1';
 const LIKES_STORAGE_KEY = 'mma_liked_tracks_v1';
 const OFFLINE_CATALOG_KEY = 'mma_offline_catalog_v1';
 const PLAYLISTS_STORAGE_KEY = 'mma_custom_playlists_v1';
-const MAX_SIMULTANEOUS_DOWNLOADS = 3;
+const MAX_SIMULTANEOUS_DOWNLOADS = 2;
 
 function isPlaceholderCover(rawUrl) {
   if (!rawUrl || typeof rawUrl !== 'string') return true;

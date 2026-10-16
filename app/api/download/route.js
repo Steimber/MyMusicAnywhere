@@ -14,7 +14,7 @@ if (!global.__activeDownloads) {
 }
 const activeDownloads = global.__activeDownloads;
 
-const MAX_CONCURRENT_EXTRACTIONS = 3;
+const MAX_CONCURRENT_EXTRACTIONS = 2;
 if (!global.__extractionQueue) {
   global.__extractionQueue = { running: 0, queue: [] };
 }
