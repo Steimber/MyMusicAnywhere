@@ -1208,3 +1208,65 @@ dialog.save-dialog::backdrop {
   color: var(--cobalt);
 }
 
+/* ==================== INLINE SVG ICONS & SPOTIFY-STYLE OFFLINE STATES ==================== */
+.svg-icon {
+  display: inline-block;
+  vertical-align: -0.16em;
+  flex-shrink: 0;
+}
+
+.btn .svg-icon,
+.badge .svg-icon,
+.library-pill .svg-icon,
+.account-item .svg-icon,
+.dialog-option .svg-icon {
+  vertical-align: middle;
+}
+
+/* Navigation items that require internet when offline */
+.site-nav button.offline-nav-item {
+  opacity: 0.45;
+  filter: grayscale(0.9);
+}
+
+/* Track cards in Libraries/Explore that are NOT cached offline while device is offline */
+.item.offline-unavailable {
+  opacity: 0.46;
+  filter: grayscale(0.88);
+  background: var(--paper-alt);
+  border-style: dashed;
+  transition: opacity 0.25s ease, filter 0.25s ease;
+}
+
+.item.offline-unavailable .artwork-wrap {
+  cursor: not-allowed;
+}
+
+.item.offline-unavailable .artwork-play-overlay {
+  display: none;
+}
+
+/* Online-only sections (Search, Spotify Importer, Server Files) when offline */
+.offline-section-disabled {
+  opacity: 0.44;
+  filter: grayscale(0.9);
+  pointer-events: none;
+  user-select: none;
+  transition: opacity 0.25s ease, filter 0.25s ease;
+}
+
+.conn-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 4px 10px;
+  border-radius: 999px;
+}
+
+.conn-pill.offline {
+  background: var(--paper-alt);
+  color: var(--muted);
+  border: 1px solid var(--line);
+}

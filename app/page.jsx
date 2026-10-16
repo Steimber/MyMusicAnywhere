@@ -20,6 +20,222 @@ const DISCOVERY_SEEDS = [
   { term: 'Hip-Hop Rap Classics', label: 'Hip-Hop & Rap' }
 ];
 
+function Icon({ name, size = 15, className = '' }) {
+  const props = {
+    width: size,
+    height: size,
+    viewBox: '0 0 24 24',
+    fill: 'none',
+    stroke: 'currentColor',
+    strokeWidth: '2',
+    strokeLinecap: 'round',
+    strokeLinejoin: 'round',
+    className: `svg-icon ${className}`.trim(),
+    'aria-hidden': 'true'
+  };
+
+  switch (name) {
+    case 'heart-fill':
+      return (
+        <svg {...props} fill="currentColor">
+          <path d="M12 21s-7-4.5-7-10a4 4 0 0 1 7-2.6A4 4 0 0 1 19 11c0 5.5-7 10-7 10z" />
+        </svg>
+      );
+    case 'heart':
+      return (
+        <svg {...props}>
+          <path d="M12 21s-7-4.5-7-10a4 4 0 0 1 7-2.6A4 4 0 0 1 19 11c0 5.5-7 10-7 10z" />
+        </svg>
+      );
+    case 'check':
+      return (
+        <svg {...props}>
+          <polyline points="20 6 9 17 4 12" />
+        </svg>
+      );
+    case 'offline-pin':
+      return (
+        <svg {...props}>
+          <circle cx="12" cy="12" r="9" />
+          <path d="M12 8v6" />
+          <path d="M9 11.5l3 3 3-3" />
+        </svg>
+      );
+    case 'folder':
+      return (
+        <svg {...props}>
+          <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+        </svg>
+      );
+    case 'download':
+      return (
+        <svg {...props}>
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+          <polyline points="7 10 12 15 17 10" />
+          <line x1="12" y1="15" x2="12" y2="3" />
+        </svg>
+      );
+    case 'file-audio':
+      return (
+        <svg {...props}>
+          <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" />
+          <polyline points="14 2 14 8 20 8" />
+          <circle cx="10" cy="16" r="2" />
+          <path d="M12 16v-5l3 1" />
+        </svg>
+      );
+    case 'refresh':
+      return (
+        <svg {...props}>
+          <polyline points="23 4 23 10 17 10" />
+          <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10" />
+        </svg>
+      );
+    case 'trash':
+      return (
+        <svg {...props}>
+          <polyline points="3 6 5 6 21 6" />
+          <path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6" />
+          <path d="M10 11v6" />
+          <path d="M14 11v6" />
+          <path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2" />
+        </svg>
+      );
+    case 'settings':
+      return (
+        <svg {...props}>
+          <circle cx="12" cy="12" r="3" />
+          <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9c.26.6.77 1.02 1.41 1.09H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+        </svg>
+      );
+    case 'shield':
+      return (
+        <svg {...props}>
+          <path d="M12 2l7 4v6c0 5-3.5 8.5-7 10-3.5-1.5-7-5-7-10V6l7-4z" />
+        </svg>
+      );
+    case 'smartphone':
+      return (
+        <svg {...props}>
+          <rect x="5" y="2" width="14" height="20" rx="2" ry="2" />
+          <line x1="12" y1="18" x2="12.01" y2="18" />
+        </svg>
+      );
+    case 'wifi-off':
+      return (
+        <svg {...props}>
+          <line x1="1" y1="1" x2="23" y2="23" />
+          <path d="M16.72 11.06A10.94 10.94 0 0 1 19 12.55" />
+          <path d="M5 12.55a10.94 10.94 0 0 1 5.17-2.39" />
+          <path d="M10.71 5.05A16 16 0 0 1 22.58 9" />
+          <path d="M1.42 9a15.91 15.91 0 0 1 4.7-2.88" />
+          <path d="M8.53 16.11a6 6 0 0 1 6.95 0" />
+          <line x1="12" y1="20" x2="12.01" y2="20" />
+        </svg>
+      );
+    case 'sparkles':
+      return (
+        <svg {...props}>
+          <path d="M12 3l1.9 5.1L19 10l-5.1 1.9L12 17l-1.9-5.1L5 10l5.1-1.9L12 3z" />
+          <path d="M19 15l.9 2.1L22 18l-2.1.9L19 21l-.9-2.1L16 18l2.1-.9L19 15z" />
+        </svg>
+      );
+    case 'shuffle':
+      return (
+        <svg {...props}>
+          <polyline points="16 3 21 3 21 8" />
+          <line x1="4" y1="20" x2="21" y2="3" />
+          <polyline points="21 16 21 21 16 21" />
+          <line x1="15" y1="15" x2="21" y2="21" />
+          <line x1="4" y1="4" x2="9" y2="9" />
+        </svg>
+      );
+    case 'search':
+      return (
+        <svg {...props}>
+          <circle cx="11" cy="11" r="7" />
+          <line x1="20" y1="20" x2="16.5" y2="16.5" />
+        </svg>
+      );
+    case 'play':
+      return (
+        <svg {...props} fill="currentColor">
+          <polygon points="6 4 20 12 6 20 6 4" />
+        </svg>
+      );
+    case 'pause':
+      return (
+        <svg {...props} fill="currentColor">
+          <rect x="6" y="4" width="4" height="16" rx="1" />
+          <rect x="14" y="4" width="4" height="16" rx="1" />
+        </svg>
+      );
+    case 'skip-back':
+      return (
+        <svg {...props} fill="currentColor">
+          <polygon points="19 20 9 12 19 4 19 20" />
+          <line x1="5" y1="19" x2="5" y2="5" stroke="currentColor" strokeWidth="2.2" />
+        </svg>
+      );
+    case 'skip-forward':
+      return (
+        <svg {...props} fill="currentColor">
+          <polygon points="5 4 15 12 5 20 5 4" />
+          <line x1="19" y1="5" x2="19" y2="19" stroke="currentColor" strokeWidth="2.2" />
+        </svg>
+      );
+    case 'repeat':
+      return (
+        <svg {...props}>
+          <polyline points="17 1 21 5 17 9" />
+          <path d="M3 11V9a4 4 0 0 1 4-4h14" />
+          <polyline points="7 23 3 19 7 15" />
+          <path d="M21 13v2a4 4 0 0 1-4 4H3" />
+        </svg>
+      );
+    case 'repeat-1':
+      return (
+        <svg {...props}>
+          <polyline points="17 1 21 5 17 9" />
+          <path d="M3 11V9a4 4 0 0 1 4-4h14" />
+          <polyline points="7 23 3 19 7 15" />
+          <path d="M21 13v2a4 4 0 0 1-4 4H3" />
+          <path d="M11 10h1v4" />
+        </svg>
+      );
+    case 'headphones':
+      return (
+        <svg {...props}>
+          <path d="M3 18v-6a9 9 0 0 1 18 0v6" />
+          <path d="M21 19a2 2 0 0 1-2 2h-1a2 2 0 0 1-2-2v-3a2 2 0 0 1 2-2h3zM3 19a2 2 0 0 0 2 2h1a2 2 0 0 0 2-2v-3a2 2 0 0 0-2-2H3z" />
+        </svg>
+      );
+    case 'plus':
+      return (
+        <svg {...props}>
+          <line x1="12" y1="5" x2="12" y2="19" />
+          <line x1="5" y1="12" x2="19" y2="12" />
+        </svg>
+      );
+    case 'close':
+      return (
+        <svg {...props}>
+          <line x1="18" y1="6" x2="6" y2="18" />
+          <line x1="6" y1="6" x2="18" y2="18" />
+        </svg>
+      );
+    case 'arrow-right':
+      return (
+        <svg {...props}>
+          <line x1="5" y1="12" x2="19" y2="12" />
+          <polyline points="12 5 19 12 12 19" />
+        </svg>
+      );
+    default:
+      return null;
+  }
+}
+
 export default function HomePage() {
   // Auth state
   const [user, setUser] = useState(null);
@@ -47,7 +263,7 @@ export default function HomePage() {
   const [feedInfo, setFeedInfo] = useState({ mode: 'random', label: 'Descubrimiento aleatorio' });
 
   // Libraries & Offline Cache (strictly separated!)
-  const [likedTracks, setLikedTracks] = useState([]); // ONLY tracks with heart ♥
+  const [likedTracks, setLikedTracks] = useState([]); // ONLY tracks with heart
   const [offlineCatalog, setOfflineCatalog] = useState([]); // Metadata for tracks stored in device CacheStorage
   const [customPlaylists, setCustomPlaylists] = useState([]); // [{ id, name, createdAt, tracks: [] }]
   const [newPlaylistName, setNewPlaylistName] = useState('');
@@ -69,8 +285,8 @@ export default function HomePage() {
   const [spotifyUrl, setSpotifyUrl] = useState('');
   const [spotifyBusy, setSpotifyBusy] = useState(false);
   const [spotifyMsg, setSpotifyMsg] = useState({ type: '', text: '' });
-  const [spotifyTargetLib, setSpotifyTargetLib] = useState('ask'); // 'ask' | 'liked' | 'new_playlist' | <playlistId>
-  const [pendingSpotifyImport, setPendingSpotifyImport] = useState(null); // { tracks: [], sourceName: '' }
+  const [spotifyTargetLib, setSpotifyTargetLib] = useState('ask');
+  const [pendingSpotifyImport, setPendingSpotifyImport] = useState(null);
   const [spotifyNewLibName, setSpotifyNewLibName] = useState('');
   const spotifyDialogRef = useRef(null);
 
@@ -96,8 +312,53 @@ export default function HomePage() {
   const audioRef = useRef(null);
   const savedDeviceIdsRef = useRef(new Set());
   const accountRef = useRef(null);
+  const shuffleStateRef = useRef({ order: [], pos: -1, queueLen: 0 });
+  const wasOfflineRef = useRef(false);
 
   const currentTrack = currentIndex >= 0 && currentIndex < queue.length ? queue[currentIndex] : null;
+
+  function sanitizeLikedTracksList(list) {
+    if (!Array.isArray(list)) return [];
+    return list.filter(
+      t =>
+        t &&
+        !String(t.id || '').startsWith('offline_') &&
+        String(t.genre || '').trim().toLowerCase() !== 'offline' &&
+        String(t.album || '').trim().toLowerCase() !== 'guardado en dispositivo'
+    );
+  }
+
+  // Active internet connectivity detector (Spotify-style automatic offline/online transition)
+  async function verifyInternetConnection() {
+    if (typeof window === 'undefined') return true;
+    if (!navigator.onLine) {
+      setIsOffline(true);
+      return false;
+    }
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 3500);
+    try {
+      const r = await fetch('/api/auth', {
+        method: 'GET',
+        cache: 'no-store',
+        signal: ctrl.signal
+      });
+      clearTimeout(timer);
+      const data = await r.json().catch(() => ({}));
+      if (r.ok && data.user) {
+        setUser(data.user);
+        try {
+          localStorage.setItem(USER_STORAGE_KEY, JSON.stringify(data.user));
+        } catch {}
+      }
+      setIsOffline(false);
+      return true;
+    } catch {
+      clearTimeout(timer);
+      setIsOffline(true);
+      return false;
+    }
+  }
 
   // Warm PWA App Shell cache so reopening the app after closing it works 100% offline
   async function warmAppShellCache() {
@@ -149,7 +410,7 @@ export default function HomePage() {
     };
   }, [user]);
 
-  // Check session & hydrate local collections on mount
+  // Check session & hydrate local collections on mount + auto-detect online/offline changes
   useEffect(() => {
     let cachedUser = null;
     try {
@@ -164,11 +425,9 @@ export default function HomePage() {
     try {
       const savedLikes = localStorage.getItem(LIKES_STORAGE_KEY);
       if (savedLikes) {
-        // Filter out old auto-injected 'offline_' entries so Favoritos only has hearted tracks
-        const parsed = JSON.parse(savedLikes).filter(
-          t => !String(t.id).startsWith('offline_')
-        );
+        const parsed = sanitizeLikedTracksList(JSON.parse(savedLikes));
         setLikedTracks(parsed);
+        localStorage.setItem(LIKES_STORAGE_KEY, JSON.stringify(parsed));
       }
     } catch {}
 
@@ -184,6 +443,7 @@ export default function HomePage() {
 
     const offlineNow = typeof navigator !== 'undefined' && !navigator.onLine;
     setIsOffline(offlineNow);
+    wasOfflineRef.current = offlineNow;
     if (offlineNow) {
       setActiveTab('library');
       setSelectedLibrary('offline');
@@ -193,16 +453,18 @@ export default function HomePage() {
       setAuthChecked(true);
     }
 
-    fetch('/api/auth')
+    fetch('/api/auth', { cache: 'no-store' })
       .then(async r => {
         const data = await r.json().catch(() => ({}));
         if (r.ok && data.user) {
           setUser(data.user);
+          setIsOffline(false);
           try {
             localStorage.setItem(USER_STORAGE_KEY, JSON.stringify(data.user));
           } catch {}
         } else if (r.status === 401 || (r.ok && !data.user)) {
           setUser(null);
+          setIsOffline(false);
           try {
             localStorage.removeItem(USER_STORAGE_KEY);
           } catch {}
@@ -210,6 +472,7 @@ export default function HomePage() {
       })
       .catch(() => {
         setIsOffline(true);
+        wasOfflineRef.current = true;
         setActiveTab('library');
         setSelectedLibrary('offline');
         setUser(prev => prev || cachedUser || { username: 'Modo Offline', is_admin: false, offline: true });
@@ -219,14 +482,27 @@ export default function HomePage() {
     refreshOfflineCacheList();
     warmAppShellCache();
 
-    const handleOnline = () => setIsOffline(false);
+    const handleOnline = () => {
+      verifyInternetConnection();
+    };
     const handleOffline = () => {
       setIsOffline(true);
-      setActiveTab('library');
-      setSelectedLibrary('offline');
+      wasOfflineRef.current = true;
     };
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        verifyInternetConnection();
+      }
+    };
+
     window.addEventListener('online', handleOnline);
     window.addEventListener('offline', handleOffline);
+    document.addEventListener('visibilitychange', handleVisibility);
+
+    // Periodic connectivity probe every 12s so captive portals or silent drops are auto-detected
+    const probeTimer = setInterval(() => {
+      verifyInternetConnection();
+    }, 12000);
 
     const handleBeforeInstall = e => {
       e.preventDefault();
@@ -234,31 +510,37 @@ export default function HomePage() {
     };
     window.addEventListener('beforeinstallprompt', handleBeforeInstall);
     return () => {
+      clearInterval(probeTimer);
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
+      document.removeEventListener('visibilitychange', handleVisibility);
       window.removeEventListener('beforeinstallprompt', handleBeforeInstall);
     };
   }, []);
 
-  // Load initial catalog & server files once logged in
+  // Load initial catalog & server files once logged in, or restore automatically when internet returns!
   useEffect(() => {
     if (!user) return;
-    if (typeof navigator !== 'undefined' && !navigator.onLine) {
-      setActiveTab('library');
-      setSelectedLibrary('offline');
+    if (isOffline) {
+      wasOfflineRef.current = true;
       return;
     }
     fetchLibraryFiles();
     let initialLikes = likedTracks;
     try {
       const raw = localStorage.getItem(LIKES_STORAGE_KEY);
-      if (raw) initialLikes = JSON.parse(raw);
+      if (raw) {
+        initialLikes = sanitizeLikedTracksList(JSON.parse(raw));
+      }
     } catch {}
-    loadRecommendedOrRandomFeed(initialLikes, false);
+    if (results.length === 0 || wasOfflineRef.current) {
+      wasOfflineRef.current = false;
+      loadRecommendedOrRandomFeed(initialLikes, false);
+    }
     if (user.is_admin) {
       fetchAdminData();
     }
-  }, [user]);
+  }, [user, isOffline]);
 
   // Close account dropdown on outside click
   useEffect(() => {
@@ -819,12 +1101,42 @@ export default function HomePage() {
     return track.previewUrl || null;
   }
 
+  function isIgnoredTasteTerm(val) {
+    if (!val || typeof val !== 'string') return true;
+    const norm = val.trim().toLowerCase();
+    if (norm.length < 2) return true;
+    const ignored = new Set([
+      'offline',
+      'música',
+      'musica',
+      'music',
+      'unknown',
+      'desconocido',
+      'general',
+      'mp3',
+      'audio',
+      'track',
+      'pista',
+      'spotify',
+      'importado de spotify',
+      'guardado en dispositivo',
+      'artista'
+    ]);
+    return ignored.has(norm) || norm.startsWith('offline_');
+  }
+
   function getLikedCategories(tracksList = likedTracks) {
     const counts = {};
-    for (const t of tracksList) {
-      const cat = t.genre && t.genre !== 'Música' ? t.genre : t.artist;
-      if (cat) {
-        counts[cat] = (counts[cat] || 0) + 1;
+    const cleanTracks = sanitizeLikedTracksList(tracksList);
+    for (const t of cleanTracks) {
+      const artist = !isIgnoredTasteTerm(t.artist) ? t.artist.trim() : null;
+      const genre = !isIgnoredTasteTerm(t.genre) ? t.genre.trim() : null;
+      const primary = artist || genre;
+      if (primary) {
+        counts[primary] = (counts[primary] || 0) + 2;
+      }
+      if (genre && genre !== primary) {
+        counts[genre] = (counts[genre] || 0) + 1;
       }
     }
     return Object.entries(counts)
@@ -832,22 +1144,83 @@ export default function HomePage() {
       .map(([name]) => name);
   }
 
-  function loadRecommendedOrRandomFeed(tracksList = likedTracks, forceRandom = false) {
-    const categories = getLikedCategories(tracksList);
-    if (!forceRandom && categories.length > 0) {
-      const topPool = categories.slice(0, 4);
-      const chosenCategory = topPool[Math.floor(Math.random() * topPool.length)];
-      searchTracks(chosenCategory, {
-        mode: 'recommended',
-        label: chosenCategory
+  async function loadRecommendedOrRandomFeed(tracksList = likedTracks, forceRandom = false) {
+    const cleanLikes = sanitizeLikedTracksList(tracksList);
+    const playlistTracks = customPlaylists.flatMap(p => p.tracks || []);
+    const tastePool = cleanLikes.length > 0 ? cleanLikes : sanitizeLikedTracksList(playlistTracks);
+
+    const artistCounts = {};
+    const genreCounts = {};
+    for (const t of tastePool) {
+      if (!isIgnoredTasteTerm(t.artist)) {
+        const a = t.artist.trim();
+        artistCounts[a] = (artistCounts[a] || 0) + 1;
+      }
+      if (!isIgnoredTasteTerm(t.genre)) {
+        const g = t.genre.trim();
+        genreCounts[g] = (genreCounts[g] || 0) + 1;
+      }
+    }
+
+    const topArtists = Object.entries(artistCounts)
+      .sort((a, b) => b[1] - a[1])
+      .map(([name]) => name)
+      .slice(0, 6);
+    const topGenres = Object.entries(genreCounts)
+      .sort((a, b) => b[1] - a[1])
+      .map(([name]) => name)
+      .slice(0, 4);
+
+    const excludeKeys = [...cleanLikes, ...playlistTracks]
+      .map(
+        t =>
+          `${String(t.title || '').trim().toLowerCase()}|${String(t.artist || '')
+            .trim()
+            .toLowerCase()}`
+      )
+      .filter(k => k !== '|')
+      .slice(0, 120);
+
+    const mode = !forceRandom && (topArtists.length > 0 || topGenres.length > 0)
+      ? 'recommended'
+      : 'random';
+
+    setLoading(true);
+    try {
+      const res = await fetch('/api/recommend', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          mode,
+          artists: topArtists,
+          genres: topGenres,
+          excludeKeys
+        })
       });
+      if (res.ok) {
+        const data = await res.json();
+        if (Array.isArray(data.tracks) && data.tracks.length > 0) {
+          setFeedInfo({
+            mode: data.mode || mode,
+            label: data.label || (mode === 'recommended' ? topArtists[0] || topGenres[0] : 'Mix variado')
+          });
+          setResults(data.tracks);
+          setLoading(false);
+          return;
+        }
+      }
+    } catch {}
+
+    // Fallback to direct catalog search if /api/recommend fails
+    if (mode === 'recommended') {
+      const pool = topArtists.length > 0 ? topArtists : topGenres;
+      const chosen = pool[Math.floor(Math.random() * pool.length)];
+      await searchTracks(chosen, { mode: 'recommended', label: chosen });
     } else {
       const randomSeed = DISCOVERY_SEEDS[Math.floor(Math.random() * DISCOVERY_SEEDS.length)];
-      searchTracks(randomSeed.term, {
-        mode: 'random',
-        label: randomSeed.label
-      });
+      await searchTracks(randomSeed.term, { mode: 'random', label: randomSeed.label });
     }
+    setLoading(false);
   }
 
   async function searchTracks(searchTerm, meta = null) {
@@ -965,7 +1338,7 @@ export default function HomePage() {
       setSelectedLibrary('liked');
       setSpotifyMsg({
         type: 'ok',
-        text: `✓ Se guardaron ${filtered.length} canciones en «♥ Favoritos (Me gusta)».`
+        text: `Se guardaron ${filtered.length} canciones en «Favoritos (Me gusta)».`
       });
       closeSpotifyImportModal();
       return;
@@ -977,7 +1350,7 @@ export default function HomePage() {
         setSelectedLibrary(created.id);
         setSpotifyMsg({
           type: 'ok',
-          text: `✓ Se creó la librería «${created.name}» con ${freshTracks.length} canciones.`
+          text: `Se creó la librería «${created.name}» con ${freshTracks.length} canciones.`
         });
       }
       closeSpotifyImportModal();
@@ -999,16 +1372,119 @@ export default function HomePage() {
       setSelectedLibrary(targetPl.id);
       setSpotifyMsg({
         type: 'ok',
-        text: `✓ Se guardaron ${filtered.length} canciones en «${targetPl.name}».`
+        text: `Se guardaron ${filtered.length} canciones en «${targetPl.name}».`
       });
       closeSpotifyImportModal();
     }
   }
 
+  function isTrackAvailableOffline(track) {
+    if (!track) return false;
+    const dl = downloads[track.id];
+    const offItem = offlineCatalog.find(
+      t =>
+        String(t.id) === String(track.id) ||
+        (track.filename && t.filename === track.filename)
+    );
+    if (offItem) return true;
+    const filename = track.filename || dl?.filename;
+    const streamUrl =
+      track.streamUrl ||
+      (filename ? `/api/stream?file=${encodeURIComponent(filename)}` : null);
+    return Boolean(streamUrl && offlineUrls[streamUrl]);
+  }
+
+  /**
+   * Smart Shuffle (Fisher-Yates + Artist Spread constraint):
+   * - Guarantees every track in the queue plays once before any track repeats.
+   * - Spreads tracks by the same artist across the queue so they don't play back-to-back.
+   */
+  function buildSmartShuffleOrder(list, startIdx = -1, minArtistDistance = 2) {
+    const n = Array.isArray(list) ? list.length : 0;
+    if (n <= 1) return n === 1 ? [0] : [];
+
+    const pool = [];
+    for (let i = 0; i < n; i++) {
+      if (i !== startIdx) pool.push(i);
+    }
+
+    // Step 1: Unbiased Fisher-Yates shuffle
+    for (let i = pool.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [pool[i], pool[j]] = [pool[j], pool[i]];
+    }
+
+    // Step 2: Artist Spread sliding window constraint
+    const normArtist = idx =>
+      String(list[idx]?.artist || '')
+        .trim()
+        .toLowerCase();
+
+    const order = startIdx >= 0 && startIdx < n ? [startIdx] : [];
+    const recentArtists =
+      startIdx >= 0 && startIdx < n && normArtist(startIdx) ? [normArtist(startIdx)] : [];
+
+    while (pool.length > 0) {
+      let pickPos = pool.findIndex(idx => {
+        const a = normArtist(idx);
+        return !a || !recentArtists.includes(a);
+      });
+      if (pickPos === -1) pickPos = 0;
+
+      const [chosenIdx] = pool.splice(pickPos, 1);
+      order.push(chosenIdx);
+
+      const chosenArtist = normArtist(chosenIdx);
+      if (chosenArtist) {
+        recentArtists.push(chosenArtist);
+        if (recentArtists.length > minArtistDistance) {
+          recentArtists.shift();
+        }
+      }
+    }
+
+    return order;
+  }
+
   // Player controls
-  function playFromList(list, index) {
+  function playFromList(list, index, startRandom = false) {
+    if (!Array.isArray(list) || list.length === 0) return;
+
+    // When offline, behave like Spotify: only queue tracks that are cached on the device
+    if (isOffline) {
+      const clickedTrack = list[index];
+      if (clickedTrack && !isTrackAvailableOffline(clickedTrack) && !startRandom) {
+        return;
+      }
+      const playableList = list.filter(t => isTrackAvailableOffline(t));
+      if (playableList.length === 0) return;
+      const mappedIdx = clickedTrack
+        ? Math.max(
+            0,
+            playableList.findIndex(t => String(t.id) === String(clickedTrack.id))
+          )
+        : 0;
+      setQueue(playableList);
+      if (shuffle || startRandom) {
+        const order = buildSmartShuffleOrder(playableList, startRandom ? -1 : mappedIdx);
+        shuffleStateRef.current = { order, pos: 0, queueLen: playableList.length };
+        setCurrentIndex(order[0] ?? mappedIdx);
+      } else {
+        shuffleStateRef.current = { order: [], pos: -1, queueLen: playableList.length };
+        setCurrentIndex(mappedIdx);
+      }
+      return;
+    }
+
     setQueue(list);
-    setCurrentIndex(index);
+    if (shuffle || startRandom) {
+      const order = buildSmartShuffleOrder(list, startRandom ? -1 : index);
+      shuffleStateRef.current = { order, pos: 0, queueLen: list.length };
+      setCurrentIndex(order[0] ?? index);
+    } else {
+      shuffleStateRef.current = { order: [], pos: -1, queueLen: list.length };
+      setCurrentIndex(index);
+    }
   }
 
   function togglePlayPause() {
@@ -1025,11 +1501,24 @@ export default function HomePage() {
   function playNext() {
     if (queue.length === 0) return;
     if (shuffle && queue.length > 1) {
-      let nextIdx = currentIndex;
-      while (nextIdx === currentIndex) {
-        nextIdx = Math.floor(Math.random() * queue.length);
+      let { order, pos, queueLen } = shuffleStateRef.current;
+      if (!Array.isArray(order) || order.length !== queue.length || queueLen !== queue.length) {
+        order = buildSmartShuffleOrder(queue, currentIndex);
+        pos = 0;
       }
-      setCurrentIndex(nextIdx);
+      const nextPos = pos + 1;
+      if (nextPos < order.length) {
+        shuffleStateRef.current = { order, pos: nextPos, queueLen: queue.length };
+        setCurrentIndex(order[nextPos]);
+      } else {
+        // Completed full permutation without repeats; reshuffle for next cycle avoiding immediate repeat
+        const freshOrder = buildSmartShuffleOrder(queue, -1);
+        if (freshOrder.length > 1 && freshOrder[0] === currentIndex) {
+          [freshOrder[0], freshOrder[1]] = [freshOrder[1], freshOrder[0]];
+        }
+        shuffleStateRef.current = { order: freshOrder, pos: 0, queueLen: queue.length };
+        setCurrentIndex(freshOrder[0]);
+      }
       return;
     }
     if (currentIndex < queue.length - 1) {
@@ -1046,6 +1535,15 @@ export default function HomePage() {
     if (audioRef.current && audioRef.current.currentTime > 3) {
       audioRef.current.currentTime = 0;
       return;
+    }
+    if (shuffle && queue.length > 1) {
+      const { order, pos, queueLen } = shuffleStateRef.current;
+      if (Array.isArray(order) && queueLen === queue.length && pos > 0) {
+        const prevPos = pos - 1;
+        shuffleStateRef.current = { order, pos: prevPos, queueLen: queue.length };
+        setCurrentIndex(order[prevPos]);
+        return;
+      }
     }
     if (currentIndex > 0) {
       setCurrentIndex(currentIndex - 1);
@@ -1148,115 +1646,117 @@ export default function HomePage() {
 
               {authError && <div className="alert err">{authError}</div>}
 
-              {authMode === 'login' ? (
-                <form className="form" onSubmit={handleAuthSubmit}>
-                  <div className="field">
-                    <label htmlFor="signin-username">Usuario</label>
-                    <input
-                      id="signin-username"
-                      name="username"
-                      type="text"
-                      autoComplete="username"
-                      enterKeyHint="next"
-                      required
-                      value={username}
-                      onChange={e => setUsername(e.target.value)}
-                      placeholder="tu_usuario"
-                    />
-                  </div>
-
-                  <div className="field">
-                    <label htmlFor="current-password">Contraseña</label>
-                    <div className="input-row">
+              <div className={isOffline ? 'offline-section-disabled' : ''}>
+                {authMode === 'login' ? (
+                  <form className="form" onSubmit={handleAuthSubmit}>
+                    <div className="field">
+                      <label htmlFor="signin-username">Usuario</label>
                       <input
-                        id="current-password"
-                        name="password"
-                        type={showPassword ? 'text' : 'password'}
-                        autoComplete="current-password"
-                        enterKeyHint="done"
+                        id="signin-username"
+                        name="username"
+                        type="text"
+                        autoComplete="username"
+                        enterKeyHint="next"
                         required
-                        value={password}
-                        onChange={e => setPassword(e.target.value)}
-                        placeholder="••••••••"
+                        value={username}
+                        onChange={e => setUsername(e.target.value)}
+                        placeholder="tu_usuario"
                       />
-                      <button
-                        type="button"
-                        className="btn secondary sm"
-                        onClick={() => setShowPassword(v => !v)}
-                      >
-                        {showPassword ? 'Ocultar' : 'Mostrar'}
-                      </button>
                     </div>
-                  </div>
 
-                  <button type="submit" className="btn" disabled={authBusy}>
-                    {authBusy ? 'Verificando…' : 'Entrar a MyMusicAnywhere'}
-                  </button>
-                </form>
-              ) : (
-                <form className="form" onSubmit={handleAuthSubmit}>
-                  <div className="field">
-                    <label htmlFor="invite-code">Código de invitación</label>
-                    <input
-                      id="invite-code"
-                      name="inviteCode"
-                      type="text"
-                      autoCapitalize="characters"
-                      enterKeyHint="next"
-                      required
-                      value={inviteCode}
-                      onChange={e => setInviteCode(e.target.value.toUpperCase())}
-                      placeholder="MMA-XXXX-XXXX"
-                    />
-                  </div>
+                    <div className="field">
+                      <label htmlFor="current-password">Contraseña</label>
+                      <div className="input-row">
+                        <input
+                          id="current-password"
+                          name="password"
+                          type={showPassword ? 'text' : 'password'}
+                          autoComplete="current-password"
+                          enterKeyHint="done"
+                          required
+                          value={password}
+                          onChange={e => setPassword(e.target.value)}
+                          placeholder="••••••••"
+                        />
+                        <button
+                          type="button"
+                          className="btn secondary sm"
+                          onClick={() => setShowPassword(v => !v)}
+                        >
+                          {showPassword ? 'Ocultar' : 'Mostrar'}
+                        </button>
+                      </div>
+                    </div>
 
-                  <div className="field">
-                    <label htmlFor="signup-username">Elige tu usuario</label>
-                    <input
-                      id="signup-username"
-                      name="username"
-                      type="text"
-                      autoComplete="username"
-                      enterKeyHint="next"
-                      minLength={3}
-                      maxLength={32}
-                      required
-                      value={username}
-                      onChange={e => setUsername(e.target.value)}
-                      placeholder="nuevo_usuario"
-                    />
-                  </div>
-
-                  <div className="field">
-                    <label htmlFor="new-password">Crea una contraseña (mín. 6 caracteres)</label>
-                    <div className="input-row">
+                    <button type="submit" className="btn" disabled={authBusy || isOffline}>
+                      {authBusy ? 'Verificando…' : 'Entrar a MyMusicAnywhere'}
+                    </button>
+                  </form>
+                ) : (
+                  <form className="form" onSubmit={handleAuthSubmit}>
+                    <div className="field">
+                      <label htmlFor="invite-code">Código de invitación</label>
                       <input
-                        id="new-password"
-                        name="new-password"
-                        type={showPassword ? 'text' : 'password'}
-                        autoComplete="new-password"
-                        enterKeyHint="done"
-                        minLength={6}
+                        id="invite-code"
+                        name="inviteCode"
+                        type="text"
+                        autoCapitalize="characters"
+                        enterKeyHint="next"
                         required
-                        value={password}
-                        onChange={e => setPassword(e.target.value)}
-                        placeholder="••••••••"
+                        value={inviteCode}
+                        onChange={e => setInviteCode(e.target.value.toUpperCase())}
+                        placeholder="MMA-XXXX-XXXX"
                       />
-                      <button
-                        type="button"
-                        className="btn secondary sm"
-                        onClick={() => setShowPassword(v => !v)}
-                      >
-                        {showPassword ? 'Ocultar' : 'Mostrar'}
-                      </button>
                     </div>
-                  </div>
 
-                  <button type="submit" className="btn" disabled={authBusy}>
-                    {authBusy ? 'Activando cuenta…' : 'Crear cuenta e ingresar'}
-                  </button>
-                </form>
-              )}
+                    <div className="field">
+                      <label htmlFor="signup-username">Elige tu usuario</label>
+                      <input
+                        id="signup-username"
+                        name="username"
+                        type="text"
+                        autoComplete="username"
+                        enterKeyHint="next"
+                        minLength={3}
+                        maxLength={32}
+                        required
+                        value={username}
+                        onChange={e => setUsername(e.target.value)}
+                        placeholder="nuevo_usuario"
+                      />
+                    </div>
+
+                    <div className="field">
+                      <label htmlFor="new-password">Crea una contraseña (mín. 6 caracteres)</label>
+                      <div className="input-row">
+                        <input
+                          id="new-password"
+                          name="new-password"
+                          type={showPassword ? 'text' : 'password'}
+                          autoComplete="new-password"
+                          enterKeyHint="done"
+                          minLength={6}
+                          required
+                          value={password}
+                          onChange={e => setPassword(e.target.value)}
+                          placeholder="••••••••"
+                        />
+                        <button
+                          type="button"
+                          className="btn secondary sm"
+                          onClick={() => setShowPassword(v => !v)}
+                        >
+                          {showPassword ? 'Ocultar' : 'Mostrar'}
+                        </button>
+                      </div>
+                    </div>
+
+                    <button type="submit" className="btn" disabled={authBusy || isOffline}>
+                      {authBusy ? 'Activando cuenta…' : 'Crear cuenta e ingresar'}
+                    </button>
+                  </form>
+                )}
+              </div>
 
               {offlineCatalog.length > 0 && (
                 <div style={{ marginTop: 14, paddingTop: 12, borderTop: '1px solid var(--line)' }}>
@@ -1270,7 +1770,7 @@ export default function HomePage() {
                       setSelectedLibrary('offline');
                     }}
                   >
-                    🎧 Abrir mis canciones Offline ({offlineCatalog.length}) sin conexión
+                    <Icon name="headphones" size={16} /> Abrir mis canciones Offline ({offlineCatalog.length}) sin conexión
                   </button>
                 </div>
               )}
@@ -1293,19 +1793,23 @@ export default function HomePage() {
       ? activeCustomPlaylist.tracks
       : likedTracks;
 
+  const playableActiveLibraryTracks = isOffline
+    ? activeLibraryTracks.filter(t => isTrackAvailableOffline(t))
+    : activeLibraryTracks;
+
   const activeLibraryTitle =
     selectedLibrary === 'liked'
-      ? '♥ Favoritos (Con corazón)'
+      ? 'Favoritos (Con corazón)'
       : selectedLibrary === 'offline'
-      ? '✓ Offline (Guardadas en este dispositivo)'
+      ? 'Offline (Guardadas en este dispositivo)'
       : activeCustomPlaylist
-      ? `📁 ${activeCustomPlaylist.name}`
-      : '♥ Favoritos';
+      ? activeCustomPlaylist.name
+      : 'Favoritos';
 
   return (
     <>
       <header className="site-header">
-        <button type="button" className="brand" onClick={() => setActiveTab('explore')}>
+        <button type="button" className="brand" onClick={() => setActiveTab(isOffline ? 'library' : 'explore')}>
           <img src="/icon.svg" alt="MyMusicAnywhere" className="brand-logo" />
           <div className="brand-text">
             <span className="brand-name">MyMusicAnywhere</span>
@@ -1316,7 +1820,7 @@ export default function HomePage() {
         <nav className="site-nav" aria-label="Principal">
           <button
             type="button"
-            className={activeTab === 'explore' ? 'active' : ''}
+            className={`${activeTab === 'explore' ? 'active' : ''} ${isOffline ? 'offline-nav-item' : ''}`.trim()}
             onClick={() => setActiveTab('explore')}
           >
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -1342,7 +1846,7 @@ export default function HomePage() {
 
           <button
             type="button"
-            className={activeTab === 'files' ? 'active' : ''}
+            className={`${activeTab === 'files' ? 'active' : ''} ${isOffline ? 'offline-nav-item' : ''}`.trim()}
             onClick={() => setActiveTab('files')}
           >
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -1368,10 +1872,10 @@ export default function HomePage() {
           {user.is_admin && (
             <button
               type="button"
-              className={activeTab === 'admin' ? 'active' : ''}
+              className={`${activeTab === 'admin' ? 'active' : ''} ${isOffline ? 'offline-nav-item' : ''}`.trim()}
               onClick={() => {
                 setActiveTab('admin');
-                fetchAdminData();
+                if (!isOffline) fetchAdminData();
               }}
             >
               <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
@@ -1410,26 +1914,26 @@ export default function HomePage() {
                   setAccountOpen(false);
                 }}
               >
-                ⚙ Configuración e Importar Spotify
+                <Icon name="settings" size={15} /> Configuración e Importar Spotify
               </button>
 
               {user.is_admin && (
                 <button
                   type="button"
-                  className="account-item"
+                  className={`account-item ${isOffline ? 'offline-section-disabled' : ''}`.trim()}
                   onClick={() => {
                     setActiveTab('admin');
                     setAccountOpen(false);
-                    fetchAdminData();
+                    if (!isOffline) fetchAdminData();
                   }}
                 >
-                  🛡 Panel de invitaciones
+                  <Icon name="shield" size={15} /> Panel de invitaciones
                 </button>
               )}
 
               {deferredPrompt && (
                 <button type="button" className="account-item" onClick={handleInstallPwa}>
-                  📲 Instalar app en dispositivo
+                  <Icon name="smartphone" size={15} /> Instalar app en dispositivo
                 </button>
               )}
 
@@ -1444,10 +1948,24 @@ export default function HomePage() {
       <main className="shell">
         {isOffline && (
           <div className="storage-banner" style={{ marginBottom: 14 }}>
-            <span>
-              <strong>⚡ Modo sin conexión activo:</strong> Reproduciendo las canciones descargadas en el caché de tu dispositivo.
+            <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+              <Icon name="wifi-off" size={16} />
+              <span>
+                <strong>Sin conexión a internet:</strong> Las funciones online aparecen en gris. Tu música descargada en Offline sigue disponible con normalidad.
+              </span>
             </span>
-            <span className="badge mint">Offline Ready</span>
+            {activeTab !== 'library' && (
+              <button
+                type="button"
+                className="btn secondary sm"
+                onClick={() => {
+                  setActiveTab('library');
+                  setSelectedLibrary('offline');
+                }}
+              >
+                <Icon name="offline-pin" size={14} /> Ir a mis Offline ({offlineCatalog.length})
+              </button>
+            )}
           </div>
         )}
 
@@ -1463,44 +1981,50 @@ export default function HomePage() {
               </div>
               {deferredPrompt && (
                 <button type="button" className="btn secondary sm" onClick={handleInstallPwa}>
-                  + Instalar PWA
+                  <Icon name="plus" size={14} /> Instalar PWA
                 </button>
               )}
             </div>
 
             <form
-              className="search-bar"
+              className={`search-bar ${isOffline ? 'offline-section-disabled' : ''}`.trim()}
               onSubmit={e => {
                 e.preventDefault();
-                searchTracks(query);
+                if (!isOffline) searchTracks(query);
               }}
             >
               <input
                 type="search"
                 className="search-input"
                 enterKeyHint="search"
-                placeholder="Buscar canción, artista o álbum…"
+                placeholder={
+                  isOffline
+                    ? 'Búsqueda deshabilitada sin conexión a internet…'
+                    : 'Buscar canción, artista o álbum…'
+                }
                 value={query}
                 onChange={e => setQuery(e.target.value)}
+                disabled={isOffline}
               />
-              <button type="submit" className="btn" disabled={loading}>
+              <button type="submit" className="btn" disabled={loading || isOffline}>
+                <Icon name="search" size={15} />
                 {loading ? 'Buscando…' : 'Buscar'}
               </button>
             </form>
 
-            <div className="toolbar">
+            <div className={`toolbar ${isOffline ? 'offline-section-disabled' : ''}`.trim()}>
               <div className="toolbar-group">
                 {feedInfo.mode === 'recommended' ? (
                   <span className="badge coral">
-                    ♥ Recomendado por tu gusto: {feedInfo.label}
+                    <Icon name="heart-fill" size={12} /> Recomendado por tu gusto: {feedInfo.label}
                   </span>
                 ) : feedInfo.mode === 'random' ? (
                   <span className="badge cobalt">
-                    🎲 Selección aleatoria: {feedInfo.label}
+                    <Icon name="shuffle" size={12} /> Selección aleatoria: {feedInfo.label}
                   </span>
                 ) : (
                   <span className="badge neutral">
-                    🔎 Búsqueda: {feedInfo.label}
+                    <Icon name="search" size={12} /> Búsqueda: {feedInfo.label}
                   </span>
                 )}
 
@@ -1509,9 +2033,10 @@ export default function HomePage() {
                     key={cat}
                     type="button"
                     className="btn secondary sm"
+                    disabled={isOffline}
                     onClick={() => searchTracks(cat, { mode: 'recommended', label: cat })}
                   >
-                    ♥ {cat}
+                    <Icon name="heart-fill" size={12} /> {cat}
                   </button>
                 ))}
               </div>
@@ -1521,17 +2046,19 @@ export default function HomePage() {
                   <button
                     type="button"
                     className="btn secondary sm"
+                    disabled={isOffline}
                     onClick={() => loadRecommendedOrRandomFeed(likedTracks, false)}
                   >
-                    ✨ Para mí
+                    <Icon name="sparkles" size={14} /> Para mí
                   </button>
                 )}
                 <button
                   type="button"
                   className="btn secondary sm"
+                  disabled={isOffline}
                   onClick={() => loadRecommendedOrRandomFeed(likedTracks, true)}
                 >
-                  🎲 Música aleatoria
+                  <Icon name="shuffle" size={14} /> Música aleatoria
                 </button>
               </div>
             </div>
@@ -1544,15 +2071,24 @@ export default function HomePage() {
                   p.tracks.some(t => String(t.id) === String(track.id))
                 ).length;
                 const isCurrent = currentTrack?.id === track.id;
+                const isOfflineReady = dl?.status === 'ready' || isTrackAvailableOffline(track);
+                const isGreyedOffline = isOffline && !isOfflineReady;
 
                 return (
-                  <article key={track.id} className={`card item ${isCurrent ? 'playing' : ''}`}>
+                  <article
+                    key={track.id}
+                    className={`card item ${isCurrent ? 'playing' : ''} ${
+                      isGreyedOffline ? 'offline-unavailable' : ''
+                    }`.trim()}
+                  >
                     <div className="item-head">
                       <div className="item-media">
                         <div
                           className="artwork-wrap"
-                          onClick={() => playFromList(results, idx)}
-                          title="Reproducir pista"
+                          onClick={() => {
+                            if (!isGreyedOffline) playFromList(results, idx);
+                          }}
+                          title={isGreyedOffline ? 'Requiere conexión a internet' : 'Reproducir pista'}
                         >
                           <img
                             src={track.artwork || '/icon.svg'}
@@ -1563,7 +2099,7 @@ export default function HomePage() {
                             }}
                           />
                           <div className="artwork-play-overlay">
-                            {isCurrent && isPlaying ? '⏸' : '▶'}
+                            <Icon name={isCurrent && isPlaying ? 'pause' : 'play'} size={18} />
                           </div>
                         </div>
                         <div className="item-info">
@@ -1581,7 +2117,7 @@ export default function HomePage() {
                           onClick={() => toggleLike(track)}
                           title={liked ? 'Quitar corazón' : 'Dar corazón (Favoritos)'}
                         >
-                          {liked ? '♥' : '♡'}
+                          <Icon name={liked ? 'heart-fill' : 'heart'} size={14} />
                         </button>
 
                         <button
@@ -1590,32 +2126,41 @@ export default function HomePage() {
                           onClick={() => openSaveModal(track)}
                           title="Elegir en qué librería guardar"
                         >
-                          📁 Guardar{savedPlaylistCount > 0 ? ` (${savedPlaylistCount})` : ''}
+                          <Icon name="folder" size={14} /> Guardar
+                          {savedPlaylistCount > 0 ? ` (${savedPlaylistCount})` : ''}
                         </button>
 
-                        {dl?.status === 'downloading' ? (
-                          <span className="badge amber">
-                            Extrayendo {Math.round(dl.progress || 0)}%
-                          </span>
-                        ) : dl?.status === 'ready' ? (
+                        {isOfflineReady ? (
                           <>
-                            <span className="badge mint">✓ Offline</span>
+                            <span className="badge mint">
+                              <Icon name="offline-pin" size={13} /> Offline
+                            </span>
                             <button
                               type="button"
-                              onClick={() => exportTrackFile(dl.filename)}
+                              onClick={() => exportTrackFile(dl?.filename || track.filename)}
                               className="btn secondary sm"
                               title="Exportar archivo MP3 al teléfono o PC"
                             >
-                              💾 Archivo
+                              <Icon name="file-audio" size={14} /> Archivo
                             </button>
                           </>
+                        ) : isGreyedOffline ? (
+                          <span className="badge neutral">
+                            <Icon name="wifi-off" size={12} /> Sin internet
+                          </span>
+                        ) : dl?.status === 'downloading' ? (
+                          <span className="badge amber">
+                            Extrayendo {Math.round(dl.progress || 0)}%
+                          </span>
                         ) : (
                           <button
                             type="button"
                             className="btn sm"
+                            disabled={isOffline}
                             onClick={() => startDownload(track)}
                           >
-                            {dl?.status === 'error' ? '↻ Reintentar MP3' : '⬇ MP3'}
+                            <Icon name={dl?.status === 'error' ? 'refresh' : 'download'} size={14} />
+                            {dl?.status === 'error' ? 'Reintentar MP3' : 'MP3'}
                           </button>
                         )}
                       </div>
@@ -1642,13 +2187,15 @@ export default function HomePage() {
                       <div>
                         <dt>Estado</dt>
                         <dd>
-                          {dl?.status === 'ready'
+                          {isOfflineReady
                             ? 'En librería Offline'
+                            : isGreyedOffline
+                            ? 'Requiere internet'
                             : liked
-                            ? 'En ♥ Favoritos'
+                            ? 'En Favoritos'
                             : savedPlaylistCount > 0
                             ? `En ${savedPlaylistCount} librería(s)`
-                            : 'Streaming 30s'}
+                            : 'Streaming disponible'}
                         </dd>
                       </div>
                     </dl>
@@ -1666,7 +2213,7 @@ export default function HomePage() {
               <div>
                 <h1 className="page-title">Mis librerías</h1>
                 <p className="page-sub">
-                  Tu colección separada entre ♥ Favoritos, ✓ Offline en el dispositivo y las librerías que vos crees.
+                  Tu colección separada entre Favoritos, Offline en el dispositivo y las librerías que vos crees.
                 </p>
               </div>
               <button
@@ -1674,7 +2221,15 @@ export default function HomePage() {
                 className="btn secondary sm"
                 onClick={() => setCreatingPlaylist(v => !v)}
               >
-                {creatingPlaylist ? 'Cancelar' : '+ Nueva librería'}
+                {creatingPlaylist ? (
+                  <>
+                    <Icon name="close" size={13} /> Cancelar
+                  </>
+                ) : (
+                  <>
+                    <Icon name="plus" size={13} /> Nueva librería
+                  </>
+                )}
               </button>
             </div>
 
@@ -1706,14 +2261,15 @@ export default function HomePage() {
               </form>
             )}
 
-            {/* Switcher between ♥ Favoritos, ✓ Offline, and Custom Libraries */}
+            {/* Switcher between Favoritos, Offline, and Custom Libraries */}
             <div className="library-switcher" role="tablist" aria-label="Selector de librería">
               <button
                 type="button"
                 className={`library-pill ${selectedLibrary === 'liked' ? 'active' : ''}`}
                 onClick={() => setSelectedLibrary('liked')}
               >
-                <span>♥ Favoritos</span>
+                <Icon name="heart-fill" size={14} />
+                <span>Favoritos</span>
                 <span className="library-pill-count">{likedTracks.length}</span>
               </button>
 
@@ -1722,7 +2278,8 @@ export default function HomePage() {
                 className={`library-pill ${selectedLibrary === 'offline' ? 'active' : ''}`}
                 onClick={() => setSelectedLibrary('offline')}
               >
-                <span>✓ Offline</span>
+                <Icon name="offline-pin" size={14} />
+                <span>Offline</span>
                 <span className="library-pill-count">{offlineCatalog.length}</span>
               </button>
 
@@ -1733,7 +2290,8 @@ export default function HomePage() {
                   className={`library-pill ${selectedLibrary === pl.id ? 'active' : ''}`}
                   onClick={() => setSelectedLibrary(pl.id)}
                 >
-                  <span>📁 {pl.name}</span>
+                  <Icon name="folder" size={14} />
+                  <span>{pl.name}</span>
                   <span className="library-pill-count">{pl.tracks.length}</span>
                 </button>
               ))}
@@ -1741,12 +2299,14 @@ export default function HomePage() {
 
             <div className="storage-banner">
               <span>
-                <strong> Vista activa:</strong> {activeLibraryTitle} ·{' '}
+                <strong>Vista activa:</strong> {activeLibraryTitle} ·{' '}
                 {deviceQuota
                   ? `${deviceQuota.usedMB} MB usados de ~${deviceQuota.quotaGB} GB en dispositivo`
                   : 'Caché offline del navegador activo'}
               </span>
-              <span className="badge mint">{offlineCatalog.length} pistas offline</span>
+              <span className="badge mint">
+                <Icon name="offline-pin" size={12} /> {offlineCatalog.length} pistas offline
+              </span>
             </div>
 
             <div className="toolbar">
@@ -1754,20 +2314,23 @@ export default function HomePage() {
                 <button
                   type="button"
                   className="btn sm"
-                  disabled={activeLibraryTracks.length === 0}
+                  disabled={playableActiveLibraryTracks.length === 0}
                   onClick={() => playFromList(activeLibraryTracks, 0)}
                 >
-                  ▶ Reproducir librería
+                  <Icon name="play" size={13} /> Reproducir librería
+                  {isOffline && playableActiveLibraryTracks.length < activeLibraryTracks.length
+                    ? ` (${playableActiveLibraryTracks.length} offline)`
+                    : ''}
                 </button>
                 <button
                   type="button"
                   className={`btn secondary sm ${shuffle ? 'cobalt' : ''}`}
                   onClick={() => setShuffle(s => !s)}
                 >
-                  🔀 Aleatorio: {shuffle ? 'ON' : 'OFF'}
+                  <Icon name="shuffle" size={13} /> Aleatorio: {shuffle ? 'ON' : 'OFF'}
                 </button>
                 <button type="button" className="btn secondary sm" onClick={cycleRepeatMode}>
-                  🔁 Bucle:{' '}
+                  <Icon name={repeatMode === 'one' ? 'repeat-1' : 'repeat'} size={13} /> Bucle:{' '}
                   {repeatMode === 'off' ? 'No' : repeatMode === 'all' ? 'Todo' : '1 pista'}
                 </button>
               </div>
@@ -1776,11 +2339,12 @@ export default function HomePage() {
                 {selectedLibrary !== 'offline' && (
                   <button
                     type="button"
-                    className="btn secondary sm"
-                    disabled={activeLibraryTracks.length === 0 || syncingAll}
+                    className={`btn secondary sm ${isOffline ? 'offline-section-disabled' : ''}`.trim()}
+                    disabled={activeLibraryTracks.length === 0 || syncingAll || isOffline}
                     onClick={() => downloadCollectionForOffline(activeLibraryTracks)}
                   >
-                    {syncingAll ? 'Sincronizando…' : '⬇ Bajar toda esta librería a Offline'}
+                    <Icon name="download" size={13} />
+                    {syncingAll ? 'Sincronizando…' : 'Bajar toda esta librería a Offline'}
                   </button>
                 )}
 
@@ -1790,7 +2354,7 @@ export default function HomePage() {
                     className="btn danger sm"
                     onClick={() => deleteCustomPlaylist(activeCustomPlaylist.id)}
                   >
-                    🗑 Eliminar librería
+                    <Icon name="trash" size={13} /> Eliminar librería
                   </button>
                 )}
               </div>
@@ -1801,10 +2365,10 @@ export default function HomePage() {
                 <div className="empty-title">Esta librería está vacía</div>
                 <p>
                   {selectedLibrary === 'liked'
-                    ? 'Toca el corazón ♡ en cualquier canción de Explorar para guardarla en Favoritos.'
+                    ? 'Toca el icono de corazón en cualquier canción de Explorar para guardarla en Favoritos.'
                     : selectedLibrary === 'offline'
                     ? 'Cuando descargues cualquier MP3 aparecerá automáticamente aquí para escuchar sin internet.'
-                    : 'Usa el botón «📁 Guardar» en Explorar para agregar canciones a esta librería.'}
+                    : 'Usa el botón «Guardar» en Explorar para agregar canciones a esta librería.'}
                 </p>
               </div>
             ) : (
@@ -1822,20 +2386,32 @@ export default function HomePage() {
                     offItem?.streamUrl ||
                     (filename ? `/api/stream?file=${encodeURIComponent(filename)}` : null);
                   const isOfflineReady =
-                    selectedLibrary === 'offline' || Boolean(streamUrl && offlineUrls[streamUrl]);
+                    selectedLibrary === 'offline' ||
+                    Boolean(offItem) ||
+                    Boolean(streamUrl && offlineUrls[streamUrl]);
+                  const isGreyedOffline = isOffline && !isOfflineReady;
                   const isCurrent = currentTrack?.id === track.id;
                   const liked = isLiked(track.id);
 
                   return (
                     <article
                       key={`${selectedLibrary}_${track.id}`}
-                      className={`card item ${isCurrent ? 'playing' : ''}`}
+                      className={`card item ${isCurrent ? 'playing' : ''} ${
+                        isGreyedOffline ? 'offline-unavailable' : ''
+                      }`.trim()}
                     >
                       <div className="item-head">
                         <div className="item-media">
                           <div
                             className="artwork-wrap"
-                            onClick={() => playFromList(activeLibraryTracks, idx)}
+                            onClick={() => {
+                              if (!isGreyedOffline) playFromList(activeLibraryTracks, idx);
+                            }}
+                            title={
+                              isGreyedOffline
+                                ? 'No descargada en el dispositivo (requiere internet)'
+                                : 'Reproducir pista'
+                            }
                           >
                             <img
                               src={track.artwork || '/icon.svg'}
@@ -1846,7 +2422,7 @@ export default function HomePage() {
                               }}
                             />
                             <div className="artwork-play-overlay">
-                              {isCurrent && isPlaying ? '⏸' : '▶'}
+                              <Icon name={isCurrent && isPlaying ? 'pause' : 'play'} size={18} />
                             </div>
                           </div>
                           <div className="item-info">
@@ -1857,7 +2433,13 @@ export default function HomePage() {
 
                         <div className="item-actions">
                           {isOfflineReady ? (
-                            <span className="badge mint">✓ Offline</span>
+                            <span className="badge mint">
+                              <Icon name="offline-pin" size={13} /> Offline
+                            </span>
+                          ) : isGreyedOffline ? (
+                            <span className="badge neutral">
+                              <Icon name="wifi-off" size={12} /> Requiere internet
+                            </span>
                           ) : dl?.status === 'downloading' ? (
                             <span className="badge amber">
                               Extrayendo {Math.round(dl.progress || 0)}%
@@ -1866,20 +2448,25 @@ export default function HomePage() {
                             <button
                               type="button"
                               className="btn sm"
+                              disabled={isOffline}
                               onClick={() => startDownload(track)}
                             >
-                              {dl?.status === 'error' ? '↻ Reintentar MP3' : '⬇ Obtener MP3'}
+                              <Icon
+                                name={dl?.status === 'error' ? 'refresh' : 'download'}
+                                size={14}
+                              />
+                              {dl?.status === 'error' ? 'Reintentar MP3' : 'Obtener MP3'}
                             </button>
                           )}
 
-                          {filename && (
+                          {filename && isOfflineReady && (
                             <button
                               type="button"
                               onClick={() => exportTrackFile(filename, streamUrl)}
                               className="btn secondary sm"
                               title="Exportar archivo MP3"
                             >
-                              💾 Archivo
+                              <Icon name="file-audio" size={14} /> Archivo
                             </button>
                           )}
 
@@ -1887,9 +2474,9 @@ export default function HomePage() {
                             type="button"
                             className={`btn heart ${liked ? 'liked' : ''}`}
                             onClick={() => toggleLike(track)}
-                            title={liked ? 'Quitar de ♥ Favoritos' : 'Agregar a ♥ Favoritos'}
+                            title={liked ? 'Quitar de Favoritos' : 'Agregar a Favoritos'}
                           >
-                            {liked ? '♥' : '♡'}
+                            <Icon name={liked ? 'heart-fill' : 'heart'} size={14} />
                           </button>
 
                           <button
@@ -1898,7 +2485,7 @@ export default function HomePage() {
                             onClick={() => openSaveModal(track)}
                             title="Guardar en otra librería"
                           >
-                            📁
+                            <Icon name="folder" size={14} />
                           </button>
 
                           {/* Delete / Remove action depending on current library */}
@@ -1909,7 +2496,7 @@ export default function HomePage() {
                               onClick={() => deleteOfflineTrack(track)}
                               title="Borrar MP3 del almacenamiento offline del dispositivo"
                             >
-                              🗑 Borrar
+                              <Icon name="trash" size={14} /> Borrar
                             </button>
                           ) : selectedLibrary === 'liked' ? (
                             <button
@@ -1918,7 +2505,7 @@ export default function HomePage() {
                               onClick={() => toggleLike(track)}
                               title="Quitar canción de Favoritos"
                             >
-                              🗑 Quitar
+                              <Icon name="trash" size={14} /> Quitar
                             </button>
                           ) : (
                             <button
@@ -1929,7 +2516,7 @@ export default function HomePage() {
                               }
                               title="Quitar canción de esta librería"
                             >
-                              🗑 Quitar
+                              <Icon name="trash" size={14} /> Quitar
                             </button>
                           )}
                         </div>
@@ -1944,7 +2531,7 @@ export default function HomePage() {
 
         {/* ==================== TAB 3: ARCHIVOS EN SERVIDOR ==================== */}
         {activeTab === 'files' && (
-          <section>
+          <section className={isOffline ? 'offline-section-disabled' : ''}>
             <div className="page-head">
               <div>
                 <h1 className="page-title">Archivos MP3 en servidor</h1>
@@ -1952,8 +2539,13 @@ export default function HomePage() {
                   Puente temporal de descargas: el servidor elimina el MP3 automáticamente apenas tu dispositivo termina de bajarlo.
                 </p>
               </div>
-              <button type="button" className="btn secondary sm" onClick={fetchLibraryFiles}>
-                Actualizar lista
+              <button
+                type="button"
+                className="btn secondary sm"
+                disabled={isOffline}
+                onClick={fetchLibraryFiles}
+              >
+                <Icon name="refresh" size={13} /> Actualizar lista
               </button>
             </div>
 
@@ -1988,7 +2580,9 @@ export default function HomePage() {
                             onClick={() => playFromList(formattedList, idx)}
                           >
                             <img src="/icon.svg" alt="MP3" />
-                            <div className="artwork-play-overlay">▶</div>
+                            <div className="artwork-play-overlay">
+                              <Icon name="play" size={18} />
+                            </div>
                           </div>
                           <div className="item-info">
                             <div className="item-title">{cleanTitle}</div>
@@ -2011,14 +2605,15 @@ export default function HomePage() {
                               })
                             }
                           >
-                            {isCached ? '✓ En Offline' : '⚡ Guardar Offline'}
+                            <Icon name={isCached ? 'offline-pin' : 'download'} size={14} />
+                            {isCached ? 'En Offline' : 'Guardar Offline'}
                           </button>
                           <a
                             href={`${file.url}&download=1`}
                             download={file.filename}
                             className="btn sm"
                           >
-                            💾 Archivo
+                            <Icon name="file-audio" size={14} /> Archivo
                           </a>
                           <button
                             type="button"
@@ -2026,7 +2621,7 @@ export default function HomePage() {
                             onClick={() => deleteServerFile(file.filename)}
                             title="Borrar archivo del servidor"
                           >
-                            🗑 Borrar
+                            <Icon name="trash" size={14} /> Borrar
                           </button>
                         </div>
                       </div>
@@ -2050,12 +2645,15 @@ export default function HomePage() {
               </div>
             </div>
 
-            <div className="card" style={{ marginBottom: 16 }}>
+            <div
+              className={`card ${isOffline ? 'offline-section-disabled' : ''}`.trim()}
+              style={{ marginBottom: 16 }}
+            >
               <div className="item-head" style={{ marginBottom: 12 }}>
                 <div>
                   <div className="item-title">Importar música desde Spotify</div>
                   <div className="item-sub">
-                    Pega el enlace de una playlist/álbum de Spotify o sube tu CSV: al cargar te preguntará si querés guardarlo en ♥ Me gusta (Favoritos) o en otra librería.
+                    Pega el enlace de una playlist/álbum de Spotify o sube tu CSV: al cargar te preguntará si querés guardarlo en Me gusta (Favoritos) o en otra librería.
                   </div>
                 </div>
                 <span className="badge mint">Spotify Sync</span>
@@ -2071,7 +2669,7 @@ export default function HomePage() {
                         className="btn secondary sm"
                         onClick={() => setActiveTab('library')}
                       >
-                        Ir a Mis librerías →
+                        Ir a Mis librerías <Icon name="arrow-right" size={13} />
                       </button>
                     )}
                   </div>
@@ -2083,7 +2681,7 @@ export default function HomePage() {
                 style={{ marginBottom: 12 }}
                 onSubmit={async e => {
                   e.preventDefault();
-                  if (!spotifyUrl.trim() || spotifyBusy) return;
+                  if (!spotifyUrl.trim() || spotifyBusy || isOffline) return;
                   setSpotifyBusy(true);
                   setSpotifyMsg({ type: '', text: '' });
                   try {
@@ -2118,9 +2716,10 @@ export default function HomePage() {
                   placeholder="https://open.spotify.com/playlist/..."
                   value={spotifyUrl}
                   onChange={e => setSpotifyUrl(e.target.value)}
+                  disabled={isOffline}
                   required
                 />
-                <button type="submit" className="btn sm" disabled={spotifyBusy}>
+                <button type="submit" className="btn sm" disabled={spotifyBusy || isOffline}>
                   {spotifyBusy ? 'Leyendo…' : 'Importar link'}
                 </button>
               </form>
@@ -2144,7 +2743,7 @@ export default function HomePage() {
                   y subí el archivo <code>.csv</code>:
                 </span>
                 <label className="btn secondary sm" style={{ cursor: 'pointer' }}>
-                  📂 Subir CSV de Spotify
+                  <Icon name="folder" size={14} /> Subir CSV de Spotify
                   <input
                     type="file"
                     accept=".csv,text/csv"
@@ -2250,7 +2849,7 @@ export default function HomePage() {
                       await refreshOfflineCacheList();
                     }}
                   >
-                    🗑 Vaciar todo el caché Offline
+                    <Icon name="trash" size={14} /> Vaciar todo el caché Offline
                   </button>
                 )}
               </div>
@@ -2260,7 +2859,7 @@ export default function HomePage() {
 
         {/* ==================== TAB 5: ADMIN PANEL (SOLO ADMIN) ==================== */}
         {activeTab === 'admin' && user.is_admin && (
-          <section>
+          <section className={isOffline ? 'offline-section-disabled' : ''}>
             <div className="page-head">
               <div>
                 <h1 className="page-title">Administración e invitaciones</h1>
@@ -2333,7 +2932,7 @@ export default function HomePage() {
                 </div>
                 <div>
                   <button type="submit" className="btn">
-                    + Generar código de invitación
+                    <Icon name="plus" size={14} /> Generar código de invitación
                   </button>
                 </div>
               </form>
@@ -2382,7 +2981,13 @@ export default function HomePage() {
                             className="btn secondary sm"
                             onClick={() => copyInviteCode(inv.code)}
                           >
-                            {copiedCode === inv.code ? '✓ Copiado' : 'Copiar código'}
+                            {copiedCode === inv.code ? (
+                              <>
+                                <Icon name="check" size={13} /> Copiado
+                              </>
+                            ) : (
+                              'Copiar código'
+                            )}
                           </button>
                           <button
                             type="button"
@@ -2492,7 +3097,7 @@ export default function HomePage() {
                 </div>
               </div>
               <button type="button" className="btn ghost sm" onClick={closeSaveModal}>
-                ✕
+                <Icon name="close" size={15} />
               </button>
             </div>
 
@@ -2502,8 +3107,13 @@ export default function HomePage() {
                 className={`dialog-option ${isLiked(trackToSave.id) ? 'selected' : ''}`}
                 onClick={() => toggleLike(trackToSave)}
               >
-                <span>♥ Favoritos (Con corazón)</span>
-                <span>{isLiked(trackToSave.id) ? '✓ Guardada' : '+ Agregar'}</span>
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 7 }}>
+                  <Icon name="heart-fill" size={14} /> Favoritos (Con corazón)
+                </span>
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+                  <Icon name={isLiked(trackToSave.id) ? 'check' : 'plus'} size={13} />
+                  {isLiked(trackToSave.id) ? 'Guardada' : 'Agregar'}
+                </span>
               </button>
 
               {customPlaylists.map(pl => {
@@ -2515,8 +3125,13 @@ export default function HomePage() {
                     className={`dialog-option ${inside ? 'selected' : ''}`}
                     onClick={() => toggleTrackInPlaylist(pl.id, trackToSave)}
                   >
-                    <span>📁 {pl.name}</span>
-                    <span>{inside ? '✓ Guardada' : '+ Agregar'}</span>
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 7 }}>
+                      <Icon name="folder" size={14} /> {pl.name}
+                    </span>
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+                      <Icon name={inside ? 'check' : 'plus'} size={13} />
+                      {inside ? 'Guardada' : 'Agregar'}
+                    </span>
                   </button>
                 );
               })}
@@ -2547,7 +3162,7 @@ export default function HomePage() {
                 required
               />
               <button type="submit" className="btn sm">
-                + Crear y guardar
+                <Icon name="plus" size={13} /> Crear y guardar
               </button>
             </form>
           </div>
@@ -2574,7 +3189,7 @@ export default function HomePage() {
                 </div>
               </div>
               <button type="button" className="btn ghost sm" onClick={closeSpotifyImportModal}>
-                ✕
+                <Icon name="close" size={15} />
               </button>
             </div>
 
@@ -2584,8 +3199,12 @@ export default function HomePage() {
                 className="dialog-option selected"
                 onClick={() => confirmSpotifyImport('liked')}
               >
-                <span>♥ Guardar en Me gusta (Favoritos)</span>
-                <span>Elegir →</span>
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 7 }}>
+                  <Icon name="heart-fill" size={14} /> Guardar en Me gusta (Favoritos)
+                </span>
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+                  Elegir <Icon name="arrow-right" size={13} />
+                </span>
               </button>
 
               {customPlaylists.map(pl => (
@@ -2595,8 +3214,12 @@ export default function HomePage() {
                   className="dialog-option"
                   onClick={() => confirmSpotifyImport(pl.id)}
                 >
-                  <span>📁 Guardar en «{pl.name}» ({pl.tracks.length})</span>
-                  <span>Elegir →</span>
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 7 }}>
+                    <Icon name="folder" size={14} /> Guardar en «{pl.name}» ({pl.tracks.length})
+                  </span>
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+                    Elegir <Icon name="arrow-right" size={13} />
+                  </span>
                 </button>
               ))}
             </div>
@@ -2618,7 +3241,7 @@ export default function HomePage() {
                 required
               />
               <button type="submit" className="btn sm">
-                + Crear nueva y guardar
+                <Icon name="plus" size={13} /> Crear nueva y guardar
               </button>
             </form>
           </div>
@@ -2642,12 +3265,12 @@ export default function HomePage() {
                 type="button"
                 className={`ctrl-btn ${shuffle ? 'active' : ''}`}
                 onClick={() => setShuffle(s => !s)}
-                title="Aleatorio"
+                title="Aleatorio inteligente"
               >
-                🔀
+                <Icon name="shuffle" size={15} />
               </button>
               <button type="button" className="ctrl-btn" onClick={playPrev} title="Anterior">
-                ⏮
+                <Icon name="skip-back" size={15} />
               </button>
               <button
                 type="button"
@@ -2655,10 +3278,10 @@ export default function HomePage() {
                 onClick={togglePlayPause}
                 title={isPlaying ? 'Pausar' : 'Reproducir'}
               >
-                {isPlaying ? '⏸' : '▶'}
+                <Icon name={isPlaying ? 'pause' : 'play'} size={16} />
               </button>
               <button type="button" className="ctrl-btn" onClick={playNext} title="Siguiente">
-                ⏭
+                <Icon name="skip-forward" size={15} />
               </button>
               <button
                 type="button"
@@ -2666,7 +3289,7 @@ export default function HomePage() {
                 onClick={cycleRepeatMode}
                 title="Modo bucle"
               >
-                {repeatMode === 'one' ? '🔂' : '🔁'}
+                <Icon name={repeatMode === 'one' ? 'repeat-1' : 'repeat'} size={15} />
               </button>
             </div>
           </div>
