@@ -1107,7 +1107,7 @@ export default function HomePage() {
     return [track];
   }
 
-  // Resolve & compress missing album covers (~4 KB 100x100bb.jpg) for already-imported CSV tracks
+  // Resolve & compress missing album covers (~4 KB 100x100bb.jpg) respecting iTunes ~20 req/min rate limit (~3.1s pause)
   async function syncMissingCoversForList(targetTracks, manualClick = false) {
     if (isOffline) return;
     if (enrichingBusyRef.current) {
@@ -1131,13 +1131,29 @@ export default function HomePage() {
     cancelCoverSyncRef.current = false;
     setCoverSync({ active: true, done: 0, total: missing.length });
 
+    const resolvedIdsInRun = new Set();
+    const getAlbumKey = tr => {
+      const alb = String(tr.album || '').trim().toLowerCase();
+      const art = String(tr.artist || '').split(',')[0].trim().toLowerCase();
+      if (!alb || alb === 'spotify csv' || alb === 'offline pwa' || alb === 'guardado en dispositivo') {
+        return null;
+      }
+      return `${alb}|${art}`;
+    };
+
     try {
       let done = 0;
       for (const item of missing) {
         if (cancelCoverSyncRef.current || (typeof navigator !== 'undefined' && navigator.onLine === false)) {
           break;
         }
-        enrichedArtworkRef.current.add(String(item.id));
+        if (resolvedIdsInRun.has(String(item.id))) {
+          done += 1;
+          setCoverSync({ active: true, done, total: missing.length });
+          continue;
+        }
+
+        let rateLimited = false;
         try {
           const cleanArtist =
             item.artist && item.artist !== 'Artista' && item.artist !== 'Guardado en dispositivo'
@@ -1146,12 +1162,16 @@ export default function HomePage() {
           const q = `${item.title} ${cleanArtist}`.trim();
           let smallCover = null;
           let previewUrl = null;
+          let directRespondedOk = false;
 
           try {
             const res = await fetch(
               `https://itunes.apple.com/search?term=${encodeURIComponent(q)}&media=music&entity=song&limit=1`
             );
-            if (res.ok) {
+            if (res.status === 429 || res.status === 403) {
+              rateLimited = true;
+            } else if (res.ok) {
+              directRespondedOk = true;
               const data = await res.json();
               const hit = data?.results?.[0];
               if (hit?.artworkUrl100) {
@@ -1161,10 +1181,12 @@ export default function HomePage() {
             }
           } catch {}
 
-          // Server fallback if browser direct lookup fails
-          if (!smallCover) {
+          // Only call VPS /api/search if browser direct call failed at network/CORS level (not when iTunes returned 0 results or 429)
+          if (!smallCover && !directRespondedOk && !rateLimited) {
             const fallbackRes = await fetch(`/api/search?q=${encodeURIComponent(q)}`);
-            if (fallbackRes.ok) {
+            if (fallbackRes.status === 429 || fallbackRes.status === 403) {
+              rateLimited = true;
+            } else if (fallbackRes.ok) {
               const fbData = await fallbackRes.json();
               const fbHit = fbData?.results?.[0];
               if (fbHit?.artwork) {
@@ -1174,12 +1196,34 @@ export default function HomePage() {
             }
           }
 
+          if (!rateLimited) {
+            enrichedArtworkRef.current.add(String(item.id));
+          }
+
           if (smallCover) {
             const patch = { artwork: smallCover };
             if (!item.previewUrl && previewUrl) {
               patch.previewUrl = previewUrl;
             }
             updateTrackMetadataAcrossLibraries(item.id, patch);
+            resolvedIdsInRun.add(String(item.id));
+
+            // Reuse the same compressed cover for other tracks in this library from the exact same album + artist (saves API calls!)
+            const itemAlbKey = getAlbumKey(item);
+            if (itemAlbKey) {
+              for (const sibling of missing) {
+                if (
+                  String(sibling.id) !== String(item.id) &&
+                  !resolvedIdsInRun.has(String(sibling.id)) &&
+                  getAlbumKey(sibling) === itemAlbKey
+                ) {
+                  updateTrackMetadataAcrossLibraries(sibling.id, { artwork: smallCover });
+                  enrichedArtworkRef.current.add(String(sibling.id));
+                  resolvedIdsInRun.add(String(sibling.id));
+                }
+              }
+            }
+
             // Warm image into Service Worker cache (~4 KB)
             if (typeof window !== 'undefined' && 'Image' in window) {
               const img = new window.Image();
@@ -1190,7 +1234,8 @@ export default function HomePage() {
 
         done += 1;
         setCoverSync({ active: true, done, total: missing.length });
-        await new Promise(r => setTimeout(r, 260));
+        // Respect iTunes ~20 searches/min limit (~3.1s between lookups; 10s cooldown if rate-limited)
+        await new Promise(r => setTimeout(r, rateLimited ? 10000 : 3100));
       }
     } finally {
       enrichingBusyRef.current = false;
