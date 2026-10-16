@@ -219,53 +219,62 @@ function parseDurationToSec(rawDur) {
 
 async function resolveExpectedDurationSec(rawDuration, cleanTitle, primaryArtist) {
   const parsed = parseDurationToSec(rawDuration);
-  if (parsed) return parsed;
+  if (parsed && parsed <= 420) return parsed;
 
   const query = `${cleanTitle} ${primaryArtist || ''}`.trim();
-  if (!query) return null;
+  if (!query) return parsed || null;
 
   const titleTokens = getTitleCoreTokens(cleanTitle);
   const artistTokens = getArtistTokens(primaryArtist);
+  const wantLive = /\b(live|vivo)\b/i.test(cleanTitle);
 
-  try {
-    const itunesUrl = `https://itunes.apple.com/search?term=${encodeURIComponent(
-      query
-    )}&media=music&entity=song&limit=5`;
-    const res = await fetch(itunesUrl, { signal: AbortSignal.timeout(2500) });
-    if (res.ok) {
+  const matchCatalogTrack = (trackTitle, trackArtist, sec) => {
+    if (!sec || sec < 45 || sec > 1200) return false;
+    const hTitle = normalizeText(trackTitle);
+    const hArtist = normalizeText(trackArtist);
+    if (!wantLive && /\b(live|vivo)\b/i.test(hTitle)) return false;
+    const tOk = titleTokens.every(t => hTitle.includes(t));
+    const aOk = artistTokens.length === 0 || artistTokens.some(t => hArtist.includes(t));
+    return tOk && aOk;
+  };
+
+  const fetchItunesSec = async () => {
+    try {
+      const itunesUrl = `https://itunes.apple.com/search?term=${encodeURIComponent(
+        query
+      )}&media=music&entity=song&limit=6`;
+      const res = await fetch(itunesUrl, { signal: AbortSignal.timeout(2500) });
+      if (!res.ok) return null;
       const data = await res.json();
       const hits = Array.isArray(data?.results) ? data.results : [];
       for (const h of hits) {
         const sec = h.trackTimeMillis ? Math.round(h.trackTimeMillis / 1000) : null;
-        if (!sec || sec < 45 || sec > 1200) continue;
-        const hTitle = normalizeText(h.trackName);
-        const hArtist = normalizeText(h.artistName);
-        const tOk = titleTokens.every(t => hTitle.includes(t));
-        const aOk = artistTokens.length === 0 || artistTokens.some(t => hArtist.includes(t));
-        if (tOk && aOk) return sec;
+        if (matchCatalogTrack(h.trackName, h.artistName, sec)) return sec;
       }
-    }
-  } catch {}
+    } catch {}
+    return null;
+  };
 
-  try {
-    const dzUrl = `https://api.deezer.com/search?q=${encodeURIComponent(query)}&limit=5`;
-    const res = await fetch(dzUrl, { signal: AbortSignal.timeout(2500) });
-    if (res.ok) {
+  const fetchDeezerSec = async () => {
+    try {
+      const dzUrl = `https://api.deezer.com/search?q=${encodeURIComponent(query)}&limit=6`;
+      const res = await fetch(dzUrl, { signal: AbortSignal.timeout(2500) });
+      if (!res.ok) return null;
       const data = await res.json();
       const hits = Array.isArray(data?.data) ? data.data : [];
       for (const h of hits) {
         const sec = Number(h.duration);
-        if (!sec || sec < 45 || sec > 1200) continue;
-        const hTitle = normalizeText(h.title);
-        const hArtist = normalizeText(h.artist?.name);
-        const tOk = titleTokens.every(t => hTitle.includes(t));
-        const aOk = artistTokens.length === 0 || artistTokens.some(t => hArtist.includes(t));
-        if (tOk && aOk) return sec;
+        if (matchCatalogTrack(h.title, h.artist?.name, sec)) return sec;
       }
-    }
-  } catch {}
+    } catch {}
+    return null;
+  };
 
-  return null;
+  const [itSec, dzSec] = await Promise.all([fetchItunesSec(), fetchDeezerSec()]);
+  if (itSec && dzSec) {
+    return Math.abs(itSec - dzSec) <= 8 ? Math.min(itSec, dzSec) : dzSec;
+  }
+  return dzSec || itSec || parsed || null;
 }
 
 const STANDARD_AUDIO_METADATA_WORDS = new Set([
@@ -346,6 +355,70 @@ function buildCandidateContext(rawTitle, cleanTitle, rawArtist, expectedDuration
   };
 }
 
+const CORE_ALTERED_AUDIO_TERMS = [
+  'cover',
+  'covered',
+  'tribute',
+  'karaoke',
+  'originally performed',
+  'in the style of',
+  'made famous',
+  'backing track',
+  'instrumental',
+  'nightcore',
+  '8d',
+  'slowed',
+  'reverb',
+  'sped up',
+  'speed up',
+  '1.1x',
+  'distorted',
+  'chopped',
+  'parody',
+  'tutorial',
+  'lesson',
+  'how to play',
+  'reaction',
+  'podcast',
+  'interview',
+  'trailer',
+  'teaser',
+  '1s preview',
+  'best part',
+  'ringtone',
+  'snippet',
+  'screenrecording',
+  'animatic',
+  'fanmade',
+  'ai cover',
+  'drum cover',
+  'guitar cover',
+  'bass cover',
+  'piano cover',
+  'vocal cover',
+  'sax cover',
+  'acoustic cover',
+  'myvoice',
+  'deep house',
+  'reggae version',
+  'gregorian',
+  'jukebox',
+  'bornagen',
+  'the-rooftop-beatles',
+  'rooftopsdd',
+  'electric-beatles',
+  'electric beatles',
+  'bootleg',
+  'mashup',
+  'rework',
+  'flip',
+  'hoodtrap',
+  'mylancore',
+  'hardstyle',
+  'dubstep',
+  'tiktok'
+];
+
 function scoreCandidate(cand, ctx) {
   const dur = Number(cand.duration);
   if (!dur || isNaN(dur) || dur < 45 || dur > 900) {
@@ -355,7 +428,7 @@ function scoreCandidate(cand, ctx) {
   let durDiff = 0;
   if (ctx.expectedDurationSec && ctx.expectedDurationSec >= 50) {
     durDiff = Math.abs(dur - ctx.expectedDurationSec);
-    if (durDiff > 22) {
+    if (durDiff > 20) {
       return -1;
     }
   }
@@ -366,60 +439,16 @@ function scoreCandidate(cand, ctx) {
   const combinedLower = `${titleLower} ${uploaderLower} ${urlLower}`;
 
   const bannedTerms = [
-    'cover',
-    'covered',
-    'tribute',
-    'karaoke',
-    'originally performed',
-    'in the style of',
-    'made famous',
-    'backing track',
-    'instrumental',
-    'nightcore',
-    '8d',
-    'slowed',
-    'reverb',
-    'sped up',
-    'speed up',
-    '1.1x',
-    'distorted',
-    'chopped',
-    'parody',
-    'tutorial',
-    'lesson',
-    'how to play',
-    'reaction',
-    'podcast',
-    'interview',
-    'trailer',
-    'teaser',
-    '1s preview',
-    'drum cover',
-    'guitar cover',
-    'bass cover',
-    'piano cover',
-    'vocal cover',
-    'sax cover',
-    'acoustic cover',
-    'myvoice',
-    'deep house',
-    'reggae version',
-    'gregorian',
-    'jukebox',
-    'bornagen',
-    'the-rooftop-beatles',
-    'rooftopsdd',
-    'electric-beatles',
-    'electric beatles',
-    'bootleg',
-    'mashup',
-    'rework',
-    'flip',
-    'hoodtrap',
-    'mylancore',
-    'hardstyle',
-    'dubstep',
-    'tiktok'
+    ...CORE_ALTERED_AUDIO_TERMS,
+    '10min',
+    '10 min',
+    '10 minutes',
+    '10 minutos',
+    '1 hour',
+    '1 hora',
+    'loop',
+    'extended version',
+    'extended mix'
   ];
 
   if (!ctx.rawTitleLower.includes('remix')) {
@@ -495,7 +524,7 @@ function scoreCandidate(cand, ctx) {
     return -1;
   }
 
-  // If neither uploader nor title mentions the artist, only allow when duration matches within ±4s with 0 foreign title words (e.g. Spotify Vault/Archive alias vs original NCS uploader)
+  // If neither uploader nor title mentions the artist, only allow when duration matches within ±4s with 0 foreign title words
   if (ctx.artistTokens.length > 0 && !artistMatched) {
     if (!ctx.expectedDurationSec || durDiff > 4 || foreignTitleWords.length > 0) {
       return -1;
@@ -505,16 +534,20 @@ function scoreCandidate(cand, ctx) {
   let score = 100;
 
   if (ctx.expectedDurationSec) {
-    if (durDiff <= 2) score += 35;
-    else if (durDiff <= 5) score += 25;
-    else if (durDiff <= 10) score += 12;
+    if (durDiff <= 2) score += 40;
+    else if (durDiff <= 5) score += 28;
+    else if (durDiff <= 10) score += 14;
     else score -= Math.round(durDiff);
   }
 
   if (uploaderMatchesArtist) {
-    score += 30;
+    score += 32;
   } else if (titleMatchesArtist) {
     score += 18;
+  }
+
+  if (uploaderLower.endsWith('- topic') || uploaderLower.includes('release - topic')) {
+    score += 24;
   }
 
   if (
@@ -529,13 +562,90 @@ function scoreCandidate(cand, ctx) {
 
   const extractorLower = String(cand.extractor || '').toLowerCase();
   if (extractorLower.includes('soundcloud')) {
-    // SoundCloud streams directly from VPS datacenter IPs without YouTube bot challenges
     score += 10;
   } else if (extractorLower.includes('youtube') && uploaderMatchesArtist) {
-    score += 22;
+    score += 24;
   }
 
   return score;
+}
+
+// Smart detector for anti-copyright looped uploads on SoundCloud (e.g. "Intruso - Enjambre" uploaded as 3x = 608.4s).
+// When matched, returns the exact single-play duration (dur / repeatCount) so ffmpeg trims it to 1x studio length!
+function scoreLoopCandidate(cand, ctx) {
+  const dur = Number(cand.duration);
+  const exp = Number(ctx.expectedDurationSec);
+  if (!dur || isNaN(dur) || !exp || exp < 60 || dur < exp * 1.8 || dur > exp * 7.5) {
+    return null;
+  }
+
+  const repeatCount = Math.round(dur / exp);
+  if (repeatCount < 2 || repeatCount > 7) return null;
+
+  const singleCycleSec = dur / repeatCount;
+  const cycleDiff = Math.abs(singleCycleSec - exp);
+  if (cycleDiff > 10) return null;
+
+  const titleLower = String(cand.title || '').toLowerCase();
+  const uploaderLower = String(cand.uploader || '').toLowerCase();
+  const urlLower = String(cand.webpageUrl || '').toLowerCase();
+  const combinedLower = `${titleLower} ${uploaderLower} ${urlLower}`;
+
+  const bannedLoopTerms = [...CORE_ALTERED_AUDIO_TERMS];
+  if (!ctx.rawTitleLower.includes('remix')) bannedLoopTerms.push('remix');
+  if (!ctx.rawTitleLower.includes('demo')) bannedLoopTerms.push('(demo)', '[demo]', ' demo');
+  if (!ctx.rawTitleLower.includes('live') && !ctx.rawTitleLower.includes('vivo')) {
+    bannedLoopTerms.push('live at', 'live in', 'live from', 'en vivo', '(live)', '[live]');
+  }
+
+  for (const term of bannedLoopTerms) {
+    if (ctx.rawTitleLower.includes(term) || ctx.rawArtistLower.includes(term)) continue;
+    if (combinedLower.includes(term)) return null;
+  }
+
+  const candTitleNorm = normalizeText(cand.title);
+  const candUploaderNorm = normalizeText(cand.uploader);
+  const candTitleWords = candTitleNorm.split(/\s+/).filter(Boolean);
+  const candTitleWordSet = new Set(candTitleWords);
+  const candUploaderWordSet = new Set(candUploaderNorm.split(/\s+/).filter(Boolean));
+
+  if (ctx.titleTokens.length > 0) {
+    const matchedTitleCount = ctx.titleTokens.filter(
+      t => candTitleWordSet.has(t) || candTitleNorm.includes(t)
+    ).length;
+    if (matchedTitleCount < ctx.titleTokens.length) return null;
+  }
+
+  const uploaderMatchesArtist =
+    ctx.artistTokens.length > 0 &&
+    ctx.artistTokens.some(t => candUploaderWordSet.has(t));
+  const titleMatchesArtist =
+    ctx.artistTokens.length > 0 &&
+    ctx.artistTokens.some(t => candTitleWordSet.has(t));
+  if (ctx.artistTokens.length > 0 && !uploaderMatchesArtist && !titleMatchesArtist) {
+    return null;
+  }
+
+  const loopMetaWords = new Set(['10min', 'min', 'minutes', 'minutos', 'loop', 'extended']);
+  const foreignWords = candTitleWords.filter(
+    w =>
+      w.length >= 3 &&
+      !/^\d+$/.test(w) &&
+      !ctx.allowedWords.has(w) &&
+      !loopMetaWords.has(w)
+  );
+  if (foreignWords.length > 0) return null;
+
+  const trimDurationSec = Math.max(
+    45,
+    Math.floor(Math.min(singleCycleSec, exp))
+  );
+
+  return {
+    score: Math.round(90 - cycleDiff * 3 - repeatCount * 2),
+    trimDurationSec,
+    fadeOutSec: 2
+  };
 }
 
 function discoverCandidatesFromSearch(searchQueries) {
@@ -641,6 +751,11 @@ function buildRejectTitleRegex(rawTitle) {
     'parody',
     'tutorial',
     'lesson',
+    '10min',
+    '10 minutes',
+    'best part',
+    'ringtone',
+    'animatic',
     'guitar cover',
     'drum cover',
     'piano cover',
@@ -669,10 +784,22 @@ function runYtDlpAttempt(target, outputTemplate, options, onProgress) {
     isSearchPool = false,
     minDuration = 55,
     maxDuration = 900,
-    rejectTitleRegex = null
+    rejectTitleRegex = null,
+    trimDurationSec = null,
+    fadeOutSec = 0
   } = options || {};
 
   return new Promise(resolve => {
+    let extractAudioArgs = 'ExtractAudio:-ac 2 -ar 44100 -compression_level 0';
+    if (trimDurationSec && trimDurationSec >= 45) {
+      const tSec = Math.round(trimDurationSec);
+      extractAudioArgs += ` -t ${tSec}`;
+      if (fadeOutSec && fadeOutSec > 0 && tSec > fadeOutSec + 6) {
+        const stSec = Math.round(tSec - fadeOutSec);
+        extractAudioArgs += ` -af afade=t=out:st=${stSec}:d=${Math.round(fadeOutSec)}`;
+      }
+    }
+
     // Transparent VBR compression (LAME -V 5 ~128kbps VBR + 44.1kHz joint stereo at compression_level 0):
     // Matches the native 128kbps YouTube/SoundCloud source fidelity with zero audible loss while saving ~60% disk space (~2.4-3MB per track instead of ~8MB)
     const ytdlpArgs = [
@@ -680,7 +807,7 @@ function runYtDlpAttempt(target, outputTemplate, options, onProgress) {
       '-x',
       '--audio-format', 'mp3',
       '--audio-quality', '5',
-      '--postprocessor-args', 'ExtractAudio:-ac 2 -ar 44100 -compression_level 0',
+      '--postprocessor-args', extractAudioArgs,
       '--embed-metadata',
       '--restrict-filenames',
       '--no-cache-dir',
@@ -691,6 +818,10 @@ function runYtDlpAttempt(target, outputTemplate, options, onProgress) {
       '--newline',
       '-o', outputTemplate
     ];
+
+    if (/youtube\.com|youtu\.be|^ytsearch/i.test(String(target || ''))) {
+      ytdlpArgs.push('--extractor-args', 'youtube:player_client=tv,ios,mweb,web');
+    }
 
     if (isSearchPool) {
       ytdlpArgs.push('--match-filter', `duration >= ${minDuration} & duration <= ${maxDuration}`);
@@ -758,18 +889,32 @@ function runYtDlpAttempt(target, outputTemplate, options, onProgress) {
   });
 }
 
-function finalizeDownloadedMp3(downloadsDir, baseSlug, expectedMp3Path) {
+function finalizeDownloadedMp3(downloadsDir, baseSlug, expectedMp3Path, expectedDurationSec = null) {
   try {
     const files = fs.readdirSync(downloadsDir);
     const candidateName = files.find(
       f => f.startsWith(`${baseSlug}__`) && f.toLowerCase().endsWith('.mp3')
     );
+
+    // Clean up any leftover non-mp3 temp artifacts from failed attempts for this slug
+    for (const f of files) {
+      if (f.startsWith(`${baseSlug}__`) && f !== candidateName) {
+        try {
+          fs.unlinkSync(path.join(downloadsDir, f));
+        } catch {}
+      }
+    }
+
     if (!candidateName) {
       return fs.existsSync(expectedMp3Path);
     }
     const candidatePath = path.join(downloadsDir, candidateName);
     const stat = fs.statSync(candidatePath);
-    if (stat.size <= 380 * 1024) {
+    const minValidBytes = expectedDurationSec
+      ? Math.max(380 * 1024, Math.min(1050 * 1024, Math.round(expectedDurationSec * 6200)))
+      : 380 * 1024;
+
+    if (stat.size <= minValidBytes) {
       try {
         fs.unlinkSync(candidatePath);
       } catch {}
@@ -810,6 +955,7 @@ async function runExtractionPipeline(downloadId, rawQuery, downloadsDir, baseSlu
   const rejectTitleRegex = buildRejectTitleRegex(rawTitle);
 
   let targets = [];
+  let expectedDurationSec = null;
 
   if (/^https?:\/\//i.test(rawQuery)) {
     if (!isAllowedMediaUrl(rawQuery)) {
@@ -830,18 +976,18 @@ async function runExtractionPipeline(downloadId, rawQuery, downloadsDir, baseSlu
       return;
     }
 
-    // Step 0: Resolve canonical track duration (from Spotify CSV metadata or iTunes/Deezer API)
-    const expectedDurationSec = await resolveExpectedDurationSec(
+    // Step 0: Resolve canonical track duration (from Spotify CSV metadata or parallel iTunes/Deezer API)
+    expectedDurationSec = await resolveExpectedDurationSec(
       item.duration,
       cleanTitle,
       primaryArtist
     );
     updateProg(14);
 
-    // Step 1: Fast candidate discovery across SoundCloud (top 25) + YouTube (top 5)
+    // Step 1: Fast candidate discovery across SoundCloud (top 25) + YouTube (top 8)
     const discoveryQueries = [
       `scsearch25:${artistAndCleanTitle}`,
-      `ytsearch5:${artistAndCleanTitle} official audio`
+      `ytsearch8:${artistAndCleanTitle} official audio`
     ];
     if (primaryArtist && cleanTitleOnly && cleanTitleOnly.length >= 3) {
       discoveryQueries.push(`scsearch10:${cleanTitleOnly}`);
@@ -849,64 +995,89 @@ async function runExtractionPipeline(downloadId, rawQuery, downloadsDir, baseSlu
 
     const ctx = buildCandidateContext(rawTitle, cleanTitle, item.artist, expectedDurationSec);
     const rawCandidates = await discoverCandidatesFromSearch(discoveryQueries);
-    const scored = rawCandidates
+
+    // Tier 1: Exact 1x studio recordings (within ±20s of canonical duration)
+    const scoredTier1 = rawCandidates
       .map(c => ({ ...c, score: scoreCandidate(c, ctx) }))
       .filter(c => c.score >= 0)
       .sort((a, b) => b.score - a.score);
 
+    // Tier 2: Anti-copyright N-x looped studio uploads (e.g. "Intruso - Enjambre" 3x = 608.4s on SoundCloud),
+    // automatically trimmed by ffmpeg to 1x single-play duration with a smooth 2s fade-out
+    const scoredLoopTier2 = rawCandidates
+      .map(c => {
+        const loopInfo = scoreLoopCandidate(c, ctx);
+        return loopInfo ? { ...c, ...loopInfo } : null;
+      })
+      .filter(Boolean)
+      .sort((a, b) => b.score - a.score);
+
     updateProg(22);
 
-    // Take up to the top 4 verified direct track URLs
-    for (const best of scored.slice(0, 4)) {
+    const maxAllowedDur = expectedDurationSec ? expectedDurationSec + 5 : null;
+
+    for (const best of scoredTier1.slice(0, 4)) {
       targets.push({
         url: best.webpageUrl,
-        isSearchPool: false
+        isSearchPool: false,
+        trimDurationSec: maxAllowedDur,
+        fadeOutSec: 0
       });
     }
 
-    // Fallback search pools if direct URLs all failed (e.g. DRM or geo-restriction on every top candidate)
+    for (const loopCand of scoredLoopTier2.slice(0, 2)) {
+      targets.push({
+        url: loopCand.webpageUrl,
+        isSearchPool: false,
+        trimDurationSec: loopCand.trimDurationSec,
+        fadeOutSec: loopCand.fadeOutSec
+      });
+    }
+
+    // Fallback search pools if direct URLs all failed
     const minDur = expectedDurationSec ? Math.max(45, expectedDurationSec - 15) : 55;
-    const maxDur = expectedDurationSec ? expectedDurationSec + 15 : 900;
+    const maxDur = expectedDurationSec ? expectedDurationSec + 15 : 540;
     targets.push({
       url: `scsearch15:${artistAndCleanTitle}`,
       isSearchPool: true,
       minDuration: minDur,
       maxDuration: maxDur,
-      rejectTitleRegex
+      rejectTitleRegex,
+      trimDurationSec: maxAllowedDur
     });
     targets.push({
       url: `ytsearch5:${artistAndCleanTitle} official audio`,
       isSearchPool: true,
       minDuration: minDur,
       maxDuration: maxDur,
-      rejectTitleRegex
+      rejectTitleRegex,
+      trimDurationSec: maxAllowedDur
     });
     targets.push({
       url: `bilisearch3:${artistAndCleanTitle}`,
       isSearchPool: true,
       minDuration: minDur,
       maxDuration: maxDur,
-      rejectTitleRegex
+      rejectTitleRegex,
+      trimDurationSec: maxAllowedDur
     });
   }
 
   for (const t of targets) {
     await runYtDlpAttempt(t.url, tempOutputTemplate, t, updateProg);
-    const valid = finalizeDownloadedMp3(downloadsDir, baseSlug, expectedMp3Path);
+    const valid = finalizeDownloadedMp3(
+      downloadsDir,
+      baseSlug,
+      expectedMp3Path,
+      expectedDurationSec
+    );
     if (valid && fs.existsSync(expectedMp3Path)) {
-      const stat = fs.statSync(expectedMp3Path);
-      if (stat.size > 380 * 1024) {
-        enforceStorageQuota();
-        scheduleFileCleanup(expectedMp3Path, 90000);
-        item.status = 'ready';
-        item.progress = 100;
-        item.filename = expectedMp3Name;
-        return;
-      } else {
-        try {
-          fs.unlinkSync(expectedMp3Path);
-        } catch {}
-      }
+      enforceStorageQuota();
+      scheduleFileCleanup(expectedMp3Path, 90000);
+      item.status = 'ready';
+      item.progress = 100;
+      item.filename = expectedMp3Name;
+      return;
     }
   }
 
