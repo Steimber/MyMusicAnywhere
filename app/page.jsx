@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef } from 'react';
 
 const AUDIO_CACHE_NAME = 'my-music-offline-audio-v1';
-const SHELL_CACHE_NAME = 'mymusic-shell-v4';
+const SHELL_CACHE_NAME = 'mymusic-shell-v5';
 const USER_STORAGE_KEY = 'mma_cached_user_v1';
 const LIKES_STORAGE_KEY = 'mma_liked_tracks_v1';
 const OFFLINE_CATALOG_KEY = 'mma_offline_catalog_v1';
@@ -22,10 +22,10 @@ const EXPLORE_CHIPS = [
 
 function BrandMark() {
   return (
-    <span className="brand-mark" aria-hidden="true">
-      <img src="/brand/logo.svg" alt="" className="brand-logo brand-logo-light" />
-      <img src="/brand/logo-dark.svg" alt="" className="brand-logo brand-logo-dark" />
-    </span>
+    <picture>
+      <source media="(prefers-color-scheme: dark)" srcSet="/brand/logo-dark.svg" />
+      <img src="/brand/logo.svg" alt="" width={33} height={40} className="brand-logo" />
+    </picture>
   );
 }
 
@@ -2173,14 +2173,16 @@ export default function HomePage() {
           type="button"
           className="brand"
           onClick={() => setActiveTab(isOffline ? 'library' : 'explore')}
+          aria-label="mineral music, inicio"
         >
           <BrandMark />
-          <span className="brand-word">
-            mineral<small className="brand-sub">music</small>
+          <span className="brand-word" aria-hidden="true">
+            mineral
+            <small className="brand-sub">music</small>
           </span>
         </button>
 
-        <nav className="topbar-nav" aria-label="Navegación principal">
+        <nav className="topbar-nav" aria-label="Principal">
           <button
             type="button"
             className={`nav-link ${activeTab === 'explore' ? 'active' : ''} ${
@@ -2188,7 +2190,7 @@ export default function HomePage() {
             }`.trim()}
             onClick={() => setActiveTab('explore')}
           >
-            <Icon name="search" size={15} />
+            <Icon name="search" size={16} />
             <span>Explorar</span>
           </button>
 
@@ -2197,49 +2199,12 @@ export default function HomePage() {
             className={`nav-link ${activeTab === 'library' ? 'active' : ''}`}
             onClick={() => setActiveTab('library')}
           >
-            <Icon name="heart" size={15} />
+            <Icon name="heart" size={16} />
             <span>Biblioteca</span>
             {(likedTracks.length + offlineCatalog.length) > 0 && (
               <span className="nav-badge">{likedTracks.length || offlineCatalog.length}</span>
             )}
           </button>
-
-          <button
-            type="button"
-            className={`nav-link ${activeTab === 'files' ? 'active' : ''} ${
-              isOffline ? 'offline-nav-item' : ''
-            }`.trim()}
-            onClick={() => setActiveTab('files')}
-          >
-            <Icon name="disc" size={15} />
-            <span>Servidor</span>
-            {libraryFiles.length > 0 && <span className="nav-badge">{libraryFiles.length}</span>}
-          </button>
-
-          <button
-            type="button"
-            className={`nav-link ${activeTab === 'settings' ? 'active' : ''}`}
-            onClick={() => setActiveTab('settings')}
-          >
-            <Icon name="settings" size={15} />
-            <span>Ajustes</span>
-          </button>
-
-          {user.is_admin && (
-            <button
-              type="button"
-              className={`nav-link ${activeTab === 'admin' ? 'active' : ''} ${
-                isOffline ? 'offline-nav-item' : ''
-              }`.trim()}
-              onClick={() => {
-                setActiveTab('admin');
-                if (!isOffline) fetchAdminData();
-              }}
-            >
-              <Icon name="shield" size={15} />
-              <span>Admin</span>
-            </button>
-          )}
         </nav>
 
         <div className="topbar-right">
@@ -2255,9 +2220,10 @@ export default function HomePage() {
               className="account-btn"
               onClick={() => setAccountOpen(o => !o)}
               aria-expanded={accountOpen}
+              aria-label="Cuenta y ajustes"
+              title={user.username}
             >
               <span className="account-avatar">{initial}</span>
-              <span className="account-name">{user.username}</span>
             </button>
 
             {accountOpen && (
@@ -2271,43 +2237,52 @@ export default function HomePage() {
 
                 <button
                   type="button"
-                  className="account-item"
+                  className={`account-item ${activeTab === 'settings' ? 'active' : ''}`.trim()}
                   onClick={() => {
                     setActiveTab('settings');
                     setAccountOpen(false);
                   }}
                 >
-                  <Icon name="settings" size={15} /> Ajustes e Importar Spotify
+                  <Icon name="settings" size={16} />
+                  <span>Ajustes</span>
                 </button>
 
                 {user.is_admin && (
                   <button
                     type="button"
-                    className={`account-item ${isOffline ? 'offline-section-disabled' : ''}`.trim()}
+                    className={`account-item ${activeTab === 'admin' ? 'active' : ''} ${
+                      isOffline ? 'offline-section-disabled' : ''
+                    }`.trim()}
                     onClick={() => {
                       setActiveTab('admin');
                       setAccountOpen(false);
                       if (!isOffline) fetchAdminData();
                     }}
                   >
-                    <Icon name="shield" size={15} /> Invitaciones y usuarios
+                    <Icon name="shield" size={16} />
+                    <span>Admin</span>
                   </button>
                 )}
 
                 {deferredPrompt && (
                   <button type="button" className="account-item" onClick={handleInstallPwa}>
-                    <Icon name="smartphone" size={15} /> Instalar app
+                    <Icon name="smartphone" size={16} />
+                    <span>Instalar app</span>
                   </button>
                 )}
 
-                <button type="button" className="account-item danger" onClick={handleLogout}>
-                  Cerrar sesión
-                </button>
+                <div className="account-menu-last">
+                  <button type="button" className="account-item danger" onClick={handleLogout}>
+                    <span>Cerrar sesión</span>
+                  </button>
+                </div>
               </div>
             )}
           </div>
         </div>
       </header>
+
+      <main className="main-container">
 
       {isOffline && (
         <div className="offline-pill-bar">
@@ -2653,104 +2628,7 @@ export default function HomePage() {
         </section>
       )}
 
-      {/* ==================== TAB 3: ARCHIVOS EN SERVIDOR ==================== */}
-      {activeTab === 'files' && (
-        <section className={isOffline ? 'offline-section-disabled' : ''}>
-          <div className="section-bar">
-            <div>
-              <h1 className="section-bar-title">Puente del servidor</h1>
-              <p className="section-bar-sub">
-                Los archivos MP3 temporales se eliminan automáticamente apenas pasan a tu dispositivo.
-              </p>
-            </div>
-            <button
-              type="button"
-              className="icon-btn"
-              disabled={isOffline}
-              onClick={fetchLibraryFiles}
-              title="Actualizar"
-            >
-              <Icon name="refresh" size={16} />
-            </button>
-          </div>
-
-          {libraryFiles.length === 0 ? (
-            <div className="empty">
-              <div className="empty-title">Servidor limpio (0 archivos en cola)</div>
-              <p>Cada MP3 se purga automáticamente después de guardarse en tu caché Offline.</p>
-            </div>
-          ) : (
-            <div className="track-list">
-              {libraryFiles.map((file, idx) => {
-                const isCached = offlineUrls[file.url];
-                const cleanTitle = file.filename
-                  .replace(/_\d+\.mp3$/i, '')
-                  .replace(/\.mp3$/i, '')
-                  .replace(/_/g, ' ');
-                const formattedList = libraryFiles.map(f => ({
-                  id: f.filename,
-                  title: f.filename.replace(/\.mp3$/i, ''),
-                  artist: `${f.sizeMB} MB · Servidor`,
-                  artwork: '/icon.svg',
-                  filename: f.filename,
-                  streamUrl: f.url
-                }));
-
-                return (
-                  <div key={file.filename} className="track-row">
-                    <div
-                      className="track-row-main"
-                      onClick={() => playFromList(formattedList, idx)}
-                    >
-                      <div className="track-cover">
-                        <img src="/icon.svg" alt="" />
-                        <div className="track-cover-overlay">
-                          <Icon name="play" size={15} />
-                        </div>
-                      </div>
-                      <div className="track-text">
-                        <div className="track-title">{cleanTitle}</div>
-                        <div className="track-sub">{file.sizeMB} MB · MP3 temporal</div>
-                      </div>
-                    </div>
-
-                    <div className="track-actions">
-                      <button
-                        type="button"
-                        className={`icon-btn ${isCached ? 'offline-done' : ''}`}
-                        onClick={() =>
-                          saveUrlToOfflineCache(file.url, {
-                            id: `offline_${file.filename}`,
-                            title: cleanTitle,
-                            artist: 'Guardado desde servidor',
-                            artwork: '/icon.svg',
-                            filename: file.filename,
-                            streamUrl: file.url
-                          })
-                        }
-                        title={isCached ? 'En Offline' : 'Pasar a Offline'}
-                      >
-                        <Icon name={isCached ? 'offline-pin' : 'download'} size={16} />
-                      </button>
-
-                      <button
-                        type="button"
-                        className="icon-btn"
-                        onClick={() => deleteServerFile(file.filename)}
-                        title="Borrar del servidor"
-                      >
-                        <Icon name="trash" size={16} />
-                      </button>
-                    </div>
-                  </div>
-                );
-              })}
-            </div>
-          )}
-        </section>
-      )}
-
-      {/* ==================== TAB 4: AJUSTES & SPOTIFY SYNC ==================== */}
+      {/* ==================== AJUSTES & SPOTIFY SYNC ==================== */}
       {activeTab === 'settings' && (
         <section>
           <div className="section-bar">
@@ -3015,15 +2893,19 @@ export default function HomePage() {
               <div className="stat-hint">Disponibles</div>
             </div>
 
-            <div className="stat">
-              <div className="stat-label">Disco VPS</div>
-              <div className="stat-value">
-                {adminData.storage
-                  ? `${adminData.storage.usedMB} / ${adminData.storage.maxMB} MB`
-                  : '—'}
-              </div>
-              <div className="stat-hint">
-                {adminData.storage ? `${adminData.storage.fileCount} archivos` : 'Calculando…'}
+            <div className="stat full-mobile">
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
+                <div>
+                  <div className="stat-label">Disco VPS (Puente temporal)</div>
+                  <div className="stat-value">
+                    {adminData.storage
+                      ? `${adminData.storage.usedMB} / ${adminData.storage.maxMB} MB`
+                      : '—'}
+                  </div>
+                </div>
+                <div className="stat-hint" style={{ fontWeight: 700 }}>
+                  {adminData.storage ? `${adminData.storage.fileCount} archivos en cola` : 'Calculando…'}
+                </div>
               </div>
             </div>
           </div>
@@ -3103,6 +2985,7 @@ export default function HomePage() {
           </div>
         </section>
       )}
+      </main>
 
       {/* ==================== DIALOG 1: TRACK OPTIONS SHEET (⋯) ==================== */}
       <dialog
@@ -3476,66 +3359,28 @@ export default function HomePage() {
       )}
 
       {/* ==================== MOBILE BOTTOM NAV (MINERAL TAREAS STYLE) ==================== */}
-      <nav
-        className="bottom-nav"
-        style={{ '--nav-cols': user.is_admin ? 5 : 4 }}
-        aria-label="Navegación móvil"
-      >
+      <nav className="bottom-nav" aria-label="Principal">
         <button
           type="button"
           className={`${activeTab === 'explore' ? 'active' : ''} ${
             isOffline ? 'offline-nav-item' : ''
           }`.trim()}
+          aria-current={activeTab === 'explore' ? 'page' : undefined}
           onClick={() => setActiveTab('explore')}
         >
-          <Icon name="search" size={17} />
+          <Icon name="search" size={18} />
           <span>Explorar</span>
         </button>
 
         <button
           type="button"
           className={activeTab === 'library' ? 'active' : ''}
+          aria-current={activeTab === 'library' ? 'page' : undefined}
           onClick={() => setActiveTab('library')}
         >
-          <Icon name="heart" size={17} />
+          <Icon name="heart" size={18} />
           <span>Biblioteca</span>
         </button>
-
-        <button
-          type="button"
-          className={`${activeTab === 'files' ? 'active' : ''} ${
-            isOffline ? 'offline-nav-item' : ''
-          }`.trim()}
-          onClick={() => setActiveTab('files')}
-        >
-          <Icon name="disc" size={17} />
-          <span>Servidor</span>
-        </button>
-
-        <button
-          type="button"
-          className={activeTab === 'settings' ? 'active' : ''}
-          onClick={() => setActiveTab('settings')}
-        >
-          <Icon name="settings" size={17} />
-          <span>Ajustes</span>
-        </button>
-
-        {user.is_admin && (
-          <button
-            type="button"
-            className={`${activeTab === 'admin' ? 'active' : ''} ${
-              isOffline ? 'offline-nav-item' : ''
-            }`.trim()}
-            onClick={() => {
-              setActiveTab('admin');
-              if (!isOffline) fetchAdminData();
-            }}
-          >
-            <Icon name="shield" size={17} />
-            <span>Admin</span>
-          </button>
-        )}
       </nav>
     </div>
   );

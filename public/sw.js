@@ -1,4 +1,4 @@
-const STATIC_CACHE = 'mymusic-shell-v4';
+const STATIC_CACHE = 'mymusic-shell-v5';
 const AUDIO_CACHE = 'my-music-offline-audio-v1';
 
 const PRECACHE_URLS = [
