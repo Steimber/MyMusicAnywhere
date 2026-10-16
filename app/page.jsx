@@ -10,6 +10,7 @@ const USER_STORAGE_KEY = 'mma_cached_user_v1';
 const LIKES_STORAGE_KEY = 'mma_liked_tracks_v1';
 const OFFLINE_CATALOG_KEY = 'mma_offline_catalog_v1';
 const PLAYLISTS_STORAGE_KEY = 'mma_custom_playlists_v1';
+const MAX_SIMULTANEOUS_DOWNLOADS = 3;
 
 function isPlaceholderCover(rawUrl) {
   if (!rawUrl || typeof rawUrl !== 'string') return true;
@@ -723,88 +724,6 @@ export default function HomePage() {
     if (accountOpen) document.addEventListener('mousedown', onDocClick);
     return () => document.removeEventListener('mousedown', onDocClick);
   }, [accountOpen]);
-
-  // Poll active single downloads (bulk queue downloads manage their own polling loop)
-  useEffect(() => {
-    const activeIds = Object.values(downloads)
-      .filter(d => d.status === 'downloading' && !d.managedByQueue && d.downloadId)
-      .map(d => d.downloadId);
-
-    if (activeIds.length === 0) return;
-
-    const timer = setInterval(async () => {
-      for (const id of activeIds) {
-        try {
-          const res = await fetch(`/api/download?id=${id}`, { cache: 'no-store' });
-          if (res.status === 404) {
-            setDownloads(prev => {
-              const key = Object.keys(prev).find(k => prev[k].downloadId === id);
-              if (!key) return prev;
-              return { ...prev, [key]: { ...prev[key], status: 'error' } };
-            });
-            continue;
-          }
-          if (!res.ok) continue;
-          const data = await res.json();
-
-          if (data.status === 'ready' && data.filename) {
-            const streamUrl = `/api/stream?file=${encodeURIComponent(data.filename)}`;
-            const trackKey = Object.keys(downloads).find(k => downloads[k].downloadId === id);
-            const metaTrack =
-              results.find(t => String(t.id) === String(trackKey)) ||
-              likedTracks.find(t => String(t.id) === String(trackKey)) ||
-              customPlaylists.flatMap(p => p.tracks).find(t => String(t.id) === String(trackKey)) ||
-              downloads[trackKey]?.trackMeta ||
-              null;
-
-            const savedOk = await saveUrlToOfflineCache(streamUrl, {
-              ...(metaTrack || {}),
-              id: metaTrack?.id || `offline_${data.filename}`,
-              title: metaTrack?.title || data.title || data.filename.replace(/\.mp3$/i, ''),
-              artist: metaTrack?.artist || data.artist || 'Audio MP3',
-              artwork: metaTrack?.artwork || '/icon.svg',
-              filename: data.filename,
-              streamUrl
-            });
-
-            if (savedOk) {
-              setDownloads(prev => {
-                const key = Object.keys(prev).find(k => prev[k].downloadId === id);
-                if (!key) return prev;
-                return { ...prev, [key]: { ...prev[key], ...data, status: 'ready', progress: 100 } };
-              });
-
-              setResults(prev =>
-                prev.map(t =>
-                  String(t.id) === String(trackKey)
-                    ? { ...t, filename: data.filename, streamUrl }
-                    : t
-                )
-              );
-
-              updateTrackFileAcrossLibraries(trackKey, data.filename, streamUrl);
-              fetchLibraryFiles();
-              if (user?.is_admin) fetchAdminData();
-            } else {
-              setDownloads(prev => {
-                const key = Object.keys(prev).find(k => prev[k].downloadId === id);
-                if (!key) return prev;
-                return { ...prev, [key]: { ...prev[key], status: 'error' } };
-              });
-            }
-          } else {
-            setDownloads(prev => {
-              const key = Object.keys(prev).find(k => prev[k].downloadId === id);
-              if (!key) return prev;
-              return { ...prev, [key]: { ...prev[key], ...data } };
-            });
-          }
-        } catch {}
-      }
-    }, 1400);
-
-    return () => clearInterval(timer);
-  }, [downloads, likedTracks, customPlaylists, results, user]);
 
   // Manage audio playback when currentTrack changes
   useEffect(() => {
@@ -1836,11 +1755,16 @@ export default function HomePage() {
     const key = track.id || track.title;
     if (downloads[key]?.status === 'downloading' && !forceRetry) return false;
 
+    const startedAt = Date.now();
+    const isManual = !waitUntilFinished;
+
     setDownloads(prev => ({
       ...prev,
       [key]: {
         status: 'downloading',
         progress: 0,
+        startedAt,
+        isManual,
         managedByQueue: Boolean(waitUntilFinished),
         trackMeta: track
       }
@@ -1856,6 +1780,7 @@ export default function HomePage() {
           duration: track.duration || null,
           artwork: track.artwork,
           previewUrl: track.previewUrl || null,
+          priority: isManual,
           query: `${track.title} ${track.artist || ''}`.trim()
         })
       });
@@ -1871,65 +1796,85 @@ export default function HomePage() {
         [key]: {
           status: 'downloading',
           progress: 8,
+          startedAt,
+          isManual,
           downloadId: dlId,
           managedByQueue: Boolean(waitUntilFinished),
           trackMeta: track
         }
       }));
 
-      if (!waitUntilFinished) return true;
-
-      // In bulk queue mode, wait until this track completes extraction + offline caching + VPS cleanup
-      const startedAt = Date.now();
-      while (Date.now() - startedAt < 95000 && !cancelSyncRef.current) {
-        await new Promise(r => setTimeout(r, 1500));
-        try {
-          const checkRes = await fetch(`/api/download?id=${dlId}`, { cache: 'no-store' });
-          if (checkRes.status === 404) {
-            setDownloads(prev => ({ ...prev, [key]: { status: 'error' } }));
-            return false;
-          }
-          if (!checkRes.ok) continue;
-          const checkData = await checkRes.json();
-          if (checkData.status === 'ready' && checkData.filename) {
-            const streamUrl = `/api/stream?file=${encodeURIComponent(checkData.filename)}`;
-            const savedOk = await saveUrlToOfflineCache(streamUrl, {
-              ...track,
-              id: track.id || `offline_${checkData.filename}`,
-              title: track.title || checkData.title,
-              artist: track.artist || checkData.artist || 'Audio MP3',
-              artwork: track.artwork || '/icon.svg',
-              filename: checkData.filename,
-              streamUrl
-            });
-            if (!savedOk) {
+      const pollToFinish = async () => {
+        const pollStartedAt = Date.now();
+        while (
+          Date.now() - pollStartedAt < 130000 &&
+          (!waitUntilFinished || !cancelSyncRef.current)
+        ) {
+          await new Promise(r => setTimeout(r, 1400));
+          try {
+            const checkRes = await fetch(`/api/download?id=${dlId}`, { cache: 'no-store' });
+            if (checkRes.status === 404) {
+              setDownloads(prev => ({ ...prev, [key]: { status: 'error' } }));
+              return false;
+            }
+            if (!checkRes.ok) continue;
+            const checkData = await checkRes.json();
+            if (checkData.status === 'ready' && checkData.filename) {
+              const streamUrl = `/api/stream?file=${encodeURIComponent(checkData.filename)}`;
+              const savedOk = await saveUrlToOfflineCache(streamUrl, {
+                ...track,
+                id: track.id || `offline_${checkData.filename}`,
+                title: track.title || checkData.title,
+                artist: track.artist || checkData.artist || 'Audio MP3',
+                artwork: track.artwork || DEFAULT_TRACK_COVER,
+                filename: checkData.filename,
+                streamUrl
+              });
+              if (!savedOk) {
+                setDownloads(prev => ({ ...prev, [key]: { status: 'error' } }));
+                return false;
+              }
+              setDownloads(prev => ({
+                ...prev,
+                [key]: { ...prev[key], ...checkData, status: 'ready', progress: 100 }
+              }));
+              setResults(prev =>
+                prev.map(t =>
+                  String(t.id) === String(key)
+                    ? { ...t, filename: checkData.filename, streamUrl }
+                    : t
+                )
+              );
+              updateTrackFileAcrossLibraries(key, checkData.filename, streamUrl);
+              fetchLibraryFiles();
+              if (user?.is_admin) fetchAdminData();
+              return true;
+            }
+            if (checkData.status === 'error') {
               setDownloads(prev => ({ ...prev, [key]: { status: 'error' } }));
               return false;
             }
             setDownloads(prev => ({
               ...prev,
-              [key]: { ...prev[key], ...checkData, status: 'ready', progress: 100 }
+              [key]: {
+                ...prev[key],
+                progress: checkData.progress || prev[key]?.progress || 8
+              }
             }));
-            updateTrackFileAcrossLibraries(key, checkData.filename, streamUrl);
-            return true;
+          } catch {
+            // Transient mobile network handoff: keep polling until timeout
           }
-          if (checkData.status === 'error') {
-            setDownloads(prev => ({ ...prev, [key]: { status: 'error' } }));
-            return false;
-          }
-          setDownloads(prev => ({
-            ...prev,
-            [key]: {
-              ...prev[key],
-              progress: checkData.progress || prev[key]?.progress || 8
-            }
-          }));
-        } catch {
-          // Transient mobile network handoff: keep polling until timeout
         }
+        setDownloads(prev => ({ ...prev, [key]: { status: 'error' } }));
+        return false;
+      };
+
+      if (!waitUntilFinished) {
+        pollToFinish().catch(() => {});
+        return true;
       }
-      setDownloads(prev => ({ ...prev, [key]: { status: 'error' } }));
-      return false;
+
+      return await pollToFinish();
     } catch {
       setDownloads(prev => ({ ...prev, [key]: { status: 'error' } }));
       return false;
@@ -1961,10 +1906,15 @@ export default function HomePage() {
     setSyncProgress({ done: 0, total: pending.length, currentTitle: pending[0]?.title || '' });
 
     let completed = 0;
-    try {
-      for (let i = 0; i < pending.length; i++) {
-        const track = pending[i];
-        if (cancelSyncRef.current) break;
+    let nextIdx = 0;
+    const workerCount = Math.min(MAX_SIMULTANEOUS_DOWNLOADS, pending.length);
+
+    const runWorker = async () => {
+      while (nextIdx < pending.length && !cancelSyncRef.current) {
+        const myIdx = nextIdx;
+        nextIdx += 1;
+        const track = pending[myIdx];
+        if (!track || cancelSyncRef.current) break;
 
         // If the user switched away from the app, wait until they return so mobile OS does not abort the download
         while (
@@ -1976,11 +1926,12 @@ export default function HomePage() {
         }
         if (cancelSyncRef.current) break;
 
-        setSyncProgress({
+        setSyncProgress(prev => ({
           done: completed,
           total: pending.length,
-          currentTitle: track.title || ''
-        });
+          currentTitle: track.title || prev.currentTitle || ''
+        }));
+
         const streamUrl =
           track.streamUrl ||
           (track.filename ? `/api/stream?file=${encodeURIComponent(track.filename)}` : null);
@@ -2026,6 +1977,10 @@ export default function HomePage() {
           currentTitle: track.title || ''
         });
       }
+    };
+
+    try {
+      await Promise.all(Array.from({ length: workerCount }, () => runWorker()));
     } finally {
       noSleepRef.current?.disable();
       setSyncingAll(false);
@@ -2508,9 +2463,71 @@ export default function HomePage() {
     setDeferredPrompt(null);
   }
 
+  const activeDownloadEntries = Object.entries(downloads)
+    .filter(([, d]) => d && d.status === 'downloading')
+    .sort(([, a], [, b]) => {
+      if (Boolean(a.isManual) !== Boolean(b.isManual)) {
+        return a.isManual ? -1 : 1;
+      }
+      return (a.startedAt || 0) - (b.startedAt || 0);
+    });
+  const totalActiveDownloads = activeDownloadEntries.length;
+  const simultaneousActiveCount = Math.min(
+    MAX_SIMULTANEOUS_DOWNLOADS,
+    totalActiveDownloads
+  );
+  const queuedWaitingCount = Math.max(
+    0,
+    totalActiveDownloads - MAX_SIMULTANEOUS_DOWNLOADS
+  );
+
+  function renderSimultaneousDownloadsBanner() {
+    if (totalActiveDownloads === 0) return null;
+    const activeSlots = activeDownloadEntries.slice(0, MAX_SIMULTANEOUS_DOWNLOADS);
+    return (
+      <div className="sim-download-bar" role="status" aria-live="polite">
+        <div className="sim-download-head">
+          <span className="sim-download-badge">
+            <Icon name="loader" size={12} className="spin" />
+            <span>
+              {simultaneousActiveCount}/{MAX_SIMULTANEOUS_DOWNLOADS} simultáneas
+            </span>
+          </span>
+          <span className="sim-download-summary">
+            {queuedWaitingCount > 0
+              ? `Descargando ${simultaneousActiveCount} a la vez · ${queuedWaitingCount} en espera`
+              : syncingAll && syncProgress.total > 0
+              ? `Cola ${syncProgress.done}/${syncProgress.total} · Máx. ${MAX_SIMULTANEOUS_DOWNLOADS} a la vez`
+              : `Descargando ${simultaneousActiveCount} de ${MAX_SIMULTANEOUS_DOWNLOADS} posibles a la vez`}
+          </span>
+        </div>
+        <div className="sim-download-slots">
+          {activeSlots.map(([key, dl]) => {
+            const title = dl.trackMeta?.title || dl.title || 'Canción';
+            const pct = Math.round(dl.progress || 8);
+            return (
+              <span key={key} className="sim-download-chip">
+                <span className="sim-download-chip-title">{title}</span>
+                <span className="sim-download-chip-pct">{pct}%</span>
+              </span>
+            );
+          })}
+        </div>
+      </div>
+    );
+  }
+
   // Unified Single-Line Track Row component used in Explore & Libraries
   function renderTrackRow(track, idx, list, contextLib = null) {
-    const dl = downloads[track.id];
+    const dlKey = track.id || track.title;
+    const dl = downloads[dlKey] || downloads[track.id];
+    const dlSlotIndex =
+      dl?.status === 'downloading'
+        ? activeDownloadEntries.findIndex(
+            ([k]) => String(k) === String(dlKey) || String(k) === String(track.id)
+          )
+        : -1;
+    const isQueuedForSlot = dlSlotIndex >= MAX_SIMULTANEOUS_DOWNLOADS;
     const offItem = offlineCatalog.find(
       t =>
         String(t.id) === String(track.id) ||
@@ -2617,7 +2634,11 @@ export default function HomePage() {
               )}
               <span className="track-sub-text">
                 {dl?.status === 'downloading'
-                  ? `Descargando ${Math.round(dl.progress || 8)}% · ${track.artist}`
+                  ? isQueuedForSlot
+                    ? `En espera (${simultaneousActiveCount}/${MAX_SIMULTANEOUS_DOWNLOADS} simultáneas) · ${track.artist}`
+                    : `Descargando (${simultaneousActiveCount}/${MAX_SIMULTANEOUS_DOWNLOADS} simultáneas) · ${Math.round(
+                        dl.progress || 8
+                      )}% · ${track.artist}`
                   : subtitleParts.join(' · ')}
               </span>
             </div>
@@ -3071,135 +3092,140 @@ export default function HomePage() {
 
       {/* ==================== TAB 1: EXPLORAR ==================== */}
       {activeTab === 'explore' && (
-        <section>
-          <form
-            className={`search-bar ${isOffline ? 'offline-section-disabled' : ''}`.trim()}
-            onSubmit={e => {
-              e.preventDefault();
-              if (!isOffline && query.trim()) {
-                setActiveChip('');
-                searchTracks(query);
-              }
-            }}
-          >
-            <Icon name="search" size={16} className="search-icon" />
-            <input
-              type="search"
-              className="search-input"
-              enterKeyHint="search"
-              placeholder={
-                isOffline
-                  ? 'Sin conexión a internet…'
-                  : '¿Qué querés escuchar hoy? Canción, artista o álbum…'
-              }
-              value={query}
-              onChange={e => setQuery(e.target.value)}
-              disabled={isOffline}
-            />
-            {query && (
-              <button
-                type="button"
-                className="icon-btn"
-                onClick={() => {
-                  setQuery('');
-                  setActiveChip('for-you');
-                  loadRecommendedOrRandomFeed(likedTracks, false);
-                }}
-                aria-label="Limpiar búsqueda"
-              >
-                <Icon name="close" size={15} />
-              </button>
-            )}
-            <button type="submit" className="btn sm" disabled={loading || isOffline}>
-              {loading ? '…' : 'Buscar'}
-            </button>
-          </form>
-
-          {/* Horizontal Category / Mood Strip */}
-          <div className={`chip-Strip ${isOffline ? 'offline-section-disabled' : ''}`.trim()}>
-            {EXPLORE_CHIPS.map(chip => (
-              <button
-                key={chip.id}
-                type="button"
-                className={`chip-pill ${activeChip === chip.id ? 'active' : ''}`}
-                disabled={isOffline}
-                onClick={() => {
-                  setQuery('');
-                  setActiveChip(chip.id);
-                  if (chip.id === 'for-you') {
-                    loadRecommendedOrRandomFeed(likedTracks, false);
-                  } else {
-                    searchTracks(chip.term, { mode: 'genre', label: chip.label });
+        <section className="tab-section">
+          <div className="sticky-top-zone">
+            <div className="sticky-top-inner">
+              <form
+                className={`search-bar ${isOffline ? 'offline-section-disabled' : ''}`.trim()}
+                onSubmit={e => {
+                  e.preventDefault();
+                  if (!isOffline && query.trim()) {
+                    setActiveChip('');
+                    searchTracks(query);
                   }
                 }}
               >
-                {chip.label}
-              </button>
-            ))}
-
-            {topFrequentArtists.map(artist => (
-              <button
-                key={artist}
-                type="button"
-                className={`chip-pill ${activeChip === `artist_${artist}` ? 'active' : ''}`}
-                disabled={isOffline}
-                onClick={() => {
-                  setQuery('');
-                  setActiveChip(`artist_${artist}`);
-                  searchTracks(artist, { mode: 'artist', label: artist });
-                }}
-              >
-                {artist}
-              </button>
-            ))}
-          </div>
-
-          {/* Clean Section Header (No debug badges!) */}
-          <div className="section-bar">
-            <div>
-              <h1 className="section-bar-title">
-                {feedInfo.mode === 'search'
-                  ? `Resultados para «${feedInfo.label}»`
-                  : feedInfo.mode === 'genre' || feedInfo.mode === 'artist'
-                  ? feedInfo.label
-                  : likedTracks.length > 0 || customPlaylists.length > 0
-                  ? 'Recomendado para vos'
-                  : 'Descubrimiento del día'}
-              </h1>
-              <p className="section-bar-sub">
-                {feedInfo.mode === 'search'
-                  ? `${results.length} canciones encontradas`
-                  : feedInfo.mode === 'recommended' && feedInfo.label
-                  ? `Inspirado en ${feedInfo.label}`
-                  : 'Tocá cualquier canción para reproducir o descargar en Offline'}
-              </p>
-            </div>
-
-            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-              {results.length > 0 && (
-                <button
-                  type="button"
-                  className="icon-btn"
+                <Icon name="search" size={16} className="search-icon" />
+                <input
+                  type="search"
+                  className="search-input"
+                  enterKeyHint="search"
+                  placeholder={
+                    isOffline
+                      ? 'Sin conexión a internet…'
+                      : '¿Qué querés escuchar hoy? Canción, artista o álbum…'
+                  }
+                  value={query}
+                  onChange={e => setQuery(e.target.value)}
                   disabled={isOffline}
-                  onClick={() => playFromList(results, 0, true)}
-                  title="Reproducir mezcla aleatoria"
-                >
-                  <Icon name="shuffle" size={16} />
+                />
+                {query && (
+                  <button
+                    type="button"
+                    className="icon-btn"
+                    onClick={() => {
+                      setQuery('');
+                      setActiveChip('for-you');
+                      loadRecommendedOrRandomFeed(likedTracks, false);
+                    }}
+                    aria-label="Limpiar búsqueda"
+                  >
+                    <Icon name="close" size={15} />
+                  </button>
+                )}
+                <button type="submit" className="btn sm" disabled={loading || isOffline}>
+                  {loading ? '…' : 'Buscar'}
                 </button>
-              )}
-              <button
-                type="button"
-                className="icon-btn"
-                disabled={loading || isOffline}
-                onClick={() =>
-                  activeChip === 'for-you'
-                    ? loadRecommendedOrRandomFeed(likedTracks, false)
-                    : loadRecommendedOrRandomFeed(likedTracks, true)
-                }
-                title="Actualizar recomendaciones"
-              >
-                <Icon name="refresh" size={16} className={loading ? 'spin' : ''} />
-              </button>
+              </form>
+
+              {/* Horizontal Category / Mood Strip */}
+              <div className={`chip-Strip ${isOffline ? 'offline-section-disabled' : ''}`.trim()}>
+                {EXPLORE_CHIPS.map(chip => (
+                  <button
+                    key={chip.id}
+                    type="button"
+                    className={`chip-pill ${activeChip === chip.id ? 'active' : ''}`}
+                    disabled={isOffline}
+                    onClick={() => {
+                      setQuery('');
+                      setActiveChip(chip.id);
+                      if (chip.id === 'for-you') {
+                        loadRecommendedOrRandomFeed(likedTracks, false);
+                      } else {
+                        searchTracks(chip.term, { mode: 'genre', label: chip.label });
+                      }
+                    }}
+                  >
+                    {chip.label}
+                  </button>
+                ))}
+
+                {topFrequentArtists.map(artist => (
+                  <button
+                    key={artist}
+                    type="button"
+                    className={`chip-pill ${activeChip === `artist_${artist}` ? 'active' : ''}`}
+                    disabled={isOffline}
+                    onClick={() => {
+                      setQuery('');
+                      setActiveChip(`artist_${artist}`);
+                      searchTracks(artist, { mode: 'artist', label: artist });
+                    }}
+                  >
+                    {artist}
+                  </button>
+                ))}
+              </div>
+
+              {/* Clean Section Header (No debug badges!) */}
+              <div className="section-bar">
+                <div>
+                  <h1 className="section-bar-title">
+                    {feedInfo.mode === 'search'
+                      ? `Resultados para «${feedInfo.label}»`
+                      : feedInfo.mode === 'genre' || feedInfo.mode === 'artist'
+                      ? feedInfo.label
+                      : likedTracks.length > 0 || customPlaylists.length > 0
+                      ? 'Recomendado para vos'
+                      : 'Descubrimiento del día'}
+                  </h1>
+                  <p className="section-bar-sub">
+                    {feedInfo.mode === 'search'
+                      ? `${results.length} canciones encontradas`
+                      : feedInfo.mode === 'recommended' && feedInfo.label
+                      ? `Inspirado en ${feedInfo.label}`
+                      : 'Tocá cualquier canción para reproducir o descargar en Offline'}
+                  </p>
+                </div>
+
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                  {results.length > 0 && (
+                    <button
+                      type="button"
+                      className="icon-btn"
+                      disabled={isOffline}
+                      onClick={() => playFromList(results, 0, true)}
+                      title="Reproducir mezcla aleatoria"
+                    >
+                      <Icon name="shuffle" size={16} />
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    className="icon-btn"
+                    disabled={loading || isOffline}
+                    onClick={() =>
+                      activeChip === 'for-you'
+                        ? loadRecommendedOrRandomFeed(likedTracks, false)
+                        : loadRecommendedOrRandomFeed(likedTracks, true)
+                    }
+                    title="Actualizar recomendaciones"
+                  >
+                    <Icon name="refresh" size={16} className={loading ? 'spin' : ''} />
+                  </button>
+                </div>
+              </div>
+              {renderSimultaneousDownloadsBanner()}
             </div>
           </div>
 
@@ -3220,247 +3246,262 @@ export default function HomePage() {
 
       {/* ==================== TAB 2: BIBLIOTECA (FAVORITOS / OFFLINE / PROPIAS) ==================== */}
       {activeTab === 'library' && (
-        <section>
-          <div className="library-switcher" role="tablist" aria-label="Tus librerías">
-            <button
-              type="button"
-              className={`library-pill ${selectedLibrary === 'liked' ? 'active' : ''}`}
-              onClick={() => {
-                setSelectedLibrary('liked');
-                setLibraryQuery('');
-              }}
-            >
-              <Icon name="heart-fill" size={13} />
-              <span>Favoritos</span>
-              <span className="library-pill-count">{likedTracks.length}</span>
-            </button>
-
-            <button
-              type="button"
-              className={`library-pill ${selectedLibrary === 'offline' ? 'active' : ''}`}
-              onClick={() => {
-                setSelectedLibrary('offline');
-                setLibraryQuery('');
-              }}
-            >
-              <Icon name="offline-pin" size={13} />
-              <span>Offline</span>
-              <span className="library-pill-count">{offlineCatalog.length}</span>
-            </button>
-
-            {customPlaylists.map(pl => (
-              <button
-                key={pl.id}
-                type="button"
-                className={`library-pill ${selectedLibrary === pl.id ? 'active' : ''}`}
-                onClick={() => {
-                  setSelectedLibrary(pl.id);
-                  setLibraryQuery('');
-                }}
-              >
-                <Icon name="folder" size={13} />
-                <span>{pl.name}</span>
-                <span className="library-pill-count">{pl.tracks.length}</span>
-              </button>
-            ))}
-
-            <button
-              type="button"
-              className="library-pill"
-              onClick={() => setCreatingPlaylist(v => !v)}
-              title="Crear nueva librería"
-            >
-              <Icon name={creatingPlaylist ? 'close' : 'plus'} size={13} />
-              <span>{creatingPlaylist ? 'Cancelar' : 'Nueva'}</span>
-            </button>
-          </div>
-
-          {creatingPlaylist && (
-            <form
-              className="search-bar"
-              style={{ marginBottom: 12 }}
-              onSubmit={e => {
-                e.preventDefault();
-                const created = createCustomPlaylist(newPlaylistName);
-                if (created) {
-                  setNewPlaylistName('');
-                  setCreatingPlaylist(false);
-                  setSelectedLibrary(created.id);
-                  setLibraryQuery('');
-                }
-              }}
-            >
-              <input
-                type="text"
-                className="search-input"
-                placeholder="Nombre de la librería (ej. Entrenamiento, Viaje)…"
-                value={newPlaylistName}
-                onChange={e => setNewPlaylistName(e.target.value)}
-                required
-              />
-              <button type="submit" className="btn sm">
-                Crear
-              </button>
-            </form>
-          )}
-
-          {/* Sleek Spotify/Apple-Music-style Playlist Header */}
-          <div className="playlist-header">
-            <div className="playlist-header-info">
-              <h1 className="playlist-header-title">{activeLibraryTitle}</h1>
-              <div className="playlist-header-meta">
-                {syncingAll && syncProgress.total > 0 ? (
-                  <>
-                    <Icon name="download" size={13} />
-                    <span>
-                      Descargando {syncProgress.done}/{syncProgress.total}
-                      {syncProgress.currentTitle ? ` · ${syncProgress.currentTitle}` : ''}
-                    </span>
-                  </>
-                ) : coverSync.active && coverSync.total > 0 ? (
-                  <>
-                    <Icon name="image" size={13} />
-                    <span>
-                      Portadas {coverSync.done}/{coverSync.total} · {activeLibraryTracks.length}{' '}
-                      {activeLibraryTracks.length === 1 ? 'canción' : 'canciones'}
-                    </span>
-                  </>
-                ) : (
-                  <span>
-                    {activeLibraryTracks.length}{' '}
-                    {activeLibraryTracks.length === 1 ? 'canción' : 'canciones'}
-                    {missingCoversInActiveLibrary.length > 0 && !isOffline
-                      ? ` · ${missingCoversInActiveLibrary.length} sin portada`
-                      : selectedLibrary === 'offline' && deviceQuota
-                      ? ` · ${deviceQuota.usedMB} MB en dispositivo`
-                      : isOffline && playableActiveLibraryTracks.length < activeLibraryTracks.length
-                      ? ` · ${playableActiveLibraryTracks.length} disponibles sin red`
-                      : ''}
-                  </span>
-                )}
-              </div>
-            </div>
-
-            <div className="playlist-header-actions">
-              <button
-                type="button"
-                className={`icon-btn ${shuffle ? 'active' : ''}`}
-                onClick={() => setShuffle(s => !s)}
-                title={shuffle ? 'Aleatorio activado' : 'Activar aleatorio'}
-              >
-                <Icon name="shuffle" size={17} />
-              </button>
-
-              <button
-                type="button"
-                className={`icon-btn ${repeatMode !== 'off' ? 'active' : ''}`}
-                onClick={cycleRepeatMode}
-                title="Modo repetición"
-              >
-                <Icon name={repeatMode === 'one' ? 'repeat-1' : 'repeat'} size={17} />
-              </button>
-
-              {(missingCoversInActiveLibrary.length > 0 || coverSync.active) && (
+        <section className="tab-section">
+          <div className="sticky-top-zone">
+            <div className="sticky-top-inner">
+              <div className="library-switcher" role="tablist" aria-label="Tus librerías">
                 <button
                   type="button"
-                  className={`icon-btn ${coverSync.active ? 'active' : ''}`}
-                  disabled={isOffline}
-                  onClick={() => syncMissingCoversForList(activeLibraryTracks, true)}
-                  title={
-                    coverSync.active
-                      ? `Pausar carga de portadas (${coverSync.done}/${coverSync.total})`
-                      : `Cargar y comprimir portadas faltantes (${missingCoversInActiveLibrary.length})`
-                  }
-                >
-                  <Icon
-                    name={coverSync.active ? 'loader' : 'image'}
-                    size={17}
-                    className={coverSync.active ? 'spin' : ''}
-                  />
-                </button>
-              )}
-
-              {selectedLibrary !== 'offline' && activeLibraryTracks.length > 0 && (
-                <button
-                  type="button"
-                  className={`icon-btn ${syncingAll ? 'active' : ''}`}
-                  disabled={isOffline}
-                  onClick={() => downloadCollectionForOffline(activeLibraryTracks)}
-                  title={
-                    syncingAll
-                      ? `Pausar cola (${syncProgress.done}/${syncProgress.total})`
-                      : 'Descargar toda esta librería a Offline'
-                  }
-                >
-                  <Icon
-                    name={syncingAll ? 'loader' : 'download'}
-                    size={17}
-                    className={syncingAll ? 'spin' : ''}
-                  />
-                </button>
-              )}
-
-              {activeCustomPlaylist && (
-                <button
-                  type="button"
-                  className="icon-btn"
-                  onClick={() => deleteCustomPlaylist(activeCustomPlaylist.id)}
-                  title="Eliminar esta librería"
-                >
-                  <Icon name="trash" size={16} />
-                </button>
-              )}
-
-              <button
-                type="button"
-                className="icon-btn play-circle"
-                disabled={playableActiveLibraryTracks.length === 0}
-                onClick={() => playFromList(activeLibraryTracks, 0)}
-                title="Reproducir librería"
-              >
-                <Icon name="play" size={18} />
-              </button>
-            </div>
-          </div>
-
-          {activeLibraryTracks.length > 0 && (
-            <div style={{ marginBottom: 14 }}>
-              <div className="search-bar" style={{ marginBottom: libraryQuery.trim() ? 6 : 0 }}>
-                <span className="search-icon">
-                  <Icon name="search" size={16} />
-                </span>
-                <input
-                  type="search"
-                  className="search-input"
-                  placeholder={`Buscar en ${activeLibraryTitle} (canción, artista o álbum)…`}
-                  value={libraryQuery}
-                  onChange={e => setLibraryQuery(e.target.value)}
-                />
-                {libraryQuery && (
-                  <button
-                    type="button"
-                    className="btn ghost sm"
-                    onClick={() => setLibraryQuery('')}
-                    aria-label="Limpiar búsqueda"
-                  >
-                    <Icon name="close" size={15} />
-                  </button>
-                )}
-              </div>
-              {libraryQuery.trim() && (
-                <div
-                  style={{
-                    fontSize: '0.75rem',
-                    color: 'var(--text-secondary)',
-                    paddingLeft: 4
+                  className={`library-pill ${selectedLibrary === 'liked' ? 'active' : ''}`}
+                  onClick={() => {
+                    setSelectedLibrary('liked');
+                    setLibraryQuery('');
                   }}
                 >
-                  Tocá cualquier resultado para subirlo al #1 y reproducir tu librería desde ahí ({filteredLibraryTracks.length}{' '}
-                  {filteredLibraryTracks.length === 1 ? 'resultado' : 'resultados'})
+                  <Icon name="heart-fill" size={13} />
+                  <span>Favoritos</span>
+                  <span className="library-pill-count">{likedTracks.length}</span>
+                </button>
+
+                <button
+                  type="button"
+                  className={`library-pill ${selectedLibrary === 'offline' ? 'active' : ''}`}
+                  onClick={() => {
+                    setSelectedLibrary('offline');
+                    setLibraryQuery('');
+                  }}
+                >
+                  <Icon name="offline-pin" size={13} />
+                  <span>Offline</span>
+                  <span className="library-pill-count">{offlineCatalog.length}</span>
+                </button>
+
+                {customPlaylists.map(pl => (
+                  <button
+                    key={pl.id}
+                    type="button"
+                    className={`library-pill ${selectedLibrary === pl.id ? 'active' : ''}`}
+                    onClick={() => {
+                      setSelectedLibrary(pl.id);
+                      setLibraryQuery('');
+                    }}
+                  >
+                    <Icon name="folder" size={13} />
+                    <span>{pl.name}</span>
+                    <span className="library-pill-count">{pl.tracks.length}</span>
+                  </button>
+                ))}
+
+                <button
+                  type="button"
+                  className="library-pill"
+                  onClick={() => setCreatingPlaylist(v => !v)}
+                  title="Crear nueva librería"
+                >
+                  <Icon name={creatingPlaylist ? 'close' : 'plus'} size={13} />
+                  <span>{creatingPlaylist ? 'Cancelar' : 'Nueva'}</span>
+                </button>
+              </div>
+
+              {creatingPlaylist && (
+                <form
+                  className="search-bar"
+                  style={{ marginBottom: 8 }}
+                  onSubmit={e => {
+                    e.preventDefault();
+                    const created = createCustomPlaylist(newPlaylistName);
+                    if (created) {
+                      setNewPlaylistName('');
+                      setCreatingPlaylist(false);
+                      setSelectedLibrary(created.id);
+                      setLibraryQuery('');
+                    }
+                  }}
+                >
+                  <input
+                    type="text"
+                    className="search-input"
+                    placeholder="Nombre de la librería (ej. Entrenamiento, Viaje)…"
+                    value={newPlaylistName}
+                    onChange={e => setNewPlaylistName(e.target.value)}
+                    required
+                  />
+                  <button type="submit" className="btn sm">
+                    Crear
+                  </button>
+                </form>
+              )}
+
+              {/* Sleek Spotify/Apple-Music-style Playlist Header */}
+              <div className="playlist-header">
+                <div className="playlist-header-info">
+                  <h1 className="playlist-header-title">{activeLibraryTitle}</h1>
+                  <div className="playlist-header-meta">
+                    {syncingAll && syncProgress.total > 0 ? (
+                      <>
+                        <Icon name="download" size={13} />
+                        <span>
+                          Descargando {syncProgress.done}/{syncProgress.total} ({simultaneousActiveCount}/{MAX_SIMULTANEOUS_DOWNLOADS} simultáneas)
+                          {syncProgress.currentTitle ? ` · ${syncProgress.currentTitle}` : ''}
+                        </span>
+                      </>
+                    ) : totalActiveDownloads > 0 ? (
+                      <>
+                        <Icon name="download" size={13} />
+                        <span>
+                          {simultaneousActiveCount}/{MAX_SIMULTANEOUS_DOWNLOADS} descargas simultáneas
+                          {queuedWaitingCount > 0 ? ` · +${queuedWaitingCount} en espera` : ''} · {activeLibraryTracks.length}{' '}
+                          {activeLibraryTracks.length === 1 ? 'canción' : 'canciones'}
+                        </span>
+                      </>
+                    ) : coverSync.active && coverSync.total > 0 ? (
+                      <>
+                        <Icon name="image" size={13} />
+                        <span>
+                          Portadas {coverSync.done}/{coverSync.total} · {activeLibraryTracks.length}{' '}
+                          {activeLibraryTracks.length === 1 ? 'canción' : 'canciones'}
+                        </span>
+                      </>
+                    ) : (
+                      <span>
+                        {activeLibraryTracks.length}{' '}
+                        {activeLibraryTracks.length === 1 ? 'canción' : 'canciones'}
+                        {missingCoversInActiveLibrary.length > 0 && !isOffline
+                          ? ` · ${missingCoversInActiveLibrary.length} sin portada`
+                          : selectedLibrary === 'offline' && deviceQuota
+                          ? ` · ${deviceQuota.usedMB} MB en dispositivo`
+                          : isOffline && playableActiveLibraryTracks.length < activeLibraryTracks.length
+                          ? ` · ${playableActiveLibraryTracks.length} disponibles sin red`
+                          : ''}
+                      </span>
+                    )}
+                  </div>
+                </div>
+
+                <div className="playlist-header-actions">
+                  <button
+                    type="button"
+                    className={`icon-btn ${shuffle ? 'active' : ''}`}
+                    onClick={() => setShuffle(s => !s)}
+                    title={shuffle ? 'Aleatorio activado' : 'Activar aleatorio'}
+                  >
+                    <Icon name="shuffle" size={17} />
+                  </button>
+
+                  <button
+                    type="button"
+                    className={`icon-btn ${repeatMode !== 'off' ? 'active' : ''}`}
+                    onClick={cycleRepeatMode}
+                    title="Modo repetición"
+                  >
+                    <Icon name={repeatMode === 'one' ? 'repeat-1' : 'repeat'} size={17} />
+                  </button>
+
+                  {(missingCoversInActiveLibrary.length > 0 || coverSync.active) && (
+                    <button
+                      type="button"
+                      className={`icon-btn ${coverSync.active ? 'active' : ''}`}
+                      disabled={isOffline}
+                      onClick={() => syncMissingCoversForList(activeLibraryTracks, true)}
+                      title={
+                        coverSync.active
+                          ? `Pausar carga de portadas (${coverSync.done}/${coverSync.total})`
+                          : `Cargar y comprimir portadas faltantes (${missingCoversInActiveLibrary.length})`
+                      }
+                    >
+                      <Icon
+                        name={coverSync.active ? 'loader' : 'image'}
+                        size={17}
+                        className={coverSync.active ? 'spin' : ''}
+                      />
+                    </button>
+                  )}
+
+                  {selectedLibrary !== 'offline' && activeLibraryTracks.length > 0 && (
+                    <button
+                      type="button"
+                      className={`icon-btn ${syncingAll ? 'active' : ''}`}
+                      disabled={isOffline}
+                      onClick={() => downloadCollectionForOffline(activeLibraryTracks)}
+                      title={
+                        syncingAll
+                          ? `Pausar cola (${syncProgress.done}/${syncProgress.total})`
+                          : 'Descargar toda esta librería a Offline'
+                      }
+                    >
+                      <Icon
+                        name={syncingAll ? 'loader' : 'download'}
+                        size={17}
+                        className={syncingAll ? 'spin' : ''}
+                      />
+                    </button>
+                  )}
+
+                  {activeCustomPlaylist && (
+                    <button
+                      type="button"
+                      className="icon-btn"
+                      onClick={() => deleteCustomPlaylist(activeCustomPlaylist.id)}
+                      title="Eliminar esta librería"
+                    >
+                      <Icon name="trash" size={16} />
+                    </button>
+                  )}
+
+                  <button
+                    type="button"
+                    className="icon-btn play-circle"
+                    disabled={playableActiveLibraryTracks.length === 0}
+                    onClick={() => playFromList(activeLibraryTracks, 0)}
+                    title="Reproducir librería"
+                  >
+                    <Icon name="play" size={18} />
+                  </button>
+                </div>
+              </div>
+
+              {activeLibraryTracks.length > 0 && (
+                <div className="library-search-wrap">
+                  <div className="search-bar" style={{ marginBottom: libraryQuery.trim() ? 6 : 0 }}>
+                    <span className="search-icon">
+                      <Icon name="search" size={16} />
+                    </span>
+                    <input
+                      type="search"
+                      className="search-input"
+                      placeholder={`Buscar en ${activeLibraryTitle} (canción, artista o álbum)…`}
+                      value={libraryQuery}
+                      onChange={e => setLibraryQuery(e.target.value)}
+                    />
+                    {libraryQuery && (
+                      <button
+                        type="button"
+                        className="btn ghost sm"
+                        onClick={() => setLibraryQuery('')}
+                        aria-label="Limpiar búsqueda"
+                      >
+                        <Icon name="close" size={15} />
+                      </button>
+                    )}
+                  </div>
+                  {libraryQuery.trim() && (
+                    <div
+                      style={{
+                        fontSize: '0.75rem',
+                        color: 'var(--text-secondary)',
+                        paddingLeft: 4
+                      }}
+                    >
+                      Tocá cualquier resultado para subirlo al #1 y reproducir tu librería desde ahí ({filteredLibraryTracks.length}{' '}
+                      {filteredLibraryTracks.length === 1 ? 'resultado' : 'resultados'})
+                    </div>
+                  )}
                 </div>
               )}
+
+              {renderSimultaneousDownloadsBanner()}
             </div>
-          )}
+          </div>
 
           {activeLibraryTracks.length === 0 ? (
             <div className="empty">

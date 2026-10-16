@@ -14,13 +14,13 @@ if (!global.__activeDownloads) {
 }
 const activeDownloads = global.__activeDownloads;
 
-const MAX_CONCURRENT_EXTRACTIONS = 2;
+const MAX_CONCURRENT_EXTRACTIONS = 3;
 if (!global.__extractionQueue) {
   global.__extractionQueue = { running: 0, queue: [] };
 }
 const extractionPool = global.__extractionQueue;
 
-function enqueueExtraction(taskFn) {
+function enqueueExtraction(taskFn, priority = false) {
   return new Promise((resolve, reject) => {
     const runNext = () => {
       if (extractionPool.running >= MAX_CONCURRENT_EXTRACTIONS || extractionPool.queue.length === 0) {
@@ -36,9 +36,22 @@ function enqueueExtraction(taskFn) {
           runNext();
         });
     };
-    extractionPool.queue.push({ fn: taskFn, resolve, reject });
+    const entry = { fn: taskFn, resolve, reject };
+    if (priority) {
+      extractionPool.queue.unshift(entry);
+    } else {
+      extractionPool.queue.push(entry);
+    }
     runNext();
   });
+}
+
+function getPoolStatus() {
+  return {
+    active: extractionPool.running,
+    queued: extractionPool.queue.length,
+    max: MAX_CONCURRENT_EXTRACTIONS
+  };
 }
 
 const ALLOWED_MEDIA_HOSTS = new Set([
@@ -96,10 +109,19 @@ function sanitizeSlug(text) {
   return (clean || 'track').slice(0, 60);
 }
 
+function normalizeText(str) {
+  return String(str || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
+
 function stripRemasterNoise(raw) {
   return String(raw || '')
     .replace(
-      /\s*[-–—]\s*(remaster(ed)?(\s+\d{4})?|\d{4}\s+remaster(ed)?|radio\s+edit|album\s+version|single\s+version|explicit|clean|solo|mono|stereo|\d+\/\d+.*).*/i,
+      /\s*[-–—]\s*(remaster(ed)?(\s+\d{4})?|\d{4}\s+remaster(ed)?|radio\s+edit|album\s+version|single\s+version|explicit|clean|mono|stereo|\d+\/\d+.*).*/i,
       ''
     )
     .replace(
@@ -114,6 +136,7 @@ function stripRemasterNoise(raw) {
 function cleanArtistName(raw) {
   const first = String(raw || '')
     .split(/[,;&]/)[0]
+    .replace(/(archive|archives|vault|topic|reupload|official)$/i, '')
     .replace(/\b(archive|archives|vault|topic|reupload|official|artista|guardado en dispositivo)\b/gi, '')
     .replace(/\s+/g, ' ')
     .trim();
@@ -135,18 +158,46 @@ function getArtistTokens(rawArtist) {
     'with',
     'official',
     'archive',
+    'archives',
     'vault',
     'topic',
     'music',
     'band',
     'dj'
   ]);
-  return String(rawArtist || '')
-    .normalize('NFD')
-    .replace(/[\u0300-\u036f]/g, '')
-    .toLowerCase()
-    .split(/[^a-z0-9]+/)
+  return normalizeText(
+    String(rawArtist || '').replace(/(archive|archives|vault|topic|reupload)$/gi, ' ')
+  )
+    .split(/\s+/)
     .filter(w => w.length >= 3 && !stopWords.has(w));
+}
+
+function getTitleCoreTokens(cleanTitle) {
+  const stopWords = new Set([
+    'the',
+    'los',
+    'las',
+    'les',
+    'and',
+    'con',
+    'del',
+    'por',
+    'para',
+    'una',
+    'uno',
+    'feat',
+    'ft',
+    'with',
+    'remaster',
+    'remastered',
+    'version',
+    'edit',
+    'mix'
+  ]);
+  const tokens = normalizeText(cleanTitle)
+    .split(/\s+/)
+    .filter(w => w.length >= 2 && !stopWords.has(w));
+  return tokens.length > 0 ? tokens : normalizeText(cleanTitle).split(/\s+/).filter(Boolean);
 }
 
 function parseDurationToSec(rawDur) {
@@ -164,6 +215,415 @@ function parseDurationToSec(rawDur) {
     sec = parts[0] * 3600 + parts[1] * 60 + parts[2];
   }
   return sec >= 45 && sec <= 1200 ? sec : null;
+}
+
+async function resolveExpectedDurationSec(rawDuration, cleanTitle, primaryArtist) {
+  const parsed = parseDurationToSec(rawDuration);
+  if (parsed) return parsed;
+
+  const query = `${cleanTitle} ${primaryArtist || ''}`.trim();
+  if (!query) return null;
+
+  const titleTokens = getTitleCoreTokens(cleanTitle);
+  const artistTokens = getArtistTokens(primaryArtist);
+
+  try {
+    const itunesUrl = `https://itunes.apple.com/search?term=${encodeURIComponent(
+      query
+    )}&media=music&entity=song&limit=5`;
+    const res = await fetch(itunesUrl, { signal: AbortSignal.timeout(2500) });
+    if (res.ok) {
+      const data = await res.json();
+      const hits = Array.isArray(data?.results) ? data.results : [];
+      for (const h of hits) {
+        const sec = h.trackTimeMillis ? Math.round(h.trackTimeMillis / 1000) : null;
+        if (!sec || sec < 45 || sec > 1200) continue;
+        const hTitle = normalizeText(h.trackName);
+        const hArtist = normalizeText(h.artistName);
+        const tOk = titleTokens.every(t => hTitle.includes(t));
+        const aOk = artistTokens.length === 0 || artistTokens.some(t => hArtist.includes(t));
+        if (tOk && aOk) return sec;
+      }
+    }
+  } catch {}
+
+  try {
+    const dzUrl = `https://api.deezer.com/search?q=${encodeURIComponent(query)}&limit=5`;
+    const res = await fetch(dzUrl, { signal: AbortSignal.timeout(2500) });
+    if (res.ok) {
+      const data = await res.json();
+      const hits = Array.isArray(data?.data) ? data.data : [];
+      for (const h of hits) {
+        const sec = Number(h.duration);
+        if (!sec || sec < 45 || sec > 1200) continue;
+        const hTitle = normalizeText(h.title);
+        const hArtist = normalizeText(h.artist?.name);
+        const tOk = titleTokens.every(t => hTitle.includes(t));
+        const aOk = artistTokens.length === 0 || artistTokens.some(t => hArtist.includes(t));
+        if (tOk && aOk) return sec;
+      }
+    }
+  } catch {}
+
+  return null;
+}
+
+const STANDARD_AUDIO_METADATA_WORDS = new Set([
+  'official',
+  'audio',
+  'video',
+  'music',
+  'lyrics',
+  'lyric',
+  'letra',
+  'sub',
+  'espanol',
+  'english',
+  'hd',
+  'hq',
+  '4k',
+  '8k',
+  'remaster',
+  'remastered',
+  'mix',
+  'stereo',
+  'mono',
+  'original',
+  'version',
+  'single',
+  'album',
+  'edit',
+  'radio',
+  'explicit',
+  'clean',
+  'solo',
+  'feat',
+  'ft',
+  'with',
+  'prod',
+  'ncs',
+  'release',
+  'rooftop',
+  'fotage',
+  'footage',
+  'mp3',
+  'wav',
+  'flac',
+  'topic',
+  'visualizer',
+  'deluxe',
+  'bonus',
+  'track',
+  'the',
+  'and',
+  'con',
+  'del',
+  'las',
+  'los',
+  'por',
+  'para'
+]);
+
+function buildCandidateContext(rawTitle, cleanTitle, rawArtist, expectedDurationSec) {
+  const rawTitleNorm = normalizeText(rawTitle);
+  const cleanTitleNorm = normalizeText(cleanTitle);
+  const rawArtistNorm = normalizeText(rawArtist);
+  const titleTokens = getTitleCoreTokens(cleanTitle);
+  const artistTokens = getArtistTokens(rawArtist);
+
+  const allowedWords = new Set(STANDARD_AUDIO_METADATA_WORDS);
+  for (const w of `${rawTitleNorm} ${cleanTitleNorm} ${rawArtistNorm}`.split(/\s+/)) {
+    if (w) allowedWords.add(w);
+  }
+
+  return {
+    rawTitleLower: String(rawTitle || '').toLowerCase(),
+    rawArtistLower: String(rawArtist || '').toLowerCase(),
+    titleTokens,
+    artistTokens,
+    allowedWords,
+    expectedDurationSec
+  };
+}
+
+function scoreCandidate(cand, ctx) {
+  const dur = Number(cand.duration);
+  if (!dur || isNaN(dur) || dur < 45 || dur > 900) {
+    return -1;
+  }
+
+  let durDiff = 0;
+  if (ctx.expectedDurationSec && ctx.expectedDurationSec >= 50) {
+    durDiff = Math.abs(dur - ctx.expectedDurationSec);
+    if (durDiff > 22) {
+      return -1;
+    }
+  }
+
+  const titleLower = String(cand.title || '').toLowerCase();
+  const uploaderLower = String(cand.uploader || '').toLowerCase();
+  const urlLower = String(cand.webpageUrl || '').toLowerCase();
+  const combinedLower = `${titleLower} ${uploaderLower} ${urlLower}`;
+
+  const bannedTerms = [
+    'cover',
+    'covered',
+    'tribute',
+    'karaoke',
+    'originally performed',
+    'in the style of',
+    'made famous',
+    'backing track',
+    'instrumental',
+    'nightcore',
+    '8d',
+    'slowed',
+    'reverb',
+    'sped up',
+    'speed up',
+    '1.1x',
+    'distorted',
+    'chopped',
+    'parody',
+    'tutorial',
+    'lesson',
+    'how to play',
+    'reaction',
+    'podcast',
+    'interview',
+    'trailer',
+    'teaser',
+    '1s preview',
+    'drum cover',
+    'guitar cover',
+    'bass cover',
+    'piano cover',
+    'vocal cover',
+    'sax cover',
+    'acoustic cover',
+    'myvoice',
+    'deep house',
+    'reggae version',
+    'gregorian',
+    'jukebox',
+    'bornagen',
+    'the-rooftop-beatles',
+    'rooftopsdd',
+    'electric-beatles',
+    'electric beatles',
+    'bootleg',
+    'mashup',
+    'rework',
+    'flip',
+    'hoodtrap',
+    'mylancore',
+    'hardstyle',
+    'dubstep',
+    'tiktok'
+  ];
+
+  if (!ctx.rawTitleLower.includes('remix')) {
+    bannedTerms.push('remix');
+  }
+  if (!ctx.rawTitleLower.includes('demo')) {
+    bannedTerms.push('(demo)', '[demo]', ' demo');
+  }
+  if (!ctx.rawTitleLower.includes('live') && !ctx.rawTitleLower.includes('vivo')) {
+    bannedTerms.push('live at', 'live in', 'live from', 'en vivo', '(live)', '[live]');
+  }
+  if (!ctx.rawTitleLower.includes('fast')) {
+    bannedTerms.push('fast version');
+  }
+
+  for (const term of bannedTerms) {
+    if (ctx.rawTitleLower.includes(term) || ctx.rawArtistLower.includes(term)) continue;
+    if (combinedLower.includes(term)) {
+      return -1;
+    }
+  }
+
+  // Reject cover bands that credit the original artist via "(by Beatles)"
+  if (/\(\s*by\s+[^)]+\)/i.test(cand.title || '')) {
+    return -1;
+  }
+
+  const candTitleNorm = normalizeText(cand.title);
+  const candUploaderNorm = normalizeText(cand.uploader);
+  const candTitleWords = candTitleNorm.split(/\s+/).filter(Boolean);
+  const candTitleWordSet = new Set(candTitleWords);
+  const candUploaderWordSet = new Set(candUploaderNorm.split(/\s+/).filter(Boolean));
+
+  // Verify title core tokens
+  if (ctx.titleTokens.length > 0) {
+    const matchedTitleCount = ctx.titleTokens.filter(
+      t => candTitleWordSet.has(t) || candTitleNorm.includes(t)
+    ).length;
+    const minRequired =
+      ctx.titleTokens.length === 1 ? 1 : Math.max(2, Math.ceil(ctx.titleTokens.length * 0.7));
+    if (matchedTitleCount < minRequired) {
+      return -1;
+    }
+  }
+
+  // Verify artist match with strict word boundary (so "thejukebox" doesn't count as "the")
+  const uploaderMatchesArtist =
+    ctx.artistTokens.length > 0 &&
+    ctx.artistTokens.some(t => candUploaderWordSet.has(t));
+  const titleMatchesArtist =
+    ctx.artistTokens.length > 0 &&
+    ctx.artistTokens.some(t => candTitleWordSet.has(t));
+  const artistMatched = uploaderMatchesArtist || titleMatchesArtist;
+
+  // Reject unlabeled covers formatted as "heaven (bryan adams)" by random uploaders
+  if (!uploaderMatchesArtist && ctx.artistTokens.length > 0 && !cand.title.includes('-')) {
+    const parenMatch = String(cand.title || '').match(/\(([^)]+)\)\s*$/);
+    if (parenMatch) {
+      const parenNorm = normalizeText(parenMatch[1]);
+      if (ctx.artistTokens.some(t => parenNorm.includes(t))) {
+        return -1;
+      }
+    }
+  }
+
+  // Count foreign words in the candidate title that don't belong to the song title, artist, or audio metadata
+  const foreignTitleWords = candTitleWords.filter(
+    w => w.length >= 3 && !/^\d+$/.test(w) && !ctx.allowedWords.has(w)
+  );
+
+  // If the uploader is NOT the artist and the title has 2+ unrelated foreign words (e.g. "GET BACK BEATLES KOVAH OF THE GODZ"), reject!
+  if (!uploaderMatchesArtist && foreignTitleWords.length >= 2) {
+    return -1;
+  }
+
+  // If neither uploader nor title mentions the artist, only allow when duration matches within ±4s with 0 foreign title words (e.g. Spotify Vault/Archive alias vs original NCS uploader)
+  if (ctx.artistTokens.length > 0 && !artistMatched) {
+    if (!ctx.expectedDurationSec || durDiff > 4 || foreignTitleWords.length > 0) {
+      return -1;
+    }
+  }
+
+  let score = 100;
+
+  if (ctx.expectedDurationSec) {
+    if (durDiff <= 2) score += 35;
+    else if (durDiff <= 5) score += 25;
+    else if (durDiff <= 10) score += 12;
+    else score -= Math.round(durDiff);
+  }
+
+  if (uploaderMatchesArtist) {
+    score += 30;
+  } else if (titleMatchesArtist) {
+    score += 18;
+  }
+
+  if (
+    /\b(remaster|remastered|official audio|original audio|radio edit|ncs release)\b/i.test(
+      titleLower
+    )
+  ) {
+    score += 14;
+  }
+
+  score -= foreignTitleWords.length * 15;
+
+  const extractorLower = String(cand.extractor || '').toLowerCase();
+  if (extractorLower.includes('soundcloud')) {
+    // SoundCloud streams directly from VPS datacenter IPs without YouTube bot challenges
+    score += 10;
+  } else if (extractorLower.includes('youtube') && uploaderMatchesArtist) {
+    score += 22;
+  }
+
+  return score;
+}
+
+function discoverCandidatesFromSearch(searchQueries) {
+  return new Promise(resolve => {
+    const ytdlpArgs = [
+      '--flat-playlist',
+      '--ignore-errors',
+      '--no-warnings',
+      '--socket-timeout', '10',
+      '--js-runtimes', 'node',
+      '--print', '%(extractor)s\t%(id)s\t%(webpage_url)s\t%(url)s\t%(duration)s\t%(uploader)s\t%(title)s',
+      '--',
+      ...searchQueries
+    ];
+
+    const { cmd, args } = resolveYtDlpCommand(ytdlpArgs);
+    let stdoutText = '';
+    let settled = false;
+
+    let child;
+    try {
+      child = spawn(cmd, args);
+    } catch {
+      return resolve([]);
+    }
+
+    const finish = list => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(list);
+    };
+
+    const timer = setTimeout(() => {
+      try {
+        child.kill('SIGKILL');
+      } catch {}
+      finish(parseCandidateLines(stdoutText));
+    }, 14000);
+
+    child.stdout.on('data', d => {
+      stdoutText += d.toString();
+    });
+
+    child.on('error', () => {
+      finish(parseCandidateLines(stdoutText));
+    });
+
+    child.on('close', () => {
+      finish(parseCandidateLines(stdoutText));
+    });
+  });
+}
+
+function parseCandidateLines(rawText) {
+  const lines = String(rawText || '')
+    .split(/\r?\n/)
+    .map(l => l.trim())
+    .filter(Boolean);
+
+  const seenUrls = new Set();
+  const candidates = [];
+
+  for (const line of lines) {
+    const parts = line.split('\t');
+    if (parts.length < 7) continue;
+    const [extractor, id, webpageUrl, rawUrl, durationStr, uploader, title] = parts;
+    const targetUrl =
+      webpageUrl && webpageUrl.startsWith('http')
+        ? webpageUrl
+        : rawUrl && rawUrl.startsWith('http')
+        ? rawUrl
+        : null;
+    if (!targetUrl || seenUrls.has(targetUrl)) continue;
+    seenUrls.add(targetUrl);
+
+    const duration = parseFloat(durationStr);
+    candidates.push({
+      extractor: extractor || '',
+      id: id || '',
+      webpageUrl: targetUrl,
+      duration: isNaN(duration) ? 0 : duration,
+      uploader: uploader && uploader !== 'NA' ? uploader : '',
+      title: title && title !== 'NA' ? title : ''
+    });
+  }
+
+  return candidates;
 }
 
 function buildRejectTitleRegex(rawTitle) {
@@ -187,7 +647,11 @@ function buildRejectTitleRegex(rawTitle) {
     'vocal cover',
     'bass cover',
     'acapella',
-    'acappella'
+    'acappella',
+    'jukebox',
+    'bornagen',
+    'hoodtrap',
+    'mylancore'
   ];
   if (!lower.includes('remix')) {
     banned.push('remix', 'bootleg', 'mashup', 'flip', 'rework');
@@ -202,8 +666,8 @@ function buildRejectTitleRegex(rawTitle) {
 
 function runYtDlpAttempt(target, outputTemplate, options, onProgress) {
   const {
-    isSearchPool = true,
-    minDuration = 60,
+    isSearchPool = false,
+    minDuration = 55,
     maxDuration = 900,
     rejectTitleRegex = null
   } = options || {};
@@ -212,6 +676,7 @@ function runYtDlpAttempt(target, outputTemplate, options, onProgress) {
     // Transparent VBR compression (LAME -V 5 ~128kbps VBR + 44.1kHz joint stereo at compression_level 0):
     // Matches the native 128kbps YouTube/SoundCloud source fidelity with zero audible loss while saving ~60% disk space (~2.4-3MB per track instead of ~8MB)
     const ytdlpArgs = [
+      '-f', 'bestaudio/best',
       '-x',
       '--audio-format', 'mp3',
       '--audio-quality', '5',
@@ -220,6 +685,8 @@ function runYtDlpAttempt(target, outputTemplate, options, onProgress) {
       '--restrict-filenames',
       '--no-cache-dir',
       '--ignore-errors',
+      '--no-warnings',
+      '--js-runtimes', 'node',
       '--socket-timeout', '15',
       '--newline',
       '-o', outputTemplate
@@ -291,7 +758,7 @@ function runYtDlpAttempt(target, outputTemplate, options, onProgress) {
   });
 }
 
-function findAndValidateDownloadedMp3(downloadsDir, baseSlug, expectedMp3Path, artistTokens, requireArtistMatch) {
+function finalizeDownloadedMp3(downloadsDir, baseSlug, expectedMp3Path) {
   try {
     const files = fs.readdirSync(downloadsDir);
     const candidateName = files.find(
@@ -302,25 +769,11 @@ function findAndValidateDownloadedMp3(downloadsDir, baseSlug, expectedMp3Path, a
     }
     const candidatePath = path.join(downloadsDir, candidateName);
     const stat = fs.statSync(candidatePath);
-    if (stat.size <= 400 * 1024) {
+    if (stat.size <= 380 * 1024) {
       try {
         fs.unlinkSync(candidatePath);
       } catch {}
       return false;
-    }
-
-    if (requireArtistMatch && artistTokens.length > 0) {
-      const metaPart = candidateName
-        .slice(baseSlug.length + 2)
-        .toLowerCase()
-        .replace(/[^a-z0-9]+/g, ' ');
-      const matchesArtist = artistTokens.some(tok => metaPart.includes(tok));
-      if (!matchesArtist) {
-        try {
-          fs.unlinkSync(candidatePath);
-        } catch {}
-        return false;
-      }
     }
 
     if (fs.existsSync(expectedMp3Path)) {
@@ -348,16 +801,15 @@ async function runExtractionPipeline(downloadId, rawQuery, downloadsDir, baseSlu
 
   const updateProg = p => {
     const cur = activeDownloads.get(downloadId);
-    if (cur) cur.progress = Math.max(cur.progress || 5, Math.min(98, p));
+    if (cur) cur.progress = Math.max(cur.progress || 8, Math.min(98, p));
   };
 
-  let targets = [];
   const rawTitle = String(item.title || rawQuery || '').trim();
   const cleanTitle = stripRemasterNoise(rawTitle) || rawTitle;
   const primaryArtist = cleanArtistName(item.artist);
-  const artistTokens = getArtistTokens(item.artist);
-  const expectedDurationSec = parseDurationToSec(item.duration);
   const rejectTitleRegex = buildRejectTitleRegex(rawTitle);
+
+  let targets = [];
 
   if (/^https?:\/\//i.test(rawQuery)) {
     if (!isAllowedMediaUrl(rawQuery)) {
@@ -365,15 +817,12 @@ async function runExtractionPipeline(downloadId, rawQuery, downloadsDir, baseSlu
       item.error = 'Dominio de URL no permitido.';
       return;
     }
-    targets = [{ url: rawQuery, isSearchPool: false, requireArtistMatch: false }];
+    targets = [{ url: rawQuery, isSearchPool: false }];
   } else {
-    // IMPORTANT: Strip remaster noise ONLY from title, never from the artist!
     const artistAndCleanTitle = sanitizeSearchQuery(
       primaryArtist ? `${primaryArtist} - ${cleanTitle}` : cleanTitle
     );
-    const artistAndRawTitle = sanitizeSearchQuery(
-      primaryArtist ? `${primaryArtist} - ${rawTitle}` : rawTitle
-    );
+    const cleanTitleOnly = sanitizeSearchQuery(cleanTitle);
 
     if (!artistAndCleanTitle) {
       item.status = 'error';
@@ -381,84 +830,72 @@ async function runExtractionPipeline(downloadId, rawQuery, downloadsDir, baseSlu
       return;
     }
 
-    // 1. If we know the track's exact duration (e.g. 3:09 = 189s from Spotify CSV),
-    // first search with a tight duration window (±10s) + artist verification + cover/remix rejection
-    if (expectedDurationSec && expectedDurationSec >= 65) {
-      const tightMin = Math.max(55, expectedDurationSec - 10);
-      const tightMax = expectedDurationSec + 10;
+    // Step 0: Resolve canonical track duration (from Spotify CSV metadata or iTunes/Deezer API)
+    const expectedDurationSec = await resolveExpectedDurationSec(
+      item.duration,
+      cleanTitle,
+      primaryArtist
+    );
+    updateProg(14);
+
+    // Step 1: Fast candidate discovery across SoundCloud (top 25) + YouTube (top 5)
+    const discoveryQueries = [
+      `scsearch25:${artistAndCleanTitle}`,
+      `ytsearch5:${artistAndCleanTitle} official audio`
+    ];
+    if (primaryArtist && cleanTitleOnly && cleanTitleOnly.length >= 3) {
+      discoveryQueries.push(`scsearch10:${cleanTitleOnly}`);
+    }
+
+    const ctx = buildCandidateContext(rawTitle, cleanTitle, item.artist, expectedDurationSec);
+    const rawCandidates = await discoverCandidatesFromSearch(discoveryQueries);
+    const scored = rawCandidates
+      .map(c => ({ ...c, score: scoreCandidate(c, ctx) }))
+      .filter(c => c.score >= 0)
+      .sort((a, b) => b.score - a.score);
+
+    updateProg(22);
+
+    // Take up to the top 4 verified direct track URLs
+    for (const best of scored.slice(0, 4)) {
       targets.push({
-        url: `scsearch10:${artistAndCleanTitle}`,
-        isSearchPool: true,
-        minDuration: tightMin,
-        maxDuration: tightMax,
-        rejectTitleRegex,
-        requireArtistMatch: artistTokens.length > 0
-      });
-      targets.push({
-        url: `ytsearch5:${artistAndCleanTitle} official audio`,
-        isSearchPool: true,
-        minDuration: Math.max(55, expectedDurationSec - 15),
-        maxDuration: expectedDurationSec + 15,
-        rejectTitleRegex,
-        requireArtistMatch: artistTokens.length > 0
+        url: best.webpageUrl,
+        isSearchPool: false
       });
     }
 
-    // 2. Standard duration window (60s-900s), still requiring artist match and rejecting covers/remixes
+    // Fallback search pools if direct URLs all failed (e.g. DRM or geo-restriction on every top candidate)
+    const minDur = expectedDurationSec ? Math.max(45, expectedDurationSec - 15) : 55;
+    const maxDur = expectedDurationSec ? expectedDurationSec + 15 : 900;
     targets.push({
-      url: `scsearch10:${artistAndCleanTitle}`,
+      url: `scsearch15:${artistAndCleanTitle}`,
       isSearchPool: true,
-      minDuration: 60,
-      maxDuration: 900,
-      rejectTitleRegex,
-      requireArtistMatch: artistTokens.length > 0
+      minDuration: minDur,
+      maxDuration: maxDur,
+      rejectTitleRegex
     });
-
-    if (artistAndRawTitle.toLowerCase() !== artistAndCleanTitle.toLowerCase()) {
-      targets.push({
-        url: `scsearch10:${artistAndRawTitle}`,
-        isSearchPool: true,
-        minDuration: 60,
-        maxDuration: 900,
-        rejectTitleRegex,
-        requireArtistMatch: artistTokens.length > 0
-      });
-    }
-
     targets.push({
       url: `ytsearch5:${artistAndCleanTitle} official audio`,
       isSearchPool: true,
-      minDuration: 60,
-      maxDuration: 900,
-      rejectTitleRegex,
-      requireArtistMatch: false
+      minDuration: minDur,
+      maxDuration: maxDur,
+      rejectTitleRegex
     });
-
-    // 3. Final fallback for obscure archive/reupload tracks where the uploader name differs from the Spotify artist
-    if (artistTokens.length > 0) {
-      targets.push({
-        url: `scsearch5:${artistAndCleanTitle}`,
-        isSearchPool: true,
-        minDuration: expectedDurationSec ? Math.max(55, expectedDurationSec - 20) : 60,
-        maxDuration: expectedDurationSec ? expectedDurationSec + 20 : 900,
-        rejectTitleRegex,
-        requireArtistMatch: false
-      });
-    }
+    targets.push({
+      url: `bilisearch3:${artistAndCleanTitle}`,
+      isSearchPool: true,
+      minDuration: minDur,
+      maxDuration: maxDur,
+      rejectTitleRegex
+    });
   }
 
   for (const t of targets) {
     await runYtDlpAttempt(t.url, tempOutputTemplate, t, updateProg);
-    const valid = findAndValidateDownloadedMp3(
-      downloadsDir,
-      baseSlug,
-      expectedMp3Path,
-      artistTokens,
-      t.requireArtistMatch
-    );
+    const valid = finalizeDownloadedMp3(downloadsDir, baseSlug, expectedMp3Path);
     if (valid && fs.existsSync(expectedMp3Path)) {
       const stat = fs.statSync(expectedMp3Path);
-      if (stat.size > 400 * 1024) {
+      if (stat.size > 380 * 1024) {
         enforceStorageQuota();
         scheduleFileCleanup(expectedMp3Path, 90000);
         item.status = 'ready';
@@ -514,8 +951,10 @@ export async function POST(request) {
       filename: null
     });
 
-    enqueueExtraction(() =>
-      runExtractionPipeline(downloadId, rawQuery, downloadsDir, baseSlug)
+    const isPriority = Boolean(data.priority);
+    enqueueExtraction(
+      () => runExtractionPipeline(downloadId, rawQuery, downloadsDir, baseSlug),
+      isPriority
     ).catch(err => {
       const item = activeDownloads.get(downloadId);
       if (item) {
@@ -524,7 +963,11 @@ export async function POST(request) {
       }
     });
 
-    return NextResponse.json({ ok: true, downloadId });
+    return NextResponse.json({
+      ok: true,
+      downloadId,
+      pool: getPoolStatus()
+    });
   } catch (err) {
     return NextResponse.json({ error: err.message }, { status: 500 });
   }
@@ -535,13 +978,16 @@ export async function GET(request) {
   const id = searchParams.get('id');
 
   if (!id) {
-    return NextResponse.json({ error: 'Falta id de descarga' }, { status: 400 });
+    return NextResponse.json({ pool: getPoolStatus() });
   }
 
   const item = activeDownloads.get(id);
   if (!item) {
-    return NextResponse.json({ error: 'Descarga no encontrada' }, { status: 404 });
+    return NextResponse.json({ error: 'Descarga no encontrada', pool: getPoolStatus() }, { status: 404 });
   }
 
-  return NextResponse.json(item);
+  return NextResponse.json({
+    ...item,
+    pool: getPoolStatus()
+  });
 }

@@ -725,6 +725,129 @@ textarea {
   color: var(--paper);
 }
 
+/* ==================== STICKY SUBHEADERS (EXPLORE & LIBRARY) ==================== */
+.tab-section {
+  overflow-anchor: none;
+}
+
+.sticky-top-zone {
+  position: sticky;
+  top: calc(var(--header-h) + env(safe-area-inset-top));
+  z-index: 24;
+  container-type: scroll-state;
+  container-name: page-subhead;
+  margin: -12px calc(-1 * var(--gutter)) 12px;
+}
+
+.sticky-top-inner {
+  background: var(--bg);
+  padding: 10px var(--gutter) 10px;
+  border-bottom: 1px solid transparent;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.sticky-top-inner .chip-Strip,
+.sticky-top-inner .library-switcher {
+  margin-bottom: 8px;
+}
+
+.sticky-top-inner .playlist-header {
+  padding: 11px 14px;
+  margin-bottom: 8px;
+}
+
+.sticky-top-inner .section-bar {
+  margin: 2px 0 0;
+}
+
+.sticky-top-inner .library-search-wrap {
+  margin-bottom: 0;
+}
+
+.sticky-top-inner > .search-bar {
+  margin-bottom: 8px;
+}
+
+@container page-subhead scroll-state(stuck: top) {
+  .sticky-top-inner {
+    border-bottom-color: var(--header-border);
+    box-shadow: 0 10px 24px rgba(0, 0, 0, 0.16);
+  }
+}
+
+.sim-download-bar {
+  margin-top: 8px;
+  padding: 8px 11px;
+  border-radius: 12px;
+  background: var(--accent-soft);
+  border: 1px solid var(--border-strong);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.sim-download-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.sim-download-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 0.76rem;
+  font-weight: 800;
+  color: var(--accent);
+}
+
+.sim-download-summary {
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: var(--muted);
+}
+
+.sim-download-slots {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.sim-download-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  max-width: 100%;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  font-size: 0.72rem;
+  font-weight: 600;
+  color: var(--fg);
+}
+
+.sim-download-chip-title {
+  max-width: 165px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.sim-download-chip-pct {
+  font-weight: 800;
+  color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+
+@media (min-width: 720px) {
+  .sticky-top-zone {
+    top: 88px;
+  }
+}
+
 /* ==================== SECTION HEADERS & PLAYLIST HEADER ==================== */
 .section-bar {
   display: flex;
