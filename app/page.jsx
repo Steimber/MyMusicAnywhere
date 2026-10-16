@@ -3,6 +3,8 @@
 import { useState, useEffect, useRef } from 'react';
 
 const AUDIO_CACHE_NAME = 'my-music-offline-audio-v1';
+const SHELL_CACHE_NAME = 'mymusic-shell-v3';
+const USER_STORAGE_KEY = 'mma_cached_user_v1';
 
 const DISCOVERY_SEEDS = [
   { term: 'Pop Latino Hits', label: 'Pop Latino' },
@@ -19,6 +21,7 @@ export default function HomePage() {
   // Auth state
   const [user, setUser] = useState(null);
   const [authChecked, setAuthChecked] = useState(false);
+  const [isOffline, setIsOffline] = useState(false);
   const [authMode, setAuthMode] = useState('login'); // 'login' | 'register'
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
@@ -73,36 +76,117 @@ export default function HomePage() {
 
   const currentTrack = currentIndex >= 0 && currentIndex < queue.length ? queue[currentIndex] : null;
 
-  // Check session on mount
-  useEffect(() => {
-    fetch('/api/auth')
-      .then(r => r.json())
-      .then(data => {
-        if (data.user) {
-          setUser(data.user);
-        }
-      })
-      .catch(() => {})
-      .finally(() => setAuthChecked(true));
-
+  // Warm PWA App Shell cache so reopening the app after closing it works 100% offline
+  async function warmAppShellCache() {
+    if (typeof window === 'undefined' || !('caches' in window)) return;
     try {
-      const savedLikes = localStorage.getItem('mma_liked_tracks_v1');
-      if (savedLikes) setLikedTracks(JSON.parse(savedLikes));
+      const cache = await caches.open(SHELL_CACHE_NAME);
+      const urlsToWarm = new Set(['/', '/manifest.json', '/icon.svg']);
+      document
+        .querySelectorAll('script[src], link[rel="stylesheet"][href]')
+        .forEach(el => {
+          const rawUrl = el.src || el.href;
+          if (rawUrl && rawUrl.startsWith(window.location.origin)) {
+            urlsToWarm.add(rawUrl);
+          }
+        });
+      for (const u of urlsToWarm) {
+        try {
+          const existing = await cache.match(u);
+          if (!existing) {
+            const resp = await fetch(u, { cache: 'force-cache' });
+            if (resp && resp.ok) await cache.put(u, resp);
+          }
+        } catch {}
+      }
+    } catch {}
+  }
+
+  // Check session on mount (with instant offline fallback so reopening without internet never blocks)
+  useEffect(() => {
+    let cachedUser = null;
+    try {
+      const rawUser = localStorage.getItem(USER_STORAGE_KEY);
+      if (rawUser) {
+        cachedUser = JSON.parse(rawUser);
+        setUser(cachedUser);
+        setAuthChecked(true);
+      }
     } catch {}
 
+    let savedLikesList = [];
+    try {
+      const savedLikes = localStorage.getItem('mma_liked_tracks_v1');
+      if (savedLikes) {
+        savedLikesList = JSON.parse(savedLikes);
+        setLikedTracks(savedLikesList);
+      }
+    } catch {}
+
+    const offlineNow = typeof navigator !== 'undefined' && !navigator.onLine;
+    setIsOffline(offlineNow);
+    if (offlineNow) {
+      setActiveTab('library');
+      if (!cachedUser) {
+        setUser({ username: 'Modo Offline', is_admin: false, offline: true });
+      }
+      setAuthChecked(true);
+    }
+
+    fetch('/api/auth')
+      .then(async r => {
+        const data = await r.json().catch(() => ({}));
+        if (r.ok && data.user) {
+          setUser(data.user);
+          try {
+            localStorage.setItem(USER_STORAGE_KEY, JSON.stringify(data.user));
+          } catch {}
+        } else if (r.status === 401 || (r.ok && !data.user)) {
+          // Server explicitly confirmed no active session while online
+          setUser(null);
+          try {
+            localStorage.removeItem(USER_STORAGE_KEY);
+          } catch {}
+        }
+      })
+      .catch(() => {
+        // Network error / offline: keep cached user or enter Offline Player mode
+        setIsOffline(true);
+        setActiveTab('library');
+        setUser(prev => prev || cachedUser || { username: 'Modo Offline', is_admin: false, offline: true });
+      })
+      .finally(() => setAuthChecked(true));
+
     refreshOfflineCacheList();
+    warmAppShellCache();
+
+    const handleOnline = () => setIsOffline(false);
+    const handleOffline = () => {
+      setIsOffline(true);
+      setActiveTab('library');
+    };
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
 
     const handleBeforeInstall = e => {
       e.preventDefault();
       setDeferredPrompt(e);
     };
     window.addEventListener('beforeinstallprompt', handleBeforeInstall);
-    return () => window.removeEventListener('beforeinstallprompt', handleBeforeInstall);
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+      window.removeEventListener('beforeinstallprompt', handleBeforeInstall);
+    };
   }, []);
 
   // Load initial catalog (recommended by liked genres, or random if none) & server files once logged in
   useEffect(() => {
     if (!user) return;
+    if (typeof navigator !== 'undefined' && !navigator.onLine) {
+      setActiveTab('library');
+      return;
+    }
     fetchLibraryFiles();
     let initialLikes = likedTracks;
     try {
@@ -232,6 +316,9 @@ export default function HomePage() {
         setAuthError(data.error || 'Error de autenticación');
       } else {
         setUser(data.user);
+        try {
+          localStorage.setItem(USER_STORAGE_KEY, JSON.stringify(data.user));
+        } catch {}
         setPassword('');
         setInviteCode('');
       }
@@ -243,11 +330,16 @@ export default function HomePage() {
   }
 
   async function handleLogout() {
-    await fetch('/api/auth', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ action: 'logout' })
-    });
+    try {
+      await fetch('/api/auth', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'logout' })
+      });
+    } catch {}
+    try {
+      localStorage.removeItem(USER_STORAGE_KEY);
+    } catch {}
     if (audioRef.current) audioRef.current.pause();
     setUser(null);
     setAccountOpen(false);
@@ -359,11 +451,54 @@ export default function HomePage() {
         const cache = await caches.open(AUDIO_CACHE_NAME);
         const keys = await cache.keys();
         const map = {};
+        const cachedFilenames = [];
         for (const req of keys) {
           const url = new URL(req.url);
-          map[url.pathname + url.search] = true;
+          const rel = url.pathname + url.search;
+          map[rel] = true;
+          const fileParam = url.searchParams.get('file');
+          if (fileParam) {
+            cachedFilenames.push({ filename: fileParam, streamUrl: rel });
+          }
         }
         setOfflineUrls(map);
+
+        if (cachedFilenames.length > 0) {
+          setLikedTracks(prev => {
+            let changed = false;
+            const next = [...prev];
+            for (const item of cachedFilenames) {
+              const exists = next.some(
+                t => t.filename === item.filename || t.streamUrl === item.streamUrl
+              );
+              if (!exists) {
+                const cleanTitle = item.filename
+                  .replace(/_\d+\.mp3$/i, '')
+                  .replace(/\.mp3$/i, '')
+                  .replace(/_/g, ' ');
+                next.unshift({
+                  id: `offline_${item.filename}`,
+                  title: cleanTitle,
+                  artist: 'Guardado en dispositivo',
+                  album: 'Offline PWA',
+                  genre: 'Offline',
+                  artwork: '/icon.svg',
+                  filename: item.filename,
+                  streamUrl: item.streamUrl,
+                  addedAt: Date.now()
+                });
+                changed = true;
+              }
+            }
+            if (changed) {
+              try {
+                localStorage.setItem('mma_liked_tracks_v1', JSON.stringify(next));
+              } catch {}
+              return next;
+            }
+            return prev;
+          });
+        }
       } catch {}
     }
     if (navigator.storage && navigator.storage.estimate) {
@@ -405,7 +540,8 @@ export default function HomePage() {
     if (streamUrl && 'caches' in window) {
       try {
         const cache = await caches.open(AUDIO_CACHE_NAME);
-        const cachedResp = await cache.match(streamUrl);
+        const fullUrl = new URL(streamUrl, window.location.origin).href;
+        const cachedResp = (await cache.match(streamUrl)) || (await cache.match(fullUrl));
         if (cachedResp) {
           const blob = await cachedResp.blob();
           return URL.createObjectURL(blob);
@@ -902,6 +1038,15 @@ export default function HomePage() {
       </header>
 
       <main className="shell">
+        {isOffline && (
+          <div className="storage-banner" style={{ marginBottom: 14 }}>
+            <span>
+              <strong>⚡ Modo sin conexión activo:</strong> Reproduciendo las canciones descargadas en el caché de tu dispositivo.
+            </span>
+            <span className="badge mint">Offline Ready</span>
+          </div>
+        )}
+
         {/* ==================== TAB 1: EXPLORAR ==================== */}
         {activeTab === 'explore' && (
           <section>
@@ -1002,7 +1147,14 @@ export default function HomePage() {
                           onClick={() => playFromList(results, idx)}
                           title="Reproducir pista"
                         >
-                          <img src={track.artwork} alt={track.title} loading="lazy" />
+                          <img
+                              src={track.artwork || '/icon.svg'}
+                              alt={track.title}
+                              loading="lazy"
+                              onError={e => {
+                                e.currentTarget.src = '/icon.svg';
+                              }}
+                            />
                           <div className="artwork-play-overlay">
                             {isCurrent && isPlaying ? '⏸' : '▶'}
                           </div>
@@ -1344,7 +1496,14 @@ export default function HomePage() {
                             className="artwork-wrap"
                             onClick={() => playFromList(likedTracks, idx)}
                           >
-                            <img src={track.artwork} alt={track.title} loading="lazy" />
+                            <img
+                              src={track.artwork || '/icon.svg'}
+                              alt={track.title}
+                              loading="lazy"
+                              onError={e => {
+                                e.currentTarget.src = '/icon.svg';
+                              }}
+                            />
                             <div className="artwork-play-overlay">
                               {isCurrent && isPlaying ? '⏸' : '▶'}
                             </div>
