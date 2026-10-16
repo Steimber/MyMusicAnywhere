@@ -27,7 +27,8 @@ const ALLOWED_MEDIA_HOSTS = new Set([
 ]);
 
 const ALLOWED_PREVIEW_HOSTS = new Set([
-  'audio-ssl.itunes.apple.com'
+  'audio-ssl.itunes.apple.com',
+  'p.scdn.co'
 ]);
 
 export function isAllowedMediaUrl(rawUrl) {

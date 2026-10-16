@@ -44,6 +44,9 @@ export default function HomePage() {
   const [offlineUrls, setOfflineUrls] = useState({});
   const [deviceQuota, setDeviceQuota] = useState(null);
   const [syncingAll, setSyncingAll] = useState(false);
+  const [spotifyUrl, setSpotifyUrl] = useState('');
+  const [spotifyBusy, setSpotifyBusy] = useState(false);
+  const [spotifyMsg, setSpotifyMsg] = useState({ type: '', text: '' });
 
   // Admin Panel state
   const [adminData, setAdminData] = useState({ users: [], invites: [], storage: null });
@@ -1080,6 +1083,175 @@ export default function HomePage() {
               <span className="badge mint">
                 {Object.keys(offlineUrls).length} pistas offline
               </span>
+            </div>
+
+            <div className="card" style={{ marginBottom: 14 }}>
+              <div className="item-head" style={{ marginBottom: 10 }}>
+                <div>
+                  <div className="item-title">Importar desde Spotify</div>
+                  <div className="item-sub">
+                    Pegá el enlace de cualquier playlist o álbum público de Spotify, o subí un CSV de Exportify.
+                  </div>
+                </div>
+                <span className="badge mint">Spotify Sync</span>
+              </div>
+
+              {spotifyMsg.text && (
+                <div className={`alert ${spotifyMsg.type === 'err' ? 'err' : 'ok'}`}>
+                  {spotifyMsg.text}
+                </div>
+              )}
+
+              <form
+                className="search-bar"
+                style={{ marginBottom: 8 }}
+                onSubmit={async e => {
+                  e.preventDefault();
+                  if (!spotifyUrl.trim() || spotifyBusy) return;
+                  setSpotifyBusy(true);
+                  setSpotifyMsg({ type: '', text: '' });
+                  try {
+                    const res = await fetch('/api/spotify', {
+                      method: 'POST',
+                      headers: { 'Content-Type': 'application/json' },
+                      body: JSON.stringify({ url: spotifyUrl.trim() })
+                    });
+                    const data = await res.json();
+                    if (!res.ok) {
+                      setSpotifyMsg({
+                        type: 'err',
+                        text: data.error || 'No se pudo importar desde Spotify.'
+                      });
+                    } else {
+                      const existingIds = new Set(likedTracks.map(t => String(t.id)));
+                      const existingKeys = new Set(
+                        likedTracks.map(t => `${t.title?.toLowerCase()}|${t.artist?.toLowerCase()}`)
+                      );
+                      const fresh = (data.tracks || []).filter(
+                        t =>
+                          !existingIds.has(String(t.id)) &&
+                          !existingKeys.has(`${t.title?.toLowerCase()}|${t.artist?.toLowerCase()}`)
+                      );
+                      persistLikes([...fresh, ...likedTracks]);
+                      setSpotifyUrl('');
+                      setSpotifyMsg({
+                        type: 'ok',
+                        text: `✓ Se agregaron ${fresh.length} canciones de «${data.playlistName}» a tu librería.`
+                      });
+                    }
+                  } catch {
+                    setSpotifyMsg({ type: 'err', text: 'Error de red al importar playlist.' });
+                  } finally {
+                    setSpotifyBusy(false);
+                  }
+                }}
+              >
+                <input
+                  type="url"
+                  className="search-input"
+                  placeholder="https://open.spotify.com/playlist/..."
+                  value={spotifyUrl}
+                  onChange={e => setSpotifyUrl(e.target.value)}
+                  required
+                />
+                <button type="submit" className="btn sm" disabled={spotifyBusy}>
+                  {spotifyBusy ? 'Importando…' : 'Importar link'}
+                </button>
+              </form>
+
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: 8, fontSize: 12, color: 'var(--muted)' }}>
+                <span>
+                  ¿Tus «Me gusta» privados? Exportalos en{' '}
+                  <a href="https://exportify.net" target="_blank" rel="noreferrer">
+                    exportify.net
+                  </a>{' '}
+                  y subí el <code>.csv</code>:
+                </span>
+                <label className="btn secondary sm" style={{ cursor: 'pointer' }}>
+                  📂 Subir CSV de Spotify
+                  <input
+                    type="file"
+                    accept=".csv,text/csv"
+                    style={{ display: 'none' }}
+                    onChange={async e => {
+                      const file = e.target.files?.[0];
+                      if (!file) return;
+                      const text = await file.text();
+                      const lines = text.split(/\r?\n/).filter(l => l.trim());
+                      if (lines.length < 2) return;
+
+                      const parseCsvRow = row => {
+                        const cols = [];
+                        let cur = '';
+                        let inQuotes = false;
+                        for (let i = 0; i < row.length; i++) {
+                          const ch = row[i];
+                          if (ch === '"') {
+                            inQuotes = !inQuotes;
+                          } else if (ch === ',' && !inQuotes) {
+                            cols.push(cur.trim());
+                            cur = '';
+                          } else {
+                            cur += ch;
+                          }
+                        }
+                        cols.push(cur.trim());
+                        return cols;
+                      };
+
+                      const headers = parseCsvRow(lines[0]).map(h => h.toLowerCase());
+                      const titleIdx = headers.findIndex(
+                        h => h.includes('track name') || h.includes('canción') || h === 'title'
+                      );
+                      const artistIdx = headers.findIndex(
+                        h => h.includes('artist name') || h.includes('artista') || h === 'artist'
+                      );
+                      const albumIdx = headers.findIndex(h => h.includes('album'));
+                      const genreIdx = headers.findIndex(h => h.includes('genre'));
+
+                      if (titleIdx === -1) {
+                        setSpotifyMsg({
+                          type: 'err',
+                          text: 'No se encontró la columna "Track Name" en el CSV.'
+                        });
+                        return;
+                      }
+
+                      const imported = [];
+                      const existingKeys = new Set(
+                        likedTracks.map(t => `${t.title?.toLowerCase()}|${t.artist?.toLowerCase()}`)
+                      );
+
+                      for (let i = 1; i < lines.length; i++) {
+                        const cols = parseCsvRow(lines[i]);
+                        const title = cols[titleIdx];
+                        const artist = artistIdx >= 0 ? cols[artistIdx] : '';
+                        if (!title) continue;
+                        const k = `${title.toLowerCase()}|${artist.toLowerCase()}`;
+                        if (existingKeys.has(k)) continue;
+                        existingKeys.add(k);
+                        imported.push({
+                          id: `csv_${Date.now()}_${i}`,
+                          title,
+                          artist: artist.replace(/;/g, ', '),
+                          album: albumIdx >= 0 ? cols[albumIdx] : 'Spotify CSV',
+                          genre: genreIdx >= 0 && cols[genreIdx] ? cols[genreIdx].split(',')[0] : 'Spotify',
+                          artwork: '/icon.svg',
+                          previewUrl: null,
+                          duration: '—'
+                        });
+                      }
+
+                      persistLikes([...imported, ...likedTracks]);
+                      setSpotifyMsg({
+                        type: 'ok',
+                        text: `✓ Se importaron ${imported.length} canciones desde el archivo CSV.`
+                      });
+                      e.target.value = '';
+                    }}
+                  />
+                </label>
+              </div>
             </div>
 
             <div className="toolbar">
