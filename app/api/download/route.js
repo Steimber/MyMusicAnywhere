@@ -26,11 +26,6 @@ const ALLOWED_MEDIA_HOSTS = new Set([
   'on.soundcloud.com'
 ]);
 
-const ALLOWED_PREVIEW_HOSTS = new Set([
-  'audio-ssl.itunes.apple.com',
-  'p.scdn.co'
-]);
-
 export function isAllowedMediaUrl(rawUrl) {
   try {
     const parsed = new URL(rawUrl);
@@ -39,23 +34,6 @@ export function isAllowedMediaUrl(rawUrl) {
     }
     const host = parsed.hostname.toLowerCase();
     return ALLOWED_MEDIA_HOSTS.has(host);
-  } catch {
-    return false;
-  }
-}
-
-export function isAllowedPreviewUrl(rawUrl) {
-  try {
-    const parsed = new URL(rawUrl);
-    if (parsed.protocol !== 'https:' || parsed.port !== '' || parsed.username || parsed.password) {
-      return false;
-    }
-    const host = parsed.hostname.toLowerCase();
-    if (ALLOWED_PREVIEW_HOSTS.has(host)) return true;
-    if (host.endsWith('.mzstatic.com') && host.length > '.mzstatic.com'.length) {
-      return /^[a-z0-9.-]+\.mzstatic\.com$/.test(host);
-    }
-    return false;
   } catch {
     return false;
   }
@@ -91,18 +69,25 @@ function sanitizeSlug(text) {
   return (clean || 'track').slice(0, 60);
 }
 
-function runYtDlpAttempt(target, outputTemplate, onProgress) {
+function runYtDlpAttempt(target, outputTemplate, isSearchPool, onProgress) {
   return new Promise(resolve => {
     const ytdlpArgs = [
       '-x',
       '--audio-format', 'mp3',
       '--audio-quality', '0',
       '--embed-metadata',
-      '--no-playlist',
       '--no-cache-dir',
       '--newline',
       '-o', outputTemplate
     ];
+
+    if (isSearchPool) {
+      // Skip 30-second SoundCloud Go+ previews and overly long mixes (>15 min)
+      ytdlpArgs.push('--match-filter', 'duration > 65 & duration < 900');
+      ytdlpArgs.push('--max-downloads', '1');
+    } else {
+      ytdlpArgs.push('--no-playlist');
+    }
 
     if (process.env.FFMPEG_BIN?.trim()) {
       ytdlpArgs.push('--ffmpeg-location', process.env.FFMPEG_BIN.trim());
@@ -138,12 +123,13 @@ function runYtDlpAttempt(target, outputTemplate, onProgress) {
     });
 
     child.on('close', code => {
-      resolve({ ok: code === 0, code, error: stderrText.slice(-300) });
+      // Exit code 101 in yt-dlp means --max-downloads limit was reached after downloading the 1st valid full song
+      resolve({ ok: code === 0 || code === 101, code, error: stderrText.slice(-300) });
     });
   });
 }
 
-async function runExtractionPipeline(downloadId, rawQuery, previewUrl, downloadsDir, baseSlug) {
+async function runExtractionPipeline(downloadId, rawQuery, downloadsDir, baseSlug) {
   const item = activeDownloads.get(downloadId);
   if (!item) return;
 
@@ -163,7 +149,7 @@ async function runExtractionPipeline(downloadId, rawQuery, previewUrl, downloads
       item.error = 'Dominio de URL no permitido.';
       return;
     }
-    targets = [rawQuery];
+    targets = [{ url: rawQuery, isSearchPool: false }];
   } else {
     const safeQuery = sanitizeSearchQuery(rawQuery);
     if (!safeQuery) {
@@ -172,39 +158,34 @@ async function runExtractionPipeline(downloadId, rawQuery, previewUrl, downloads
       return;
     }
     targets = [
-      `scsearch1:${safeQuery}`,
-      `ytsearch1:${safeQuery}`
+      { url: `scsearch8:${safeQuery}`, isSearchPool: true },
+      { url: `ytsearch5:${safeQuery}`, isSearchPool: true }
     ];
   }
 
-  for (const target of targets) {
-    const res = await runYtDlpAttempt(target, outputTemplate, updateProg);
+  for (const t of targets) {
+    const res = await runYtDlpAttempt(t.url, outputTemplate, t.isSearchPool, updateProg);
     if (res.ok && fs.existsSync(expectedMp3Path)) {
-      enforceStorageQuota();
-      scheduleFileCleanup(expectedMp3Path, 90000);
-      item.status = 'ready';
-      item.progress = 100;
-      item.filename = expectedMp3Name;
-      return;
-    }
-  }
-
-  // Final fallback: only allow verified Apple Music / iTunes CDN preview URLs
-  if (previewUrl && isAllowedPreviewUrl(previewUrl)) {
-    const res = await runYtDlpAttempt(previewUrl, outputTemplate, updateProg);
-    if (res.ok && fs.existsSync(expectedMp3Path)) {
-      enforceStorageQuota();
-      scheduleFileCleanup(expectedMp3Path, 90000);
-      item.status = 'ready';
-      item.progress = 100;
-      item.filename = expectedMp3Name;
-      return;
+      const stat = fs.statSync(expectedMp3Path);
+      // Verify it's a real full track (> 1.1 MB) and not a 29-second preview snippet
+      if (stat.size > 1100 * 1024) {
+        enforceStorageQuota();
+        scheduleFileCleanup(expectedMp3Path, 90000);
+        item.status = 'ready';
+        item.progress = 100;
+        item.filename = expectedMp3Name;
+        return;
+      } else {
+        try {
+          fs.unlinkSync(expectedMp3Path);
+        } catch {}
+      }
     }
   }
 
   enforceStorageQuota();
   item.status = 'error';
-  item.error = 'No se pudo extraer el MP3 en el servidor.';
+  item.error = 'No se encontró versión completa de esta pista.';
 }
 
 export async function POST(request) {
@@ -228,13 +209,6 @@ export async function POST(request) {
       );
     }
 
-    if (data.previewUrl && !isAllowedPreviewUrl(data.previewUrl)) {
-      return NextResponse.json(
-        { error: 'Dominio de previewUrl no permitido.' },
-        { status: 400 }
-      );
-    }
-
     const downloadsDir = getDownloadsDir();
     const downloadId = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
     const baseSlug = `${sanitizeSlug(`${data.artist || ''} ${data.title || rawQuery}`)}_${downloadId}`;
@@ -249,7 +223,7 @@ export async function POST(request) {
       filename: null
     });
 
-    runExtractionPipeline(downloadId, rawQuery, data.previewUrl, downloadsDir, baseSlug).catch(err => {
+    runExtractionPipeline(downloadId, rawQuery, downloadsDir, baseSlug).catch(err => {
       const item = activeDownloads.get(downloadId);
       if (item) {
         item.status = 'error';

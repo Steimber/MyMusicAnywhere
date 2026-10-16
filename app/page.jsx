@@ -149,21 +149,41 @@ export default function HomePage() {
 
           if (data.status === 'ready' && data.filename) {
             const streamUrl = `/api/stream?file=${encodeURIComponent(data.filename)}`;
-            const downloadUrl = `/api/stream?file=${encodeURIComponent(data.filename)}&download=1`;
 
             const trackKey = Object.keys(downloads).find(k => downloads[k].downloadId === id);
             const likedMatch = likedTracks.find(t => String(t.id) === String(trackKey));
+            const resultMatch = results.find(t => String(t.id) === String(trackKey));
 
-            await saveUrlToOfflineCache(streamUrl, likedMatch ? likedMatch.id : data.filename);
+            await saveUrlToOfflineCache(streamUrl);
 
-            if (!savedDeviceIdsRef.current.has(id)) {
-              savedDeviceIdsRef.current.add(id);
-              triggerBrowserFileDownload(downloadUrl, data.filename);
-            }
+            setResults(prev =>
+              prev.map(t =>
+                String(t.id) === String(trackKey)
+                  ? { ...t, filename: data.filename, streamUrl }
+                  : t
+              )
+            );
 
             if (likedMatch) {
               updateLikedTrackFile(likedMatch.id, data.filename, streamUrl);
+            } else if (resultMatch && !savedDeviceIdsRef.current.has(id)) {
+              savedDeviceIdsRef.current.add(id);
+              const newEntry = {
+                ...resultMatch,
+                addedAt: Date.now(),
+                filename: data.filename,
+                streamUrl
+              };
+              setLikedTracks(prev => {
+                if (prev.some(t => String(t.id) === String(resultMatch.id))) return prev;
+                const updated = [newEntry, ...prev];
+                try {
+                  localStorage.setItem('mma_liked_tracks_v1', JSON.stringify(updated));
+                } catch {}
+                return updated;
+              });
             }
+
             fetchLibraryFiles();
             if (user?.is_admin) fetchAdminData();
           }
@@ -172,7 +192,7 @@ export default function HomePage() {
     }, 1400);
 
     return () => clearInterval(timer);
-  }, [downloads, likedTracks, user]);
+  }, [downloads, likedTracks, results, user]);
 
   // Manage audio playback when currentTrack changes
   useEffect(() => {
@@ -374,9 +394,13 @@ export default function HomePage() {
   }
 
   async function resolvePlayableSource(track) {
+    const dl = downloads[track.id];
+    const likedItem = likedTracks.find(t => String(t.id) === String(track.id));
+    const filename = track.filename || dl?.filename || likedItem?.filename;
     const streamUrl =
       track.streamUrl ||
-      (track.filename ? `/api/stream?file=${encodeURIComponent(track.filename)}` : null);
+      likedItem?.streamUrl ||
+      (filename ? `/api/stream?file=${encodeURIComponent(filename)}` : null);
 
     if (streamUrl && 'caches' in window) {
       try {
@@ -1006,13 +1030,17 @@ export default function HomePage() {
                             Extrayendo {Math.round(dl.progress || 0)}%
                           </span>
                         ) : dl?.status === 'ready' ? (
-                          <a
-                            href={`/api/stream?file=${encodeURIComponent(dl.filename)}&download=1`}
-                            download={dl.filename}
-                            className="btn secondary sm"
-                          >
-                            ⬇ Guardar MP3
-                          </a>
+                          <>
+                            <span className="badge mint">✓ Offline</span>
+                            <a
+                              href={`/api/stream?file=${encodeURIComponent(dl.filename)}&download=1`}
+                              download={dl.filename}
+                              className="btn secondary sm"
+                              title="Exportar archivo MP3 al teléfono o PC"
+                            >
+                              💾 Archivo
+                            </a>
+                          </>
                         ) : (
                           <button
                             type="button"
