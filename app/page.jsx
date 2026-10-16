@@ -439,8 +439,19 @@ export default function HomePage() {
   const audioRef = useRef(null);
   const accountRef = useRef(null);
   const shuffleStateRef = useRef({ order: [], pos: -1, queueLen: 0 });
+  const queueRef = useRef([]);
+  const currentIndexRef = useRef(-1);
+  const shuffleRef = useRef(false);
+  const repeatModeRef = useRef('off');
+  const blobUrlCacheRef = useRef(new Map());
+  const lastDirectPlayRef = useRef({ index: -1, id: '', src: '' });
   const wasOfflineRef = useRef(false);
   const probeInFlightRef = useRef(false);
+
+  queueRef.current = queue;
+  currentIndexRef.current = currentIndex;
+  shuffleRef.current = shuffle;
+  repeatModeRef.current = repeatMode;
 
   const currentTrack = currentIndex >= 0 && currentIndex < queue.length ? queue[currentIndex] : null;
 
@@ -673,6 +684,7 @@ export default function HomePage() {
     document.addEventListener('visibilitychange', handleVisibility);
 
     const probeTimer = setInterval(() => {
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
       verifyInternetConnection();
     }, 15000);
 
@@ -725,22 +737,105 @@ export default function HomePage() {
     return () => document.removeEventListener('mousedown', onDocClick);
   }, [accountOpen]);
 
-  // Manage audio playback when currentTrack changes
+  // Manage audio playback when currentTrack changes + pre-warm upcoming queue Blob URLs for screen-off transitions
   useEffect(() => {
     if (!currentTrack || !audioRef.current) return;
-    const playTrack = async () => {
-      const src = await resolvePlayableSource(currentTrack);
-      if (!src) return;
-      audioRef.current.src = src;
-      try {
-        await audioRef.current.play();
-        setIsPlaying(true);
-      } catch {
-        setIsPlaying(false);
-      }
+    let cancelled = false;
+
+    // Pre-warm current + upcoming tracks in RAM so screen-off onEnded transitions are 100% synchronous (0ms)
+    preloadUpcomingQueueBlobs(queue, currentIndex);
+
+    const alreadyStartedSync =
+      lastDirectPlayRef.current.index === currentIndex &&
+      String(lastDirectPlayRef.current.id) === String(currentTrack.id) &&
+      audioRef.current.src &&
+      !audioRef.current.paused;
+
+    if (!alreadyStartedSync) {
+      const playTrack = async () => {
+        const src = await resolvePlayableSource(currentTrack);
+        if (!src || cancelled || !audioRef.current) return;
+        if (
+          lastDirectPlayRef.current.index === currentIndex &&
+          String(lastDirectPlayRef.current.id) === String(currentTrack.id) &&
+          !audioRef.current.paused
+        ) {
+          return;
+        }
+        audioRef.current.src = src;
+        lastDirectPlayRef.current = {
+          index: currentIndex,
+          id: String(currentTrack.id),
+          src
+        };
+        try {
+          await audioRef.current.play();
+          if (!cancelled) setIsPlaying(true);
+        } catch {
+          if (!cancelled) setIsPlaying(false);
+        }
+      };
+      playTrack();
+    }
+
+    return () => {
+      cancelled = true;
     };
-    playTrack();
   }, [currentIndex, queue]);
+
+  // Keep upcoming shuffle/linear tracks pre-warmed whenever shuffle or offlineCatalog changes
+  useEffect(() => {
+    if (queue.length > 0 && currentIndex >= 0) {
+      preloadUpcomingQueueBlobs(queue, currentIndex);
+    }
+  }, [shuffle, offlineCatalog]);
+
+  // Register lock-screen / background MediaSession metadata and hardware transport controls
+  useEffect(() => {
+    if (typeof navigator === 'undefined' || !('mediaSession' in navigator)) return;
+    try {
+      if (currentTrack && typeof window !== 'undefined' && 'MediaMetadata' in window) {
+        const artUrl = isPlaceholderCover(currentTrack.artwork)
+          ? new URL(DEFAULT_TRACK_COVER, window.location.origin).href
+          : currentTrack.artwork;
+        navigator.mediaSession.metadata = new window.MediaMetadata({
+          title: currentTrack.title || 'MyMusicAnywhere',
+          artist: currentTrack.artist || 'Artista',
+          album: currentTrack.album || 'MyMusicAnywhere',
+          artwork: artUrl ? [{ src: artUrl, sizes: '300x300', type: 'image/jpeg' }] : []
+        });
+      }
+      navigator.mediaSession.playbackState = isPlaying ? 'playing' : 'paused';
+    } catch {}
+
+    const handlers = [
+      ['play', () => {
+        if (audioRef.current && currentIndexRef.current >= 0) {
+          audioRef.current.play().then(() => setIsPlaying(true)).catch(() => {});
+        }
+      }],
+      ['pause', () => {
+        if (audioRef.current) {
+          audioRef.current.pause();
+          setIsPlaying(false);
+        }
+      }],
+      ['nexttrack', () => playNext()],
+      ['previoustrack', () => playPrev()],
+      ['seekto', details => {
+        if (audioRef.current && details && typeof details.seekTime === 'number') {
+          audioRef.current.currentTime = details.seekTime;
+          setProgress(details.seekTime);
+        }
+      }]
+    ];
+
+    for (const [action, fn] of handlers) {
+      try {
+        navigator.mediaSession.setActionHandler(action, fn);
+      } catch {}
+    }
+  }, [currentTrack, isPlaying, queue, currentIndex, shuffle, repeatMode]);
 
   // Auth handlers
   async function handleAuthSubmit(e) {
@@ -1469,7 +1564,17 @@ export default function HomePage() {
       const cache = await caches.open(AUDIO_CACHE_NAME);
       const response = await fetch(url);
       if (response.ok) {
-        await cache.put(url, response.clone());
+        const clonedForCache = response.clone();
+        const clonedForBlob = response.clone();
+        await cache.put(url, clonedForCache);
+        try {
+          const blob = await clonedForBlob.blob();
+          if (blob && blob.size > 0) {
+            const existingBlobUrl = blobUrlCacheRef.current.get(url);
+            if (existingBlobUrl) URL.revokeObjectURL(existingBlobUrl);
+            blobUrlCacheRef.current.set(url, URL.createObjectURL(blob));
+          }
+        } catch {}
         if (trackMeta) {
           setOfflineCatalog(prev => {
             const filtered = prev.filter(
@@ -1539,6 +1644,13 @@ export default function HomePage() {
       track.streamUrl ||
       (filename ? `/api/stream?file=${encodeURIComponent(filename)}` : null);
 
+    if (streamUrl && blobUrlCacheRef.current.has(streamUrl)) {
+      try {
+        URL.revokeObjectURL(blobUrlCacheRef.current.get(streamUrl));
+      } catch {}
+      blobUrlCacheRef.current.delete(streamUrl);
+    }
+
     try {
       const cache = await caches.open(AUDIO_CACHE_NAME);
       if (streamUrl) {
@@ -1577,29 +1689,59 @@ export default function HomePage() {
     } catch {}
   }
 
-  async function resolvePlayableSource(track) {
+  function getTrackStreamUrl(track) {
+    if (!track) return null;
     const dl = downloads[track.id];
+    const dedupKey = getTrackDedupKey(track);
     const offItem = offlineCatalog.find(
       t =>
         String(t.id) === String(track.id) ||
-        (track.filename && t.filename === track.filename)
+        (track.filename && t.filename === track.filename) ||
+        (dedupKey && getTrackDedupKey(t) === dedupKey)
     );
-    const likedItem = likedTracks.find(t => String(t.id) === String(track.id));
-    const filename = track.filename || dl?.filename || offItem?.filename || likedItem?.filename;
-    const streamUrl =
+    const likedItem = likedTracks.find(
+      t =>
+        String(t.id) === String(track.id) ||
+        (dedupKey && getTrackDedupKey(t) === dedupKey)
+    );
+    const filename =
+      track.filename || dl?.filename || offItem?.filename || likedItem?.filename;
+    return (
       track.streamUrl ||
       offItem?.streamUrl ||
       likedItem?.streamUrl ||
-      (filename ? `/api/stream?file=${encodeURIComponent(filename)}` : null);
+      (filename ? `/api/stream?file=${encodeURIComponent(filename)}` : null)
+    );
+  }
 
-    if (streamUrl && 'caches' in window) {
+  function getSyncPlayableSource(track) {
+    if (!track) return null;
+    const streamUrl = getTrackStreamUrl(track);
+    if (streamUrl && blobUrlCacheRef.current.has(streamUrl)) {
+      return blobUrlCacheRef.current.get(streamUrl);
+    }
+    return streamUrl || track.previewUrl || null;
+  }
+
+  async function resolvePlayableSource(track) {
+    if (!track) return null;
+    const streamUrl = getTrackStreamUrl(track);
+    if (streamUrl && blobUrlCacheRef.current.has(streamUrl)) {
+      return blobUrlCacheRef.current.get(streamUrl);
+    }
+
+    if (streamUrl && typeof window !== 'undefined' && 'caches' in window) {
       try {
         const cache = await caches.open(AUDIO_CACHE_NAME);
         const fullUrl = new URL(streamUrl, window.location.origin).href;
         const cachedResp = (await cache.match(streamUrl)) || (await cache.match(fullUrl));
         if (cachedResp) {
           const blob = await cachedResp.blob();
-          return URL.createObjectURL(blob);
+          if (blob && blob.size > 0) {
+            const blobUrl = URL.createObjectURL(blob);
+            blobUrlCacheRef.current.set(streamUrl, blobUrl);
+            return blobUrl;
+          }
         }
       } catch {}
     }
@@ -2247,17 +2389,128 @@ export default function HomePage() {
     if (!track) return false;
     const dl = downloads[track.id];
     if (dl?.status === 'ready') return true;
+    const dedupKey = getTrackDedupKey(track);
     const offItem = offlineCatalog.find(
       t =>
         String(t.id) === String(track.id) ||
-        (track.filename && t.filename === track.filename)
+        (track.filename && t.filename === track.filename) ||
+        (dedupKey && getTrackDedupKey(t) === dedupKey)
     );
     if (offItem) return true;
-    const filename = track.filename || dl?.filename;
-    const streamUrl =
-      track.streamUrl ||
-      (filename ? `/api/stream?file=${encodeURIComponent(filename)}` : null);
-    return Boolean(streamUrl && offlineUrls[streamUrl]);
+    const streamUrl = getTrackStreamUrl(track);
+    return Boolean(
+      streamUrl && (offlineUrls[streamUrl] || blobUrlCacheRef.current.has(streamUrl))
+    );
+  }
+
+  function preloadUpcomingQueueBlobs(list = queueRef.current, fromIdx = currentIndexRef.current) {
+    if (!Array.isArray(list) || list.length === 0) return;
+    const indicesToWarm = new Set();
+    if (fromIdx >= 0 && fromIdx < list.length) {
+      indicesToWarm.add(fromIdx);
+      if (fromIdx + 1 < list.length) indicesToWarm.add(fromIdx + 1);
+      if (fromIdx + 2 < list.length) indicesToWarm.add(fromIdx + 2);
+      if (fromIdx - 1 >= 0) indicesToWarm.add(fromIdx - 1);
+    }
+    if (list.length > 0) indicesToWarm.add(0);
+
+    const { order, pos } = shuffleStateRef.current;
+    if (Array.isArray(order) && order.length > 0) {
+      const startPos = Math.max(0, pos);
+      for (let offset = 0; offset <= 8; offset++) {
+        const idx = order[(startPos + offset) % order.length];
+        if (idx >= 0 && idx < list.length) indicesToWarm.add(idx);
+      }
+    } else {
+      for (let i = 0; i < Math.min(list.length, 10); i++) {
+        indicesToWarm.add(i);
+      }
+    }
+
+    indicesToWarm.forEach(idx => {
+      const t = list[idx];
+      if (t) {
+        resolvePlayableSource(t).catch(() => {});
+      }
+    });
+  }
+
+  function startTrackAtIndexImmediate(nextIdx, listOverride = null) {
+    const activeQueue = listOverride || queueRef.current;
+    if (!Array.isArray(activeQueue) || nextIdx < 0 || nextIdx >= activeQueue.length) {
+      setIsPlaying(false);
+      return;
+    }
+    const nextTrack = activeQueue[nextIdx];
+    if (!nextTrack) {
+      setIsPlaying(false);
+      return;
+    }
+
+    currentIndexRef.current = nextIdx;
+    setCurrentIndex(nextIdx);
+    setProgress(0);
+
+    // Pre-warm upcoming tracks from this new position
+    preloadUpcomingQueueBlobs(activeQueue, nextIdx);
+
+    const syncSrc = getSyncPlayableSource(nextTrack);
+    if (syncSrc && audioRef.current) {
+      lastDirectPlayRef.current = {
+        index: nextIdx,
+        id: String(nextTrack.id),
+        src: syncSrc
+      };
+      audioRef.current.src = syncSrc;
+      const playPromise = audioRef.current.play();
+      if (playPromise && typeof playPromise.then === 'function') {
+        playPromise
+          .then(() => setIsPlaying(true))
+          .catch(() => {
+            resolvePlayableSource(nextTrack).then(resolvedSrc => {
+              if (
+                resolvedSrc &&
+                audioRef.current &&
+                currentIndexRef.current === nextIdx
+              ) {
+                audioRef.current.src = resolvedSrc;
+                lastDirectPlayRef.current = {
+                  index: nextIdx,
+                  id: String(nextTrack.id),
+                  src: resolvedSrc
+                };
+                audioRef.current
+                  .play()
+                  .then(() => setIsPlaying(true))
+                  .catch(() => setIsPlaying(false));
+              }
+            });
+          });
+      } else {
+        setIsPlaying(true);
+      }
+    }
+  }
+
+  function toggleShuffle() {
+    setShuffle(prev => {
+      const next = !prev;
+      shuffleRef.current = next;
+      const activeQueue = queueRef.current;
+      const curIdx = currentIndexRef.current;
+      if (next && Array.isArray(activeQueue) && activeQueue.length > 0) {
+        const order = buildSmartShuffleOrder(activeQueue, curIdx >= 0 ? curIdx : -1);
+        shuffleStateRef.current = { order, pos: 0, queueLen: activeQueue.length };
+        preloadUpcomingQueueBlobs(activeQueue, curIdx);
+      } else {
+        shuffleStateRef.current = {
+          order: [],
+          pos: -1,
+          queueLen: Array.isArray(activeQueue) ? activeQueue.length : 0
+        };
+      }
+      return next;
+    });
   }
 
   function buildSmartShuffleOrder(list, startIdx = -1, minArtistDistance = 2) {
@@ -2312,9 +2565,11 @@ export default function HomePage() {
 
     if (allowSinglePreview && clickedTrack && !isTrackAvailableOffline(clickedTrack)) {
       if (isOffline) return;
-      setQueue([clickedTrack]);
+      const singleQueue = [clickedTrack];
+      queueRef.current = singleQueue;
+      setQueue(singleQueue);
       shuffleStateRef.current = { order: [0], pos: 0, queueLen: 1 };
-      setCurrentIndex(0);
+      startTrackAtIndexImmediate(0, singleQueue);
       return;
     }
 
@@ -2332,14 +2587,20 @@ export default function HomePage() {
       : 0;
     const mappedIdx = foundIdx >= 0 ? foundIdx : 0;
 
+    queueRef.current = playableList;
     setQueue(playableList);
-    if (shuffle || startRandom) {
+    if (shuffleRef.current || startRandom) {
+      if (startRandom && !shuffleRef.current) {
+        shuffleRef.current = true;
+        setShuffle(true);
+      }
       const order = buildSmartShuffleOrder(playableList, startRandom ? -1 : mappedIdx);
       shuffleStateRef.current = { order, pos: 0, queueLen: playableList.length };
-      setCurrentIndex(order[0] ?? mappedIdx);
+      const firstIdx = order[0] ?? mappedIdx;
+      startTrackAtIndexImmediate(firstIdx, playableList);
     } else {
       shuffleStateRef.current = { order: [], pos: -1, queueLen: playableList.length };
-      setCurrentIndex(mappedIdx);
+      startTrackAtIndexImmediate(mappedIdx, playableList);
     }
   }
 
@@ -2349,14 +2610,18 @@ export default function HomePage() {
       audioRef.current.pause();
       setIsPlaying(false);
     } else {
-      audioRef.current.play();
-      setIsPlaying(true);
+      audioRef.current.play().then(() => setIsPlaying(true)).catch(() => {});
     }
   }
 
   function playNext() {
-    if (queue.length === 0) return;
-    const validIndices = queue
+    const activeQueue = queueRef.current;
+    const curIdx = currentIndexRef.current;
+    const isShuffle = shuffleRef.current;
+    const curRepeat = repeatModeRef.current;
+
+    if (!Array.isArray(activeQueue) || activeQueue.length === 0) return;
+    const validIndices = activeQueue
       .map((t, i) => (isTrackAvailableOffline(t) ? i : -1))
       .filter(i => i !== -1);
     if (validIndices.length === 0) {
@@ -2364,82 +2629,89 @@ export default function HomePage() {
       return;
     }
 
-    if (shuffle && validIndices.length > 1) {
+    if (isShuffle && validIndices.length > 1) {
       let { order, pos, queueLen } = shuffleStateRef.current;
       const filteredOrder = Array.isArray(order)
-        ? order.filter(idx => isTrackAvailableOffline(queue[idx]))
+        ? order.filter(idx => idx >= 0 && idx < activeQueue.length && isTrackAvailableOffline(activeQueue[idx]))
         : [];
-      if (filteredOrder.length !== validIndices.length || queueLen !== queue.length) {
-        order = buildSmartShuffleOrder(queue, currentIndex).filter(idx =>
-          isTrackAvailableOffline(queue[idx])
+      if (filteredOrder.length !== validIndices.length || queueLen !== activeQueue.length) {
+        order = buildSmartShuffleOrder(activeQueue, curIdx).filter(idx =>
+          isTrackAvailableOffline(activeQueue[idx])
         );
-        pos = Math.max(0, order.indexOf(currentIndex));
+        pos = Math.max(0, order.indexOf(curIdx));
       } else {
         order = filteredOrder;
+        const currentPosInOrder = order.indexOf(curIdx);
+        if (currentPosInOrder !== -1) pos = currentPosInOrder;
       }
       const nextPos = pos + 1;
       if (nextPos < order.length) {
-        shuffleStateRef.current = { order, pos: nextPos, queueLen: queue.length };
-        setCurrentIndex(order[nextPos]);
+        shuffleStateRef.current = { order, pos: nextPos, queueLen: activeQueue.length };
+        startTrackAtIndexImmediate(order[nextPos], activeQueue);
       } else {
-        const freshOrder = buildSmartShuffleOrder(queue, -1).filter(idx =>
-          isTrackAvailableOffline(queue[idx])
+        const freshOrder = buildSmartShuffleOrder(activeQueue, -1).filter(idx =>
+          isTrackAvailableOffline(activeQueue[idx])
         );
-        if (freshOrder.length > 1 && freshOrder[0] === currentIndex) {
+        if (freshOrder.length > 1 && freshOrder[0] === curIdx) {
           [freshOrder[0], freshOrder[1]] = [freshOrder[1], freshOrder[0]];
         }
-        shuffleStateRef.current = { order: freshOrder, pos: 0, queueLen: queue.length };
-        setCurrentIndex(freshOrder[0] ?? validIndices[0]);
+        shuffleStateRef.current = { order: freshOrder, pos: 0, queueLen: activeQueue.length };
+        startTrackAtIndexImmediate(freshOrder[0] ?? validIndices[0], activeQueue);
       }
       return;
     }
 
-    const nextValid = validIndices.find(i => i > currentIndex);
+    const nextValid = validIndices.find(i => i > curIdx);
     if (nextValid !== undefined) {
-      setCurrentIndex(nextValid);
-    } else if (repeatMode === 'all') {
-      setCurrentIndex(validIndices[0]);
+      startTrackAtIndexImmediate(nextValid, activeQueue);
+    } else if (curRepeat === 'all' || isShuffle) {
+      startTrackAtIndexImmediate(validIndices[0], activeQueue);
     } else {
       setIsPlaying(false);
     }
   }
 
   function playPrev() {
-    if (queue.length === 0) return;
+    const activeQueue = queueRef.current;
+    const curIdx = currentIndexRef.current;
+    const isShuffle = shuffleRef.current;
+    const curRepeat = repeatModeRef.current;
+
+    if (!Array.isArray(activeQueue) || activeQueue.length === 0) return;
     if (audioRef.current && audioRef.current.currentTime > 3) {
       audioRef.current.currentTime = 0;
       return;
     }
-    const validIndices = queue
+    const validIndices = activeQueue
       .map((t, i) => (isTrackAvailableOffline(t) ? i : -1))
       .filter(i => i !== -1);
     if (validIndices.length === 0) return;
 
-    if (shuffle && validIndices.length > 1) {
+    if (isShuffle && validIndices.length > 1) {
       const { order, pos, queueLen } = shuffleStateRef.current;
-      if (Array.isArray(order) && queueLen === queue.length && pos > 0) {
+      if (Array.isArray(order) && queueLen === activeQueue.length && pos > 0) {
         for (let p = pos - 1; p >= 0; p--) {
-          if (isTrackAvailableOffline(queue[order[p]])) {
-            shuffleStateRef.current = { order, pos: p, queueLen: queue.length };
-            setCurrentIndex(order[p]);
+          if (isTrackAvailableOffline(activeQueue[order[p]])) {
+            shuffleStateRef.current = { order, pos: p, queueLen: activeQueue.length };
+            startTrackAtIndexImmediate(order[p], activeQueue);
             return;
           }
         }
       }
     }
 
-    const prevValid = [...validIndices].reverse().find(i => i < currentIndex);
+    const prevValid = [...validIndices].reverse().find(i => i < curIdx);
     if (prevValid !== undefined) {
-      setCurrentIndex(prevValid);
-    } else if (repeatMode === 'all') {
-      setCurrentIndex(validIndices[validIndices.length - 1]);
+      startTrackAtIndexImmediate(prevValid, activeQueue);
+    } else if (curRepeat === 'all' || isShuffle) {
+      startTrackAtIndexImmediate(validIndices[validIndices.length - 1], activeQueue);
     }
   }
 
   function handleTrackEnded() {
-    if (repeatMode === 'one' && audioRef.current) {
+    if (repeatModeRef.current === 'one' && audioRef.current) {
       audioRef.current.currentTime = 0;
-      audioRef.current.play();
+      audioRef.current.play().then(() => setIsPlaying(true)).catch(() => {});
       return;
     }
     playNext();
@@ -3382,7 +3654,7 @@ export default function HomePage() {
                   <button
                     type="button"
                     className={`icon-btn ${shuffle ? 'active' : ''}`}
-                    onClick={() => setShuffle(s => !s)}
+                    onClick={toggleShuffle}
                     title={shuffle ? 'Aleatorio activado' : 'Activar aleatorio'}
                   >
                     <Icon name="shuffle" size={17} />
@@ -4341,7 +4613,7 @@ export default function HomePage() {
               <button
                 type="button"
                 className={`ctrl-btn ${shuffle ? 'active' : ''}`}
-                onClick={() => setShuffle(s => !s)}
+                onClick={toggleShuffle}
                 title="Aleatorio inteligente"
               >
                 <Icon name="shuffle" size={15} />
@@ -4370,17 +4642,51 @@ export default function HomePage() {
               </button>
             </div>
           </div>
-
-          <audio
-            ref={audioRef}
-            onTimeUpdate={e => setProgress(e.currentTarget.currentTime)}
-            onLoadedMetadata={e => setDuration(e.currentTarget.duration)}
-            onEnded={handleTrackEnded}
-            onPlay={() => setIsPlaying(true)}
-            onPause={() => setIsPlaying(false)}
-          />
         </div>
       )}
+
+      <audio
+        ref={audioRef}
+        preload="auto"
+        playsInline
+        onTimeUpdate={e => {
+          const cur = e.currentTarget.currentTime;
+          const dur = e.currentTarget.duration;
+          setProgress(cur);
+          if (dur > 0 && dur - cur <= 5 && dur - cur > 4) {
+            preloadUpcomingQueueBlobs(queueRef.current, currentIndexRef.current);
+          }
+        }}
+        onLoadedMetadata={e => {
+          const dur = e.currentTarget.duration;
+          setDuration(dur);
+          if (
+            typeof navigator !== 'undefined' &&
+            'mediaSession' in navigator &&
+            typeof navigator.mediaSession.setPositionState === 'function' &&
+            dur > 0 &&
+            Number.isFinite(dur)
+          ) {
+            try {
+              navigator.mediaSession.setPositionState({
+                duration: dur,
+                playbackRate: e.currentTarget.playbackRate || 1,
+                position: Math.min(dur, e.currentTarget.currentTime || 0)
+              });
+            } catch {}
+          }
+        }}
+        onEnded={handleTrackEnded}
+        onError={() => {
+          if (queueRef.current.length > 1) {
+            playNext();
+          } else {
+            setIsPlaying(false);
+          }
+        }}
+        onPlay={() => setIsPlaying(true)}
+        onPause={() => setIsPlaying(false)}
+      />
 
       {/* ==================== MOBILE BOTTOM NAV (MINERAL TAREAS STYLE) ==================== */}
       <nav className="bottom-nav" aria-label="Principal">
