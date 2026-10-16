@@ -1,12 +1,17 @@
-const STATIC_CACHE = 'mymusic-shell-v6';
+const STATIC_CACHE = 'mymusic-shell-v7';
 const AUDIO_CACHE = 'my-music-offline-audio-v1';
 
 const PRECACHE_URLS = [
   '/',
   '/manifest.json',
   '/icon.svg',
+  '/apple-touch-icon.png',
+  '/icons/icon-192.png',
+  '/icons/icon-512.png',
   '/brand/logo.svg',
-  '/brand/logo-dark.svg'
+  '/brand/logo-dark.svg',
+  '/brand/logo.svg?v=3',
+  '/brand/logo-dark.svg?v=3'
 ];
 
 self.addEventListener('install', (event) => {

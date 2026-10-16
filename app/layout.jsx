@@ -21,11 +21,22 @@ export const metadata = {
     template: '%s · mineral music'
   },
   description: 'Tu música, colecciones y modo offline sin interrupciones.',
+  applicationName: 'mineral music',
   manifest: '/manifest.json',
+  icons: {
+    icon: [
+      { url: '/icon.svg?v=3', type: 'image/svg+xml', sizes: 'any' },
+      { url: '/icons/icon-192.png', type: 'image/png', sizes: '192x192' }
+    ],
+    apple: [{ url: '/apple-touch-icon.png?v=3', sizes: '180x180', type: 'image/png' }]
+  },
   appleWebApp: {
     capable: true,
     statusBarStyle: 'black-translucent',
     title: 'mineral music'
+  },
+  other: {
+    'apple-mobile-web-app-capable': 'yes'
   }
 };
 
@@ -34,6 +45,7 @@ export const viewport = {
   initialScale: 1,
   maximumScale: 1,
   userScalable: false,
+  colorScheme: 'light dark',
   themeColor: [
     { media: '(prefers-color-scheme: light)', color: '#f5f2e9' },
     { media: '(prefers-color-scheme: dark)', color: '#000000' }
@@ -43,11 +55,6 @@ export const viewport = {
 export default function RootLayout({ children }) {
   return (
     <html lang="es" className={`${syne.variable} ${manrope.variable}`}>
-      <head>
-        <link rel="icon" type="image/svg+xml" href="/brand/logo.svg" media="(prefers-color-scheme: light)" />
-        <link rel="icon" type="image/svg+xml" href="/brand/logo-dark.svg" media="(prefers-color-scheme: dark)" />
-        <link rel="apple-touch-icon" href="/icon.svg" />
-      </head>
       <body>
         {children}
         <script

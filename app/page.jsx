@@ -3,7 +3,7 @@
 import { useState, useEffect, useRef } from 'react';
 
 const AUDIO_CACHE_NAME = 'my-music-offline-audio-v1';
-const SHELL_CACHE_NAME = 'mymusic-shell-v6';
+const SHELL_CACHE_NAME = 'mymusic-shell-v7';
 const USER_STORAGE_KEY = 'mma_cached_user_v1';
 const LIKES_STORAGE_KEY = 'mma_liked_tracks_v1';
 const OFFLINE_CATALOG_KEY = 'mma_offline_catalog_v1';
@@ -23,8 +23,8 @@ const EXPLORE_CHIPS = [
 function BrandMark() {
   return (
     <picture>
-      <source media="(prefers-color-scheme: dark)" srcSet="/brand/logo-dark.svg" />
-      <img src="/brand/logo.svg" alt="" width={33} height={40} className="brand-logo" />
+      <source media="(prefers-color-scheme: dark)" srcSet="/brand/logo-dark.svg?v=3" />
+      <img src="/brand/logo.svg?v=3" alt="" width={33} height={40} className="brand-logo" />
     </picture>
   );
 }

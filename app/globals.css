@@ -859,6 +859,12 @@ textarea {
   display: block;
 }
 
+.track-cover img[src*="icon.svg"],
+.player-art[src*="icon.svg"] {
+  object-fit: contain;
+  padding: 5px;
+}
+
 .track-cover-overlay {
   position: absolute;
   inset: 0;
