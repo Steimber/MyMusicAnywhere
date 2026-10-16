@@ -1,12 +1,11 @@
 {
-  "name": "myMusicAnywhere",
-  "short_name": "myMusic",
-  "description": "Busca, previsualiza y descarga música en MP3 en alta calidad",
+  "name": "MyMusicAnywhere — Studio & Offline Player",
+  "short_name": "MyMusic",
+  "description": "Catálogo musical privado, descargas MP3 y reproductor offline con acceso por invitación.",
   "start_url": "/",
   "display": "standalone",
-  "background_color": "#090d16",
-  "theme_color": "#6366f1",
-  "orientation": "portrait-primary",
+  "background_color": "#f3f1eb",
+  "theme_color": "#2b44ff",
   "icons": [
     {
       "src": "/icon.svg",

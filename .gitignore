@@ -7,7 +7,8 @@ out/
 build/
 dist/
 
-# Media storage & local audio cache
+# Local database & media storage
+data/
 downloads/
 *.mp3
 *.m4a
@@ -18,6 +19,7 @@ downloads/
 # Environment & secrets
 .env
 .env.*
+!.env.example
 *.pem
 *.key
 

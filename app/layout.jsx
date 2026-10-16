@@ -1,13 +1,13 @@
 import './globals.css';
 
 export const metadata = {
-  title: 'myMusicAnywhere 🎵 PWA',
-  description: 'Busca, previsualiza y descarga música en MP3 en alta calidad',
+  title: 'MyMusicAnywhere — Studio & Offline Player',
+  description: 'Catálogo musical privado, descargas MP3 y reproductor offline con acceso por invitación.',
   manifest: '/manifest.json',
   appleWebApp: {
     capable: true,
     statusBarStyle: 'black-translucent',
-    title: 'myMusic'
+    title: 'MyMusic'
   }
 };
 
@@ -16,7 +16,7 @@ export const viewport = {
   initialScale: 1,
   maximumScale: 1,
   userScalable: false,
-  themeColor: '#6366f1'
+  themeColor: '#2b44ff'
 };
 
 export default function RootLayout({ children }) {

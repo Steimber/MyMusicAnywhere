@@ -1,188 +1,391 @@
 'use client';
 
 import { useState, useEffect, useRef } from 'react';
-import { 
-  Search, 
-  Download, 
-  Play, 
-  Pause, 
-  RefreshCw, 
-  Music, 
-  Check, 
-  X, 
-  Sparkles,
-  Smartphone,
-  Heart,
-  Shuffle,
-  Repeat,
-  Repeat1,
-  SkipBack,
-  SkipForward,
-  Wifi,
-  WifiOff,
-  Trash2
-} from 'lucide-react';
 
-const SUGGESTIONS = [
-  'Lo-Fi Chill Beats',
-  'Synthwave Instrumental',
-  'Classical Piano',
-  'Ambient Focus',
-  'Acoustic Guitar',
-  'Jazz Lounge'
-];
+const AUDIO_CACHE_NAME = 'my-music-offline-audio-v1';
 
 export default function HomePage() {
-  // Tabs: 'search' | 'favorites' | 'downloads'
-  const [activeTab, setActiveTab] = useState('search');
-  
+  // Auth state
+  const [user, setUser] = useState(null);
+  const [authChecked, setAuthChecked] = useState(false);
+  const [authMode, setAuthMode] = useState('login'); // 'login' | 'register'
+  const [username, setUsername] = useState('');
+  const [password, setPassword] = useState('');
+  const [inviteCode, setInviteCode] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
+  const [authError, setAuthError] = useState('');
+  const [authBusy, setAuthBusy] = useState(false);
+  const [accountOpen, setAccountOpen] = useState(false);
+
+  // Navigation
+  const [activeTab, setActiveTab] = useState('explore'); // 'explore' | 'library' | 'files' | 'admin'
+
+  // Explore & Search
   const [query, setQuery] = useState('');
   const [results, setResults] = useState([]);
-  const [searchLoading, setSearchLoading] = useState(false);
-  const [searchStatus, setSearchStatus] = useState('');
+  const [loading, setLoading] = useState(false);
 
-  // Favorites (persisted in localStorage)
-  const [favorites, setFavorites] = useState([]);
-
-  // Server Downloads & Offline cached audio
+  // Library & Offline Cache
+  const [likedTracks, setLikedTracks] = useState([]);
+  const [downloads, setDownloads] = useState({});
   const [libraryFiles, setLibraryFiles] = useState([]);
-  const [libraryLoading, setLibraryLoading] = useState(false);
-  const [offlineCachedUrls, setOfflineCachedUrls] = useState(new Set());
-  const [isOnline, setIsOnline] = useState(true);
+  const [offlineUrls, setOfflineUrls] = useState({});
+  const [syncingAll, setSyncingAll] = useState(false);
 
-  // Download states: { [key]: { status, progress, filename, downloadUrl } }
-  const [downloadStates, setDownloadStates] = useState({});
+  // Admin Panel state
+  const [adminData, setAdminData] = useState({ users: [], invites: [], storage: null });
+  const [inviteLabel, setInviteLabel] = useState('');
+  const [inviteMaxUses, setInviteMaxUses] = useState(1);
+  const [adminMsg, setAdminMsg] = useState('');
+  const [copiedCode, setCopiedCode] = useState('');
 
-  // Audio Player & Queue
-  const audioRef = useRef(null);
-  const [playlist, setPlaylist] = useState([]);
+  // PWA Install Prompt
+  const [deferredPrompt, setDeferredPrompt] = useState(null);
+
+  // Audio Player State
+  const [queue, setQueue] = useState([]);
   const [currentIndex, setCurrentIndex] = useState(-1);
-  const [currentTrack, setCurrentTrack] = useState(null);
   const [isPlaying, setIsPlaying] = useState(false);
-  const [currentTime, setCurrentTime] = useState(0);
+  const [shuffle, setShuffle] = useState(false);
+  const [repeatMode, setRepeatMode] = useState('off'); // 'off' | 'all' | 'one'
+  const [progress, setProgress] = useState(0);
   const [duration, setDuration] = useState(0);
 
-  // Playback modes: isShuffle, repeatMode ('off' | 'all' | 'one')
-  const [isShuffle, setIsShuffle] = useState(false);
-  const [repeatMode, setRepeatMode] = useState('off');
+  const audioRef = useRef(null);
+  const savedDeviceIdsRef = useRef(new Set());
+  const accountRef = useRef(null);
 
-  // PWA Install prompt
-  const [deferredPrompt, setDeferredPrompt] = useState(null);
-  const [showInstallBtn, setShowInstallBtn] = useState(false);
+  const currentTrack = currentIndex >= 0 && currentIndex < queue.length ? queue[currentIndex] : null;
 
+  // Check session on mount
   useEffect(() => {
-    setIsOnline(navigator.onLine);
-    const handleOnline = () => setIsOnline(true);
-    const handleOffline = () => setIsOnline(false);
-    window.addEventListener('online', handleOnline);
-    window.addEventListener('offline', handleOffline);
+    fetch('/api/auth')
+      .then(r => r.json())
+      .then(data => {
+        if (data.user) {
+          setUser(data.user);
+        }
+      })
+      .catch(() => {})
+      .finally(() => setAuthChecked(true));
 
     try {
-      const saved = localStorage.getItem('mymusic_favorites');
-      if (saved) setFavorites(JSON.parse(saved));
+      const savedLikes = localStorage.getItem('mma_liked_tracks_v1');
+      if (savedLikes) setLikedTracks(JSON.parse(savedLikes));
     } catch {}
 
-    checkCachedAudio();
-    fetchLibrary();
+    refreshOfflineCacheList();
 
-    const handleBeforeInstall = (e) => {
+    const handleBeforeInstall = e => {
       e.preventDefault();
       setDeferredPrompt(e);
-      setShowInstallBtn(true);
     };
     window.addEventListener('beforeinstallprompt', handleBeforeInstall);
-
-    return () => {
-      window.removeEventListener('online', handleOnline);
-      window.removeEventListener('offline', handleOffline);
-      window.removeEventListener('beforeinstallprompt', handleBeforeInstall);
-    };
+    return () => window.removeEventListener('beforeinstallprompt', handleBeforeInstall);
   }, []);
 
-  const checkCachedAudio = async () => {
-    if ('caches' in window) {
-      try {
-        const cache = await caches.open('mymusic-offline-audio');
-        const keys = await cache.keys();
-        setOfflineCachedUrls(new Set(keys.map(k => k.url)));
-      } catch {}
+  // Load initial catalog & server files once logged in
+  useEffect(() => {
+    if (!user) return;
+    fetchLibraryFiles();
+    searchTracks('Daft Punk');
+    if (user.is_admin) {
+      fetchAdminData();
     }
-  };
+  }, [user]);
 
-  const handleInstallClick = async () => {
-    if (!deferredPrompt) return;
-    deferredPrompt.prompt();
-    const { outcome } = await deferredPrompt.userChoice;
-    if (outcome === 'accepted') setShowInstallBtn(false);
-    setDeferredPrompt(null);
-  };
-
-  const toggleFavorite = (track) => {
-    const key = track.id || `${track.title}-${track.artist}`;
-    setFavorites(prev => {
-      const exists = prev.some(t => (t.id || `${t.title}-${t.artist}`) === key);
-      let updated;
-      if (exists) {
-        updated = prev.filter(t => (t.id || `${t.title}-${t.artist}`) !== key);
-      } else {
-        updated = [track, ...prev];
+  // Close account dropdown on outside click
+  useEffect(() => {
+    function onDocClick(e) {
+      if (accountRef.current && !accountRef.current.contains(e.target)) {
+        setAccountOpen(false);
       }
+    }
+    if (accountOpen) document.addEventListener('mousedown', onDocClick);
+    return () => document.removeEventListener('mousedown', onDocClick);
+  }, [accountOpen]);
+
+  // Poll active downloads
+  useEffect(() => {
+    const activeIds = Object.values(downloads)
+      .filter(d => d.status === 'downloading')
+      .map(d => d.downloadId);
+
+    if (activeIds.length === 0) return;
+
+    const timer = setInterval(async () => {
+      for (const id of activeIds) {
+        try {
+          const res = await fetch(`/api/download?id=${id}`);
+          if (!res.ok) continue;
+          const data = await res.json();
+
+          setDownloads(prev => {
+            const key = Object.keys(prev).find(k => prev[k].downloadId === id);
+            if (!key) return prev;
+            return { ...prev, [key]: { ...prev[key], ...data } };
+          });
+
+          if (data.status === 'ready' && data.filename) {
+            const streamUrl = `/api/stream?file=${encodeURIComponent(data.filename)}`;
+            const downloadUrl = `/api/stream?file=${encodeURIComponent(data.filename)}&download=1`;
+
+            const trackKey = Object.keys(downloads).find(k => downloads[k].downloadId === id);
+            const likedMatch = likedTracks.find(t => String(t.id) === String(trackKey));
+
+            await saveUrlToOfflineCache(streamUrl, likedMatch ? likedMatch.id : data.filename);
+
+            if (!savedDeviceIdsRef.current.has(id)) {
+              savedDeviceIdsRef.current.add(id);
+              triggerBrowserFileDownload(downloadUrl, data.filename);
+            }
+
+            if (likedMatch) {
+              updateLikedTrackFile(likedMatch.id, data.filename, streamUrl);
+            }
+            fetchLibraryFiles();
+            if (user?.is_admin) fetchAdminData();
+          }
+        } catch {}
+      }
+    }, 1400);
+
+    return () => clearInterval(timer);
+  }, [downloads, likedTracks, user]);
+
+  // Manage audio playback when currentTrack changes
+  useEffect(() => {
+    if (!currentTrack || !audioRef.current) return;
+    const playTrack = async () => {
+      const src = await resolvePlayableSource(currentTrack);
+      if (!src) return;
+      audioRef.current.src = src;
       try {
-        localStorage.setItem('mymusic_favorites', JSON.stringify(updated));
+        await audioRef.current.play();
+        setIsPlaying(true);
+      } catch {
+        setIsPlaying(false);
+      }
+    };
+    playTrack();
+  }, [currentIndex, queue]);
+
+  // Auth handlers
+  async function handleAuthSubmit(e) {
+    e.preventDefault();
+    setAuthError('');
+    setAuthBusy(true);
+    try {
+      const res = await fetch('/api/auth', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: authMode,
+          username,
+          password,
+          inviteCode: authMode === 'register' ? inviteCode : undefined
+        })
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setAuthError(data.error || 'Error de autenticación');
+      } else {
+        setUser(data.user);
+        setPassword('');
+        setInviteCode('');
+      }
+    } catch {
+      setAuthError('Error de red al conectar con el servidor.');
+    } finally {
+      setAuthBusy(false);
+    }
+  }
+
+  async function handleLogout() {
+    await fetch('/api/auth', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'logout' })
+    });
+    if (audioRef.current) audioRef.current.pause();
+    setUser(null);
+    setAccountOpen(false);
+    setActiveTab('explore');
+  }
+
+  // Admin handlers
+  async function fetchAdminData() {
+    try {
+      const res = await fetch('/api/admin');
+      if (!res.ok) return;
+      const data = await res.json();
+      setAdminData(data);
+    } catch {}
+  }
+
+  async function handleCreateInvite(e) {
+    e.preventDefault();
+    setAdminMsg('');
+    const res = await fetch('/api/admin', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        action: 'create_invite',
+        label: inviteLabel || 'Invitado',
+        max_uses: Number(inviteMaxUses) || 1
+      })
+    });
+    const data = await res.json();
+    if (res.ok && data.invite) {
+      setInviteLabel('');
+      setInviteMaxUses(1);
+      setAdminMsg(`Código ${data.invite.code} generado.`);
+      fetchAdminData();
+    }
+  }
+
+  async function handleAdminAction(payload) {
+    await fetch('/api/admin', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    });
+    fetchAdminData();
+  }
+
+  function copyInviteCode(code) {
+    navigator.clipboard?.writeText(code);
+    setCopiedCode(code);
+    setTimeout(() => setCopiedCode(''), 2000);
+  }
+
+  // Offline & File helpers
+  function triggerBrowserFileDownload(url, filename) {
+    if (typeof document === 'undefined') return;
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename || 'track.mp3';
+    a.style.display = 'none';
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(() => document.body.removeChild(a), 1000);
+  }
+
+  function persistLikes(nextLikes) {
+    setLikedTracks(nextLikes);
+    try {
+      localStorage.setItem('mma_liked_tracks_v1', JSON.stringify(nextLikes));
+    } catch {}
+  }
+
+  function isLiked(trackId) {
+    return likedTracks.some(t => String(t.id) === String(trackId));
+  }
+
+  function toggleLike(track) {
+    if (isLiked(track.id)) {
+      persistLikes(likedTracks.filter(t => String(t.id) !== String(track.id)));
+    } else {
+      const existingDl = downloads[track.id];
+      const entry = {
+        ...track,
+        addedAt: Date.now(),
+        filename: existingDl?.filename || track.filename || null,
+        streamUrl: existingDl?.filename
+          ? `/api/stream?file=${encodeURIComponent(existingDl.filename)}`
+          : track.streamUrl || null
+      };
+      persistLikes([entry, ...likedTracks]);
+    }
+  }
+
+  function updateLikedTrackFile(trackId, filename, streamUrl) {
+    setLikedTracks(prev => {
+      const updated = prev.map(t =>
+        String(t.id) === String(trackId) ? { ...t, filename, streamUrl } : t
+      );
+      try {
+        localStorage.setItem('mma_liked_tracks_v1', JSON.stringify(updated));
       } catch {}
       return updated;
     });
-  };
+  }
 
-  const isFavorite = (track) => {
-    const key = track.id || `${track.title}-${track.artist}`;
-    return favorites.some(t => (t.id || `${t.title}-${t.artist}`) === key);
-  };
+  async function refreshOfflineCacheList() {
+    if (typeof window === 'undefined' || !('caches' in window)) return;
+    try {
+      const cache = await caches.open(AUDIO_CACHE_NAME);
+      const keys = await cache.keys();
+      const map = {};
+      for (const req of keys) {
+        const url = new URL(req.url);
+        map[url.pathname + url.search] = true;
+      }
+      setOfflineUrls(map);
+    } catch {}
+  }
 
-  const fetchLibrary = async () => {
-    setLibraryLoading(true);
+  async function saveUrlToOfflineCache(url) {
+    if (typeof window === 'undefined' || !('caches' in window)) return false;
+    try {
+      const cache = await caches.open(AUDIO_CACHE_NAME);
+      const response = await fetch(url);
+      if (response.ok) {
+        await cache.put(url, response.clone());
+        await refreshOfflineCacheList();
+        return true;
+      }
+    } catch {}
+    return false;
+  }
+
+  async function resolvePlayableSource(track) {
+    const streamUrl =
+      track.streamUrl ||
+      (track.filename ? `/api/stream?file=${encodeURIComponent(track.filename)}` : null);
+
+    if (streamUrl && 'caches' in window) {
+      try {
+        const cache = await caches.open(AUDIO_CACHE_NAME);
+        const cachedResp = await cache.match(streamUrl);
+        if (cachedResp) {
+          const blob = await cachedResp.blob();
+          return URL.createObjectURL(blob);
+        }
+      } catch {}
+    }
+
+    if (streamUrl) return streamUrl;
+    return track.previewUrl || null;
+  }
+
+  async function searchTracks(searchTerm) {
+    if (!searchTerm.trim()) return;
+    setLoading(true);
+    try {
+      const res = await fetch(`/api/search?q=${encodeURIComponent(searchTerm)}`);
+      const data = await res.json();
+      setResults(data.tracks || []);
+    } catch {}
+    setLoading(false);
+  }
+
+  async function fetchLibraryFiles() {
     try {
       const res = await fetch('/api/library');
+      if (!res.ok) return;
       const data = await res.json();
       setLibraryFiles(data.files || []);
-      checkCachedAudio();
-    } catch (e) {
-      console.error(e);
-    } finally {
-      setLibraryLoading(false);
-    }
-  };
+    } catch {}
+  }
 
-  const handleSearch = async (term) => {
-    const q = (term !== undefined ? term : query).trim();
-    if (!q) return;
+  async function startDownload(track) {
+    const key = track.id || track.title;
+    if (downloads[key]?.status === 'downloading') return;
 
-    setSearchLoading(true);
-    setSearchStatus(`Buscando canciones para "${q}"...`);
-    setResults([]);
-
-    try {
-      const res = await fetch(`/api/search?q=${encodeURIComponent(q)}`);
-      const data = await res.json();
-      if (!data.results || data.results.length === 0) {
-        setSearchStatus('No se encontraron canciones. Probá con otro nombre.');
-      } else {
-        setSearchStatus(`Se encontraron ${data.results.length} canciones:`);
-        setResults(data.results);
-      }
-    } catch {
-      setSearchStatus('Error al consultar el catálogo.');
-    } finally {
-      setSearchLoading(false);
-    }
-  };
-
-  // Download & AUTOMATIC DIRECT SAVE to user's device (phone/PC)
-  const handleStartDownload = async (track) => {
-    const trackKey = track.id || `${track.title}-${track.artist}`;
-    setDownloadStates(prev => ({
+    setDownloads(prev => ({
       ...prev,
-      [trackKey]: { status: 'downloading', progress: 0 }
+      [key]: { status: 'downloading', progress: 0 }
     }));
 
     try {
@@ -192,459 +395,676 @@ export default function HomePage() {
         body: JSON.stringify({
           title: track.title,
           artist: track.artist,
-          artwork: track.artwork
+          artwork: track.artwork,
+          query: `${track.title} ${track.artist || ''}`.trim()
         })
       });
       const data = await res.json();
-      if (!data.ok) throw new Error(data.error);
-
-      // Poll download progress
-      const pollInterval = setInterval(async () => {
-        try {
-          const pollRes = await fetch(`/api/download?id=${data.downloadId}`);
-          const pollData = await pollRes.json();
-
-          if (pollData.status === 'downloading') {
-            setDownloadStates(prev => ({
-              ...prev,
-              [trackKey]: { status: 'downloading', progress: Math.round(pollData.progress || 0) }
-            }));
-          } else if (pollData.status === 'ready') {
-            clearInterval(pollInterval);
-            const streamUrl = `/api/stream?file=${encodeURIComponent(pollData.filename)}`;
-            const downloadUrl = `${streamUrl}&download=1`;
-
-            // 1. AUTOMATICALLY TRIGGER DIRECT DOWNLOAD TO DEVICE STORAGE (Mobile/PC)
-            try {
-              const a = document.createElement('a');
-              a.href = downloadUrl;
-              a.download = pollData.filename;
-              document.body.appendChild(a);
-              a.click();
-              document.body.removeChild(a);
-            } catch (err) {
-              console.warn('Auto-download trigger notice:', err);
-            }
-
-            // 2. Cache in Cache Storage for offline playback inside the PWA
-            if ('caches' in window) {
-              caches.open('mymusic-offline-audio').then(cache => {
-                fetch(streamUrl).then(response => {
-                  if (response.ok) {
-                    cache.put(streamUrl, response);
-                    checkCachedAudio();
-                  }
-                }).catch(() => {});
-              });
-            }
-
-            setDownloadStates(prev => ({
-              ...prev,
-              [trackKey]: {
-                status: 'ready',
-                progress: 100,
-                filename: pollData.filename,
-                downloadUrl
-              }
-            }));
-            fetchLibrary();
-          } else if (pollData.status === 'error') {
-            clearInterval(pollInterval);
-            setDownloadStates(prev => ({
-              ...prev,
-              [trackKey]: { status: 'error' }
-            }));
-          }
-        } catch {
-          clearInterval(pollInterval);
-        }
-      }, 1000);
+      if (data.downloadId) {
+        setDownloads(prev => ({
+          ...prev,
+          [key]: { status: 'downloading', progress: 5, downloadId: data.downloadId }
+        }));
+      } else {
+        setDownloads(prev => ({ ...prev, [key]: { status: 'error' } }));
+      }
     } catch {
-      setDownloadStates(prev => ({
-        ...prev,
-        [trackKey]: { status: 'error' }
-      }));
+      setDownloads(prev => ({ ...prev, [key]: { status: 'error' } }));
     }
-  };
+  }
 
-  const playTrackInQueue = (trackObj, queueList = [], index = 0) => {
-    if (currentTrack?.url === trackObj.url && isPlaying) {
-      audioRef.current.pause();
-      setIsPlaying(false);
-      return;
+  async function downloadAllLikedForOffline() {
+    if (syncingAll || likedTracks.length === 0) return;
+    setSyncingAll(true);
+    for (const track of likedTracks) {
+      const streamUrl =
+        track.streamUrl ||
+        (track.filename ? `/api/stream?file=${encodeURIComponent(track.filename)}` : null);
+      if (streamUrl && offlineUrls[streamUrl]) continue;
+      if (streamUrl) {
+        await saveUrlToOfflineCache(streamUrl, track.id);
+      } else {
+        await startDownload(track);
+      }
     }
+    setSyncingAll(false);
+  }
 
-    if (queueList.length > 0) {
-      setPlaylist(queueList);
-      setCurrentIndex(index);
-    }
+  // Player controls
+  function playFromList(list, index) {
+    setQueue(list);
+    setCurrentIndex(index);
+  }
 
-    setCurrentTrack(trackObj);
-    setIsPlaying(true);
-    if (audioRef.current) {
-      audioRef.current.src = trackObj.url;
-      audioRef.current.play().catch(console.warn);
-    }
-  };
-
-  const togglePlayPause = () => {
+  function togglePlayPause() {
     if (!audioRef.current || !currentTrack) return;
     if (isPlaying) {
       audioRef.current.pause();
       setIsPlaying(false);
     } else {
-      audioRef.current.play().catch(console.warn);
+      audioRef.current.play();
       setIsPlaying(true);
     }
-  };
+  }
 
-  const handleNext = () => {
-    if (playlist.length === 0) return;
-
-    if (repeatMode === 'one') {
-      if (audioRef.current) {
-        audioRef.current.currentTime = 0;
-        audioRef.current.play();
+  function playNext() {
+    if (queue.length === 0) return;
+    if (shuffle && queue.length > 1) {
+      let nextIdx = currentIndex;
+      while (nextIdx === currentIndex) {
+        nextIdx = Math.floor(Math.random() * queue.length);
       }
+      setCurrentIndex(nextIdx);
       return;
     }
-
-    let nextIdx;
-    if (isShuffle && playlist.length > 1) {
-      do {
-        nextIdx = Math.floor(Math.random() * playlist.length);
-      } while (nextIdx === currentIndex);
+    if (currentIndex < queue.length - 1) {
+      setCurrentIndex(currentIndex + 1);
+    } else if (repeatMode === 'all') {
+      setCurrentIndex(0);
     } else {
-      nextIdx = currentIndex + 1;
-      if (nextIdx >= playlist.length) {
-        if (repeatMode === 'all') nextIdx = 0;
-        else return;
-      }
+      setIsPlaying(false);
     }
+  }
 
-    const nextTrack = playlist[nextIdx];
-    if (nextTrack) {
-      setCurrentIndex(nextIdx);
-      setCurrentTrack(nextTrack);
-      setIsPlaying(true);
-      if (audioRef.current) {
-        audioRef.current.src = nextTrack.url;
-        audioRef.current.play().catch(console.warn);
-      }
-    }
-  };
-
-  const handlePrev = () => {
-    if (!audioRef.current) return;
-    if (currentTime > 3) {
+  function playPrev() {
+    if (queue.length === 0) return;
+    if (audioRef.current && audioRef.current.currentTime > 3) {
       audioRef.current.currentTime = 0;
       return;
     }
-
-    if (playlist.length === 0) return;
-    let prevIdx = currentIndex - 1;
-    if (prevIdx < 0) prevIdx = playlist.length - 1;
-
-    const prevTrack = playlist[prevIdx];
-    if (prevTrack) {
-      setCurrentIndex(prevIdx);
-      setCurrentTrack(prevTrack);
-      setIsPlaying(true);
-      audioRef.current.src = prevTrack.url;
-      audioRef.current.play().catch(console.warn);
+    if (currentIndex > 0) {
+      setCurrentIndex(currentIndex - 1);
+    } else if (repeatMode === 'all') {
+      setCurrentIndex(queue.length - 1);
     }
-  };
+  }
 
-  const cycleRepeatMode = () => {
-    setRepeatMode(prev => {
-      if (prev === 'off') return 'all';
-      if (prev === 'all') return 'one';
-      return 'off';
-    });
-  };
-
-  const handleTimeUpdate = () => {
-    if (audioRef.current) {
-      setCurrentTime(audioRef.current.currentTime);
-      setDuration(audioRef.current.duration || 0);
+  function handleTrackEnded() {
+    if (repeatMode === 'one' && audioRef.current) {
+      audioRef.current.currentTime = 0;
+      audioRef.current.play();
+      return;
     }
-  };
+    playNext();
+  }
 
-  const handleSeek = (e) => {
-    const val = parseFloat(e.target.value);
-    if (audioRef.current && duration > 0) {
-      audioRef.current.currentTime = (val / 100) * duration;
-    }
-  };
+  function cycleRepeatMode() {
+    setRepeatMode(prev => (prev === 'off' ? 'all' : prev === 'all' ? 'one' : 'off'));
+  }
 
-  const formatTime = (sec) => {
-    if (isNaN(sec) || sec <= 0) return '0:00';
+  function formatSec(sec) {
+    if (!sec || isNaN(sec)) return '0:00';
     const m = Math.floor(sec / 60);
-    const s = Math.floor(sec % 60);
-    return `${m}:${s < 10 ? '0' : ''}${s}`;
-  };
+    const s = Math.floor(sec % 60).toString().padStart(2, '0');
+    return `${m}:${s}`;
+  }
+
+  async function handleInstallPwa() {
+    if (!deferredPrompt) return;
+    deferredPrompt.prompt();
+    await deferredPrompt.userChoice;
+    setDeferredPrompt(null);
+  }
+
+  if (!authChecked) {
+    return (
+      <main className="shell">
+        <div className="empty" style={{ marginTop: 48 }}>
+          <div className="empty-title">Cargando estudio musical…</div>
+          <div>Verificando sesión activa</div>
+        </div>
+      </main>
+    );
+  }
+
+  // ==================== UNAUTHENTICATED VIEW (LOGIN + INVITE REGISTER) ====================
+  if (!user) {
+    return (
+      <>
+        <header className="site-header">
+          <div className="brand">
+            <img src="/icon.svg" alt="MyMusicAnywhere" className="brand-logo" />
+            <div className="brand-text">
+              <span className="brand-name">MyMusicAnywhere</span>
+              <span className="brand-sub">Estudio privado &amp; PWA offline</span>
+            </div>
+          </div>
+          <span className="badge cobalt">Solo con invitación</span>
+        </header>
+
+        <main className="shell">
+          <div className="auth-wrap">
+            <div className="page-head">
+              <div>
+                <h1 className="page-title">
+                  {authMode === 'login' ? 'Entrar al estudio' : 'Activar invitación'}
+                </h1>
+                <p className="page-sub">
+                  {authMode === 'login'
+                    ? 'Accede a tu catálogo, descargas MP3 y fonoteca offline.'
+                    : 'Regístrate usando un código de invitación generado por el administrador.'}
+                </p>
+              </div>
+            </div>
+
+            <div className="card">
+              <div className="auth-tabs" role="tablist">
+                <button
+                  type="button"
+                  className={authMode === 'login' ? 'active' : ''}
+                  onClick={() => {
+                    setAuthMode('login');
+                    setAuthError('');
+                  }}
+                >
+                  Iniciar sesión
+                </button>
+                <button
+                  type="button"
+                  className={authMode === 'register' ? 'active' : ''}
+                  onClick={() => {
+                    setAuthMode('register');
+                    setAuthError('');
+                  }}
+                >
+                  Tengo código de invitación
+                </button>
+              </div>
+
+              {authError && <div className="alert err">{authError}</div>}
+
+              {authMode === 'login' ? (
+                <form className="form" onSubmit={handleAuthSubmit}>
+                  <div className="field">
+                    <label htmlFor="signin-username">Usuario</label>
+                    <input
+                      id="signin-username"
+                      name="username"
+                      type="text"
+                      autoComplete="username"
+                      enterKeyHint="next"
+                      required
+                      value={username}
+                      onChange={e => setUsername(e.target.value)}
+                      placeholder="tu_usuario"
+                    />
+                  </div>
+
+                  <div className="field">
+                    <label htmlFor="current-password">Contraseña</label>
+                    <div className="input-row">
+                      <input
+                        id="current-password"
+                        name="password"
+                        type={showPassword ? 'text' : 'password'}
+                        autoComplete="current-password"
+                        enterKeyHint="done"
+                        required
+                        value={password}
+                        onChange={e => setPassword(e.target.value)}
+                        placeholder="••••••••"
+                      />
+                      <button
+                        type="button"
+                        className="btn secondary sm"
+                        onClick={() => setShowPassword(v => !v)}
+                      >
+                        {showPassword ? 'Ocultar' : 'Mostrar'}
+                      </button>
+                    </div>
+                  </div>
+
+                  <button type="submit" className="btn" disabled={authBusy}>
+                    {authBusy ? 'Verificando…' : 'Entrar a MyMusicAnywhere'}
+                  </button>
+                </form>
+              ) : (
+                <form className="form" onSubmit={handleAuthSubmit}>
+                  <div className="field">
+                    <label htmlFor="invite-code">Código de invitación</label>
+                    <input
+                      id="invite-code"
+                      name="inviteCode"
+                      type="text"
+                      autoCapitalize="characters"
+                      enterKeyHint="next"
+                      required
+                      value={inviteCode}
+                      onChange={e => setInviteCode(e.target.value.toUpperCase())}
+                      placeholder="MMA-XXXX-XXXX"
+                    />
+                  </div>
+
+                  <div className="field">
+                    <label htmlFor="signup-username">Elige tu usuario</label>
+                    <input
+                      id="signup-username"
+                      name="username"
+                      type="text"
+                      autoComplete="username"
+                      enterKeyHint="next"
+                      minLength={3}
+                      maxLength={32}
+                      required
+                      value={username}
+                      onChange={e => setUsername(e.target.value)}
+                      placeholder="nuevo_usuario"
+                    />
+                  </div>
+
+                  <div className="field">
+                    <label htmlFor="new-password">Crea una contraseña (mín. 6 caracteres)</label>
+                    <div className="input-row">
+                      <input
+                        id="new-password"
+                        name="new-password"
+                        type={showPassword ? 'text' : 'password'}
+                        autoComplete="new-password"
+                        enterKeyHint="done"
+                        minLength={6}
+                        required
+                        value={password}
+                        onChange={e => setPassword(e.target.value)}
+                        placeholder="••••••••"
+                      />
+                      <button
+                        type="button"
+                        className="btn secondary sm"
+                        onClick={() => setShowPassword(v => !v)}
+                      >
+                        {showPassword ? 'Ocultar' : 'Mostrar'}
+                      </button>
+                    </div>
+                  </div>
+
+                  <button type="submit" className="btn" disabled={authBusy}>
+                    {authBusy ? 'Activando cuenta…' : 'Crear cuenta e ingresar'}
+                  </button>
+                </form>
+              )}
+            </div>
+          </div>
+        </main>
+      </>
+    );
+  }
+
+  // ==================== AUTHENTICATED APP SHELL ====================
+  const initial = (user.username || 'U').trim().charAt(0).toUpperCase();
 
   return (
-    <div className="app-container">
-      {/* Mineral Brand Header */}
+    <>
       <header className="site-header">
-        <div className="brand">
-          <div className="brand-icon-box">
-            <Music size={18} strokeWidth={2.5} />
+        <button type="button" className="brand" onClick={() => setActiveTab('explore')}>
+          <img src="/icon.svg" alt="MyMusicAnywhere" className="brand-logo" />
+          <div className="brand-text">
+            <span className="brand-name">MyMusicAnywhere</span>
+            <span className="brand-sub">Studio &amp; Offline Player</span>
           </div>
-          <div>
-            <div className="brand-word">myMusic<span>Anywhere</span></div>
-            <span className="brand-sub">Personal Audio • PWA</span>
-          </div>
-        </div>
+        </button>
 
-        <div className="header-actions">
-          {!isOnline ? (
-            <span className="badge-status offline"><WifiOff size={12} /> Offline</span>
-          ) : (
-            <span className="badge-status"><Wifi size={12} /> Online</span>
-          )}
+        <nav className="site-nav" aria-label="Principal">
+          <button
+            type="button"
+            className={activeTab === 'explore' ? 'active' : ''}
+            onClick={() => setActiveTab('explore')}
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <circle cx="11" cy="11" r="7" />
+              <path d="M20 20l-3.5-3.5" strokeLinecap="round" />
+            </svg>
+            <span>Explorar</span>
+          </button>
 
-          {showInstallBtn && (
-            <button className="btn-install" onClick={handleInstallClick}>
-              <Smartphone size={14} /> Instalar
+          <button
+            type="button"
+            className={activeTab === 'library' ? 'active' : ''}
+            onClick={() => setActiveTab('library')}
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <path d="M12 21s-7-4.5-7-10a4 4 0 0 1 7-2.6A4 4 0 0 1 19 11c0 5.5-7 10-7 10z" />
+            </svg>
+            <span>Librería</span>
+            {likedTracks.length > 0 && <span className="nav-count">{likedTracks.length}</span>}
+          </button>
+
+          <button
+            type="button"
+            className={activeTab === 'files' ? 'active' : ''}
+            onClick={() => setActiveTab('files')}
+          >
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+              <circle cx="12" cy="12" r="9" />
+              <circle cx="12" cy="12" r="2.5" />
+            </svg>
+            <span>Servidor</span>
+            {libraryFiles.length > 0 && <span className="nav-count">{libraryFiles.length}</span>}
+          </button>
+
+          {user.is_admin && (
+            <button
+              type="button"
+              className={activeTab === 'admin' ? 'active' : ''}
+              onClick={() => {
+                setActiveTab('admin');
+                fetchAdminData();
+              }}
+            >
+              <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2">
+                <path d="M12 2l7 4v6c0 5-3.5 8.5-7 10-3.5-1.5-7-5-7-10V6l7-4z" />
+              </svg>
+              <span>Admin</span>
             </button>
+          )}
+        </nav>
+
+        <div className="account" ref={accountRef}>
+          <button
+            type="button"
+            className="account-btn"
+            onClick={() => setAccountOpen(o => !o)}
+            aria-expanded={accountOpen}
+          >
+            <span className="account-avatar">{initial}</span>
+            <span className="account-name">{user.username}</span>
+          </button>
+
+          {accountOpen && (
+            <div className="account-menu" role="menu">
+              <div className="account-meta">
+                <span className="account-user">@{user.username}</span>
+                <span className={`badge ${user.is_admin ? 'cobalt' : 'mint'}`}>
+                  {user.is_admin ? 'Admin' : 'Miembro'}
+                </span>
+              </div>
+
+              {user.is_admin && (
+                <button
+                  type="button"
+                  className="account-item"
+                  onClick={() => {
+                    setActiveTab('admin');
+                    setAccountOpen(false);
+                    fetchAdminData();
+                  }}
+                >
+                  Panel de invitaciones
+                </button>
+              )}
+
+              {deferredPrompt && (
+                <button type="button" className="account-item" onClick={handleInstallPwa}>
+                  Instalar app en dispositivo
+                </button>
+              )}
+
+              <button type="button" className="account-item danger" onClick={handleLogout}>
+                Cerrar sesión
+              </button>
+            </div>
           )}
         </div>
       </header>
 
-      {/* Main Content Area */}
-      <main className="app-content">
-        {/* --- TAB 1: SEARCH / EXPLORAR --- */}
-        {activeTab === 'search' && (
+      <main className="shell">
+        {/* ==================== TAB 1: EXPLORAR ==================== */}
+        {activeTab === 'explore' && (
           <section>
-            <div className="search-box">
-              <div className="search-input-wrapper">
-                <Search size={18} className="search-icon" />
-                <input
-                  type="text"
-                  placeholder="Buscar género, pista, artista o álbum..."
-                  value={query}
-                  onChange={(e) => setQuery(e.target.value)}
-                  onKeyDown={(e) => e.key === 'Enter' && handleSearch()}
-                />
-                {query && (
-                  <button className="btn-clear" onClick={() => { setQuery(''); setResults([]); setSearchStatus(''); }}>
-                    <X size={16} />
-                  </button>
-                )}
+            <div className="page-head">
+              <div>
+                <h1 className="page-title">Catálogo musical</h1>
+                <p className="page-sub">
+                  Busca por canción, álbum o artista, escucha el adelanto o descarga el MP3 directo a tu dispositivo.
+                </p>
               </div>
-              <button 
-                className="btn-primary" 
-                onClick={() => handleSearch()}
-                disabled={searchLoading}
-              >
-                {searchLoading ? <RefreshCw size={15} className="spin" /> : <Search size={15} />}
-                Buscar
-              </button>
-            </div>
-
-            {/* Chips */}
-            <div className="chips-row">
-              <span className="chip-label"><Sparkles size={12} style={{ display: 'inline' }} /> Sugeridos:</span>
-              {SUGGESTIONS.map((item, idx) => (
-                <button 
-                  key={idx} 
-                  className="chip" 
-                  onClick={() => { setQuery(item); handleSearch(item); }}
-                >
-                  {item}
+              {deferredPrompt && (
+                <button type="button" className="btn secondary sm" onClick={handleInstallPwa}>
+                  + Instalar PWA
                 </button>
-              ))}
+              )}
             </div>
 
-            {searchStatus && <div className="status-message">{searchStatus}</div>}
+            <form
+              className="search-bar"
+              onSubmit={e => {
+                e.preventDefault();
+                searchTracks(query);
+              }}
+            >
+              <input
+                type="search"
+                className="search-input"
+                enterKeyHint="search"
+                placeholder="Buscar canción, artista o álbum…"
+                value={query}
+                onChange={e => setQuery(e.target.value)}
+              />
+              <button type="submit" className="btn" disabled={loading}>
+                {loading ? 'Buscando…' : 'Buscar'}
+              </button>
+            </form>
 
-            {/* Results Grid */}
-            <div className="cards-grid">
-              {results.map((track) => {
-                const trackKey = track.id || `${track.title}-${track.artist}`;
-                const dlState = downloadStates[trackKey];
-                const fav = isFavorite(track);
-                const isThisPreviewPlaying = isPlaying && currentTrack?.url === track.previewUrl;
+            <div className="grid">
+              {results.map((track, idx) => {
+                const dl = downloads[track.id];
+                const liked = isLiked(track.id);
+                const isCurrent = currentTrack?.id === track.id;
 
                 return (
-                  <div key={trackKey} className="track-card">
-                    {/* Heart button */}
-                    <button 
-                      className={`btn-fav ${fav ? 'active' : ''}`}
-                      title={fav ? 'Quitar de Me gusta' : 'Agregar a Me gusta'}
-                      onClick={() => toggleFavorite(track)}
-                    >
-                      <Heart size={18} fill={fav ? '#b0603c' : 'none'} color={fav ? '#b0603c' : 'currentColor'} strokeWidth={2} />
-                    </button>
-
-                    <div className="card-cover">
-                      <img src={track.artwork || '/icon.svg'} alt={track.title} loading="lazy" />
-                      {track.previewUrl && (
-                        <button 
-                          className="btn-preview" 
-                          title="Escuchar previa"
-                          onClick={() => playTrackInQueue({
-                            url: track.previewUrl,
-                            title: `${track.title} (Previa)`,
-                            artist: track.artist,
-                            artwork: track.artwork,
-                            isPreview: true
-                          })}
+                  <article key={track.id} className={`card item ${isCurrent ? 'playing' : ''}`}>
+                    <div className="item-head">
+                      <div className="item-media">
+                        <div
+                          className="artwork-wrap"
+                          onClick={() => playFromList(results, idx)}
+                          title="Reproducir pista"
                         >
-                          {isThisPreviewPlaying ? <Pause size={18} /> : <Play size={18} />}
-                        </button>
-                      )}
-                    </div>
+                          <img src={track.artwork} alt={track.title} loading="lazy" />
+                          <div className="artwork-play-overlay">
+                            {isCurrent && isPlaying ? '⏸' : '▶'}
+                          </div>
+                        </div>
+                        <div className="item-info">
+                          <div className="item-title">{track.title}</div>
+                          <div className="item-sub">
+                            {track.artist} {track.album ? `· ${track.album}` : ''}
+                          </div>
+                        </div>
+                      </div>
 
-                    <div className="card-info">
-                      <div className="card-title" title={track.title}>{track.title}</div>
-                      <div className="card-artist" title={track.artist}>{track.artist}</div>
-                      <div className="card-album" title={track.album}>
-                        {track.album} {track.duration ? `• ${formatTime(track.duration)}` : ''}
+                      <div className="item-actions">
+                        <button
+                          type="button"
+                          className={`btn heart ${liked ? 'liked' : ''}`}
+                          onClick={() => toggleLike(track)}
+                          title={liked ? 'Quitar de Librería' : 'Guardar en Librería'}
+                        >
+                          {liked ? '♥ Guardada' : '♡ Favorito'}
+                        </button>
+
+                        {dl?.status === 'downloading' ? (
+                          <span className="badge amber">
+                            Extrayendo {Math.round(dl.progress || 0)}%
+                          </span>
+                        ) : dl?.status === 'ready' ? (
+                          <a
+                            href={`/api/stream?file=${encodeURIComponent(dl.filename)}&download=1`}
+                            download={dl.filename}
+                            className="btn secondary sm"
+                          >
+                            ⬇ Guardar MP3
+                          </a>
+                        ) : (
+                          <button
+                            type="button"
+                            className="btn sm"
+                            onClick={() => startDownload(track)}
+                          >
+                            ⬇ MP3
+                          </button>
+                        )}
                       </div>
                     </div>
 
-                    {/* Download Button */}
-                    {!dlState ? (
-                      <button 
-                        className="btn-download-action" 
-                        onClick={() => handleStartDownload(track)}
-                      >
-                        <Download size={14} /> Descargar a móvil
-                      </button>
-                    ) : dlState.status === 'downloading' ? (
-                      <button className="btn-download-action loading" disabled>
-                        <RefreshCw size={14} className="spin" /> Guardando ({dlState.progress}%)...
-                      </button>
-                    ) : dlState.status === 'ready' ? (
-                      <a 
-                        className="btn-download-action ready" 
-                        href={dlState.downloadUrl}
-                        download={dlState.filename}
-                      >
-                        <Check size={14} /> ¡Guardado en móvil!
-                      </a>
-                    ) : (
-                      <button 
-                        className="btn-download-action" 
-                        onClick={() => handleStartDownload(track)}
-                      >
-                        ❌ Reintentar
-                      </button>
+                    {dl?.status === 'downloading' && (
+                      <div className="progress-track">
+                        <div
+                          className="progress-fill"
+                          style={{ width: `${dl.progress || 8}%` }}
+                        />
+                      </div>
                     )}
-                  </div>
+
+                    <dl className="meta">
+                      <div>
+                        <dt>Duración</dt>
+                        <dd>{track.duration || '—'}</dd>
+                      </div>
+                      <div>
+                        <dt>Género</dt>
+                        <dd>{track.genre || 'Música'}</dd>
+                      </div>
+                      <div>
+                        <dt>Estado</dt>
+                        <dd>
+                          {dl?.status === 'ready'
+                            ? 'MP3 listo'
+                            : liked
+                            ? 'En tu librería'
+                            : 'Streaming 30s'}
+                        </dd>
+                      </div>
+                    </dl>
+                  </article>
                 );
               })}
             </div>
           </section>
         )}
 
-        {/* --- TAB 2: FAVORITOS (ME GUSTA) --- */}
-        {activeTab === 'favorites' && (
+        {/* ==================== TAB 2: LIBRERÍA (FAVORITOS & OFFLINE) ==================== */}
+        {activeTab === 'library' && (
           <section>
-            <div className="library-head">
-              <h2>Canciones que te gustan ({favorites.length})</h2>
-              {favorites.length > 0 && (
-                <button 
-                  className="btn-secondary"
-                  onClick={() => {
-                    const queue = favorites.map(f => ({
-                      url: f.previewUrl,
-                      title: f.title,
-                      artist: f.artist,
-                      artwork: f.artwork,
-                      isPreview: true
-                    }));
-                    if (queue.length > 0) playTrackInQueue(queue[0], queue, 0);
-                  }}
-                >
-                  <Play size={14} /> Reproducir todas
-                </button>
-              )}
+            <div className="page-head">
+              <div>
+                <h1 className="page-title">Mi librería</h1>
+                <p className="page-sub">
+                  Tus pistas con corazón, sincronizadas en caché offline del navegador y listas para bucle o aleatorio.
+                </p>
+              </div>
             </div>
 
-            {favorites.length === 0 ? (
-              <p className="status-message">
-                Aún no diste corazón a ninguna canción. Dale ❤️ a las canciones que busques para guardarlas en tu lista.
-              </p>
+            <div className="toolbar">
+              <div className="toolbar-group">
+                <button
+                  type="button"
+                  className="btn sm"
+                  disabled={likedTracks.length === 0}
+                  onClick={() => playFromList(likedTracks, 0)}
+                >
+                  ▶ Reproducir todo
+                </button>
+                <button
+                  type="button"
+                  className={`btn secondary sm ${shuffle ? 'cobalt' : ''}`}
+                  onClick={() => setShuffle(s => !s)}
+                >
+                  🔀 Aleatorio: {shuffle ? 'ON' : 'OFF'}
+                </button>
+                <button type="button" className="btn secondary sm" onClick={cycleRepeatMode}>
+                  🔁 Bucle:{' '}
+                  {repeatMode === 'off' ? 'No' : repeatMode === 'all' ? 'Todo' : '1 pista'}
+                </button>
+              </div>
+
+              <button
+                type="button"
+                className="btn secondary sm"
+                disabled={likedTracks.length === 0 || syncingAll}
+                onClick={downloadAllLikedForOffline}
+              >
+                {syncingAll ? 'Sincronizando…' : '⬇ Descargar todo (Offline + MP3)'}
+              </button>
+            </div>
+
+            {likedTracks.length === 0 ? (
+              <div className="empty">
+                <div className="empty-title">Tu librería está vacía</div>
+                <p>
+                  Pulsa <strong>♡ Favorito</strong> en cualquier canción del buscador para guardarla aquí.
+                </p>
+              </div>
             ) : (
-              <div className="library-list">
-                {favorites.map((favTrack, idx) => {
-                  const trackKey = favTrack.id || `${favTrack.title}-${favTrack.artist}`;
-                  const dlState = downloadStates[trackKey];
-                  const isCurrent = currentTrack?.title === favTrack.title && isPlaying;
+              <div className="grid">
+                {likedTracks.map((track, idx) => {
+                  const dl = downloads[track.id];
+                  const streamUrl =
+                    track.streamUrl ||
+                    (track.filename
+                      ? `/api/stream?file=${encodeURIComponent(track.filename)}`
+                      : null) ||
+                    (dl?.filename ? `/api/stream?file=${encodeURIComponent(dl.filename)}` : null);
+                  const filename = track.filename || dl?.filename;
+                  const isOfflineReady = streamUrl && offlineUrls[streamUrl];
+                  const isCurrent = currentTrack?.id === track.id;
 
                   return (
-                    <div key={trackKey} className="library-item">
-                      <div className="library-item-info">
-                        <img src={favTrack.artwork || '/icon.svg'} alt={favTrack.title} className="item-thumb" />
-                        <div>
-                          <div className="library-item-name">{favTrack.title}</div>
-                          <div className="library-item-meta">{favTrack.artist} {favTrack.album ? `• ${favTrack.album}` : ''}</div>
+                    <article key={track.id} className={`card item ${isCurrent ? 'playing' : ''}`}>
+                      <div className="item-head">
+                        <div className="item-media">
+                          <div
+                            className="artwork-wrap"
+                            onClick={() => playFromList(likedTracks, idx)}
+                          >
+                            <img src={track.artwork} alt={track.title} loading="lazy" />
+                            <div className="artwork-play-overlay">
+                              {isCurrent && isPlaying ? '⏸' : '▶'}
+                            </div>
+                          </div>
+                          <div className="item-info">
+                            <div className="item-title">{track.title}</div>
+                            <div className="item-sub">{track.artist}</div>
+                          </div>
+                        </div>
+
+                        <div className="item-actions">
+                          {isOfflineReady ? (
+                            <span className="badge mint">✓ Offline</span>
+                          ) : dl?.status === 'downloading' ? (
+                            <span className="badge amber">
+                              {Math.round(dl.progress || 0)}%
+                            </span>
+                          ) : (
+                            <button
+                              type="button"
+                              className="btn sm"
+                              onClick={() => startDownload(track)}
+                            >
+                              ⬇ Obtener MP3
+                            </button>
+                          )}
+
+                          {filename && (
+                            <a
+                              href={`/api/stream?file=${encodeURIComponent(filename)}&download=1`}
+                              download={filename}
+                              className="btn secondary sm"
+                            >
+                              💾 Archivo
+                            </a>
+                          )}
+
+                          <button
+                            type="button"
+                            className="btn heart liked"
+                            onClick={() => toggleLike(track)}
+                            title="Quitar de Librería"
+                          >
+                            ♥
+                          </button>
                         </div>
                       </div>
-
-                      <div className="library-item-actions">
-                        {/* Play preview */}
-                        {favTrack.previewUrl && (
-                          <button 
-                            className="btn-item btn-item-play"
-                            onClick={() => {
-                              const queue = favorites.map(f => ({
-                                url: f.previewUrl,
-                                title: f.title,
-                                artist: f.artist,
-                                artwork: f.artwork,
-                                isPreview: true
-                              }));
-                              playTrackInQueue(queue[idx], queue, idx);
-                            }}
-                          >
-                            {isCurrent ? <Pause size={13} /> : <Play size={13} />}
-                            {isCurrent ? 'Pausar' : 'Previa'}
-                          </button>
-                        )}
-
-                        {/* Download button directly in favorites */}
-                        {!dlState ? (
-                          <button 
-                            className="btn-item btn-item-save"
-                            onClick={() => handleStartDownload(favTrack)}
-                            title="Descargar y guardar en dispositivo"
-                          >
-                            <Download size={13} /> Bajar
-                          </button>
-                        ) : dlState.status === 'downloading' ? (
-                          <button className="btn-item btn-item-save" disabled>
-                            <RefreshCw size={13} className="spin" /> {dlState.progress}%
-                          </button>
-                        ) : dlState.status === 'ready' ? (
-                          <a 
-                            className="btn-item btn-item-save" 
-                            href={dlState.downloadUrl}
-                            download={dlState.filename}
-                            style={{ background: 'var(--lime)', color: '#000' }}
-                          >
-                            <Check size={13} /> Guardado
-                          </a>
-                        ) : (
-                          <button className="btn-item btn-item-save" onClick={() => handleStartDownload(favTrack)}>
-                            ❌
-                          </button>
-                        )}
-
-                        {/* Remove favorite */}
-                        <button 
-                          className="btn-item-fav-remove" 
-                          title="Quitar" 
-                          onClick={() => toggleFavorite(favTrack)}
-                        >
-                          <Trash2 size={16} />
-                        </button>
-                      </div>
-                    </div>
+                    </article>
                   );
                 })}
               </div>
@@ -652,192 +1072,367 @@ export default function HomePage() {
           </section>
         )}
 
-        {/* --- TAB 3: DESCARGAS & OFFLINE --- */}
-        {activeTab === 'downloads' && (
+        {/* ==================== TAB 3: ARCHIVOS EN SERVIDOR ==================== */}
+        {activeTab === 'files' && (
           <section>
-            <div className="library-head">
-              <h2>Música en dispositivo ({libraryFiles.length})</h2>
-              <button className="btn-secondary" onClick={fetchLibrary} disabled={libraryLoading}>
-                <RefreshCw size={13} className={libraryLoading ? 'spin' : ''} /> Actualizar
+            <div className="page-head">
+              <div>
+                <h1 className="page-title">Archivos MP3 en servidor</h1>
+                <p className="page-sub">
+                  Pistas extraídas en el servidor listas para reproducir o bajar a tu teléfono o PC.
+                </p>
+              </div>
+              <button type="button" className="btn secondary sm" onClick={fetchLibraryFiles}>
+                Actualizar lista
               </button>
             </div>
 
             {libraryFiles.length === 0 ? (
-              <p className="status-message">
-                Todavía no descargaste canciones completas. ¡Buscá en Explorar y presiona «Descargar a móvil»!
-              </p>
+              <div className="empty">
+                <div className="empty-title">Sin archivos MP3 todavía</div>
+                <p>Descarga cualquier canción desde Explorar o Librería.</p>
+              </div>
             ) : (
-              <div className="library-list">
+              <div className="grid">
                 {libraryFiles.map((file, idx) => {
-                  const cleanName = file.filename.replace(/\.mp3$/i, '');
-                  const isCurrent = currentTrack?.filename === file.filename && isPlaying;
-                  const isCachedOffline = offlineCachedUrls.has(window.location.origin + file.url);
+                  const isOffline = offlineUrls[file.url];
+                  const formattedList = libraryFiles.map(f => ({
+                    id: f.filename,
+                    title: f.filename.replace(/\.mp3$/i, ''),
+                    artist: `${f.sizeMB} MB · Servidor`,
+                    artwork: '/icon.svg',
+                    filename: f.filename,
+                    streamUrl: f.url
+                  }));
 
                   return (
-                    <div key={file.filename} className="library-item">
-                      <div className="library-item-info">
-                        <div className="brand-icon-box" style={{ width: '38px', height: '38px' }}>
-                          <Music size={18} strokeWidth={2.5} />
-                        </div>
-                        <div>
-                          <div className="library-item-name" title={cleanName}>
-                            {cleanName}
-                            {isCachedOffline && <span className="badge-offline">⚡ Offline</span>}
+                    <article key={file.filename} className="card item">
+                      <div className="item-head">
+                        <div className="item-media">
+                          <div
+                            className="artwork-wrap"
+                            onClick={() => playFromList(formattedList, idx)}
+                          >
+                            <img src="/icon.svg" alt="MP3" />
+                            <div className="artwork-play-overlay">▶</div>
                           </div>
-                          <div className="library-item-meta">{file.sizeMB} MB • MP3 Audio</div>
+                          <div className="item-info">
+                            <div className="item-title">{file.filename.replace(/\.mp3$/i, '')}</div>
+                            <div className="item-sub">{file.sizeMB} MB · Audio MP3</div>
+                          </div>
+                        </div>
+
+                        <div className="item-actions">
+                          <button
+                            type="button"
+                            className="btn secondary sm"
+                            onClick={() => saveUrlToOfflineCache(file.url, file.filename)}
+                          >
+                            {isOffline ? '✓ En caché' : '⚡ Cachear'}
+                          </button>
+                          <a
+                            href={`${file.url}&download=1`}
+                            download={file.filename}
+                            className="btn sm"
+                          >
+                            ⬇ Descargar
+                          </a>
                         </div>
                       </div>
-
-                      <div className="library-item-actions">
-                        <button 
-                          className="btn-item btn-item-play"
-                          onClick={() => {
-                            const queue = libraryFiles.map(f => ({
-                              url: f.url,
-                              title: f.filename.replace(/\.mp3$/i, ''),
-                              artist: 'Descarga local',
-                              artwork: '/icon.svg',
-                              filename: f.filename,
-                              downloadUrl: `${f.url}&download=1`
-                            }));
-                            playTrackInQueue(queue[idx], queue, idx);
-                          }}
-                        >
-                          {isCurrent ? <Pause size={13} /> : <Play size={13} />}
-                          {isCurrent ? 'Pausar' : 'Escuchar'}
-                        </button>
-                        <a 
-                          className="btn-item btn-item-save" 
-                          href={`${file.url}&download=1`}
-                          download={file.filename}
-                          title="Descargar archivo a tu móvil o PC"
-                        >
-                          <Download size={13} /> Guardar
-                        </a>
-                      </div>
-                    </div>
+                    </article>
                   );
                 })}
               </div>
             )}
           </section>
         )}
+
+        {/* ==================== TAB 4: ADMIN PANEL (SOLO ADMIN) ==================== */}
+        {activeTab === 'admin' && user.is_admin && (
+          <section>
+            <div className="page-head">
+              <div>
+                <h1 className="page-title">Administración e invitaciones</h1>
+                <p className="page-sub">
+                  Genera códigos de invitación para nuevos usuarios y supervisa el espacio en disco del VPS.
+                </p>
+              </div>
+            </div>
+
+            <div className="grid three" style={{ marginBottom: 20 }}>
+              <div className="stat">
+                <div className="stat-label">Usuarios registrados</div>
+                <div className="stat-value">{adminData.users.length}</div>
+                <div className="stat-hint">
+                  {adminData.users.filter(u => u.active).length} cuentas activas
+                </div>
+              </div>
+
+              <div className="stat">
+                <div className="stat-label">Códigos de invitación</div>
+                <div className="stat-value">
+                  {adminData.invites.filter(i => !i.revoked && i.used_count < i.max_uses).length}
+                </div>
+                <div className="stat-hint">Disponibles para usar</div>
+              </div>
+
+              <div className="stat">
+                <div className="stat-label">Almacenamiento MP3</div>
+                <div className="stat-value">
+                  {adminData.storage
+                    ? `${adminData.storage.usedMB} / ${adminData.storage.maxMB} MB`
+                    : '—'}
+                </div>
+                <div className="stat-hint">
+                  {adminData.storage
+                    ? `${adminData.storage.fileCount} archivos (limpieza FIFO automática)`
+                    : 'Calculando…'}
+                </div>
+              </div>
+            </div>
+
+            <div className="card">
+              <h2 className="section-title" style={{ marginTop: 0 }}>
+                <span>Generar nuevo código de invitación</span>
+              </h2>
+              {adminMsg && <div className="alert ok">{adminMsg}</div>}
+              <form className="form" onSubmit={handleCreateInvite}>
+                <div className="grid two">
+                  <div className="field">
+                    <label htmlFor="invite-label">Etiqueta / Para quién es</label>
+                    <input
+                      id="invite-label"
+                      type="text"
+                      placeholder="Ej. Amigos uni, Dispositivo móvil…"
+                      value={inviteLabel}
+                      onChange={e => setInviteLabel(e.target.value)}
+                    />
+                  </div>
+                  <div className="field">
+                    <label htmlFor="invite-uses">Límite de registros permitidos</label>
+                    <input
+                      id="invite-uses"
+                      type="number"
+                      min={1}
+                      max={100}
+                      value={inviteMaxUses}
+                      onChange={e => setInviteMaxUses(e.target.value)}
+                    />
+                  </div>
+                </div>
+                <div>
+                  <button type="submit" className="btn">
+                    + Generar código de invitación
+                  </button>
+                </div>
+              </form>
+            </div>
+
+            <h2 className="section-title">
+              <span>Códigos de invitación</span>
+              <span className="count">{adminData.invites.length}</span>
+            </h2>
+
+            {adminData.invites.length === 0 ? (
+              <div className="empty">
+                <div className="empty-title">No hay códigos creados todavía</div>
+                <p>Usa el formulario superior para crear tu primer código de invitación.</p>
+              </div>
+            ) : (
+              <div className="grid">
+                {adminData.invites.map(inv => {
+                  const exhausted = inv.used_count >= inv.max_uses;
+                  return (
+                    <article key={inv.code} className="card item">
+                      <div className="item-head">
+                        <div>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: 10, flexWrap: 'wrap' }}>
+                            <span className="code-pill">{inv.code}</span>
+                            <span
+                              className={`badge ${
+                                inv.revoked ? 'coral' : exhausted ? 'amber' : 'mint'
+                              }`}
+                            >
+                              {inv.revoked
+                                ? 'Revocado'
+                                : exhausted
+                                ? 'Agotado'
+                                : 'Disponible'}
+                            </span>
+                          </div>
+                          <div className="item-sub" style={{ marginTop: 6 }}>
+                            Etiqueta: <strong>{inv.label}</strong>
+                          </div>
+                        </div>
+
+                        <div className="item-actions">
+                          <button
+                            type="button"
+                            className="btn secondary sm"
+                            onClick={() => copyInviteCode(inv.code)}
+                          >
+                            {copiedCode === inv.code ? '✓ Copiado' : 'Copiar código'}
+                          </button>
+                          <button
+                            type="button"
+                            className="btn secondary sm"
+                            onClick={() =>
+                              handleAdminAction({ action: 'revoke_invite', code: inv.code })
+                            }
+                          >
+                            {inv.revoked ? 'Reactivar' : 'Revocar'}
+                          </button>
+                          <button
+                            type="button"
+                            className="btn ghost sm"
+                            onClick={() =>
+                              handleAdminAction({ action: 'delete_invite', code: inv.code })
+                            }
+                          >
+                            Eliminar
+                          </button>
+                        </div>
+                      </div>
+
+                      <dl className="meta">
+                        <div>
+                          <dt>Usos</dt>
+                          <dd>
+                            {inv.used_count} / {inv.max_uses}
+                          </dd>
+                        </div>
+                        <div>
+                          <dt>Usado por</dt>
+                          <dd>
+                            {inv.used_by?.length
+                              ? inv.used_by.map(u => `@${u.username}`).join(', ')
+                              : 'Nadie aún'}
+                          </dd>
+                        </div>
+                        <div>
+                          <dt>Creado</dt>
+                          <dd>{new Date(inv.created_at).toLocaleDateString('es')}</dd>
+                        </div>
+                      </dl>
+                    </article>
+                  );
+                })}
+              </div>
+            )}
+
+            <h2 className="section-title">
+              <span>Usuarios registrados</span>
+              <span className="count">{adminData.users.length}</span>
+            </h2>
+
+            <div className="grid">
+              {adminData.users.map(u => (
+                <article key={u.id} className="card item">
+                  <div className="item-head">
+                    <div>
+                      <div className="item-title">@{u.username}</div>
+                      <div className="item-sub">
+                        {u.is_admin
+                          ? 'Administrador principal'
+                          : `Invitado con código: ${u.invited_by_code || '—'}`}
+                      </div>
+                    </div>
+                    <div className="item-actions">
+                      <span className={`badge ${u.is_admin ? 'cobalt' : u.active ? 'mint' : 'coral'}`}>
+                        {u.is_admin ? 'Admin' : u.active ? 'Activo' : 'Suspendido'}
+                      </span>
+                      {!u.is_admin && (
+                        <button
+                          type="button"
+                          className="btn secondary sm"
+                          onClick={() =>
+                            handleAdminAction({ action: 'toggle_user', userId: u.id })
+                          }
+                        >
+                          {u.active ? 'Suspender' : 'Activar'}
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                </article>
+              ))}
+            </div>
+          </section>
+        )}
       </main>
 
-      {/* Floating Audio Player (docks above bottom navigation bar) */}
+      {/* ==================== EDITORIAL FLOATING PLAYER DOCK ==================== */}
       {currentTrack && (
-        <footer className="global-player">
-          <div className="player-info">
-            <img src={currentTrack.artwork || '/icon.svg'} alt="Cover" className="player-thumb" />
-            <div className="player-meta">
-              <span className="player-title">{currentTrack.title}</span>
-              <span className="player-artist">{currentTrack.artist}</span>
+        <div className="player-dock">
+          <div className="player-main">
+            <div className="player-track">
+              <img src={currentTrack.artwork || '/icon.svg'} alt={currentTrack.title} />
+              <div style={{ minWidth: 0 }}>
+                <div className="player-track-title">{currentTrack.title}</div>
+                <div className="player-track-sub">{currentTrack.artist}</div>
+              </div>
             </div>
-          </div>
 
-          <div className="player-controls">
-            <div className="player-buttons">
-              {/* Shuffle button */}
-              <button 
-                className={`btn-ctrl ${isShuffle ? 'active' : ''}`}
-                title={isShuffle ? 'Aleatorio activado' : 'Activar aleatorio'}
-                onClick={() => setIsShuffle(prev => !prev)}
+            <div className="player-controls">
+              <button
+                type="button"
+                className={`ctrl-btn ${shuffle ? 'active' : ''}`}
+                onClick={() => setShuffle(s => !s)}
+                title="Aleatorio"
               >
-                <Shuffle size={17} />
+                🔀
               </button>
-
-              {/* Prev */}
-              <button className="btn-ctrl" onClick={handlePrev} title="Anterior">
-                <SkipBack size={19} />
+              <button type="button" className="ctrl-btn" onClick={playPrev} title="Anterior">
+                ⏮
               </button>
-
-              {/* Main Play/Pause */}
-              <button className="btn-ctrl btn-play-main" onClick={togglePlayPause}>
-                {isPlaying ? <Pause size={19} /> : <Play size={19} />}
+              <button
+                type="button"
+                className="ctrl-btn play-main"
+                onClick={togglePlayPause}
+                title={isPlaying ? 'Pausar' : 'Reproducir'}
+              >
+                {isPlaying ? '⏸' : '▶'}
               </button>
-
-              {/* Next */}
-              <button className="btn-ctrl" onClick={handleNext} title="Siguiente">
-                <SkipForward size={19} />
+              <button type="button" className="ctrl-btn" onClick={playNext} title="Siguiente">
+                ⏭
               </button>
-
-              {/* Repeat button */}
-              <button 
-                className={`btn-ctrl ${repeatMode !== 'off' ? 'active' : ''}`}
-                title={`Repetir: ${repeatMode}`}
+              <button
+                type="button"
+                className={`ctrl-btn ${repeatMode !== 'off' ? 'active' : ''}`}
                 onClick={cycleRepeatMode}
+                title="Modo bucle"
               >
-                {repeatMode === 'one' ? <Repeat1 size={17} /> : <Repeat size={17} />}
+                {repeatMode === 'one' ? '🔂' : '🔁'}
               </button>
             </div>
-
-            <div className="player-progress-row">
-              <span className="time-label">{formatTime(currentTime)}</span>
-              <input 
-                type="range" 
-                min="0" 
-                max="100" 
-                value={duration ? (currentTime / duration) * 100 : 0} 
-                onChange={handleSeek}
-                className="player-slider"
-              />
-              <span className="time-label">{formatTime(duration)}</span>
-            </div>
           </div>
 
-          <div className="player-actions">
-            {currentTrack.downloadUrl && (
-              <a 
-                href={currentTrack.downloadUrl} 
-                download={currentTrack.filename} 
-                className="btn-icon" 
-                title="Guardar archivo en dispositivo"
-              >
-                <Download size={18} />
-              </a>
-            )}
-            <button className="btn-icon" onClick={() => { audioRef.current?.pause(); setCurrentTrack(null); setIsPlaying(false); }}>
-              <X size={18} />
-            </button>
+          <div className="player-seek">
+            <span>{formatSec(progress)}</span>
+            <input
+              type="range"
+              min="0"
+              max={duration || 100}
+              value={progress}
+              onChange={e => {
+                const val = Number(e.target.value);
+                setProgress(val);
+                if (audioRef.current) audioRef.current.currentTime = val;
+              }}
+            />
+            <span>{formatSec(duration)}</span>
           </div>
-        </footer>
+
+          <audio
+            ref={audioRef}
+            onTimeUpdate={e => setProgress(e.currentTarget.currentTime)}
+            onLoadedMetadata={e => setDuration(e.currentTarget.duration)}
+            onEnded={handleTrackEnded}
+            onPlay={() => setIsPlaying(true)}
+            onPause={() => setIsPlaying(false)}
+          />
+        </div>
       )}
-
-      {/* PWA Mobile Bottom Navigation Bar (Fijo abajo de todo con estilo Mineral) */}
-      <nav className="pwa-bottom-bar">
-        <button 
-          className={`pwa-bar-item ${activeTab === 'search' ? 'active' : ''}`}
-          onClick={() => setActiveTab('search')}
-        >
-          <Search size={20} strokeWidth={2.2} />
-          <span>Buscar</span>
-        </button>
-
-        <button 
-          className={`pwa-bar-item ${activeTab === 'favorites' ? 'active' : ''}`}
-          onClick={() => setActiveTab('favorites')}
-        >
-          <Heart size={20} strokeWidth={2.2} fill={activeTab === 'favorites' ? 'var(--clay)' : 'none'} color={activeTab === 'favorites' ? 'var(--clay)' : 'currentColor'} />
-          <span>Me gusta</span>
-          {favorites.length > 0 && <span className="pwa-bar-badge">{favorites.length}</span>}
-        </button>
-
-        <button 
-          className={`pwa-bar-item ${activeTab === 'downloads' ? 'active' : ''}`}
-          onClick={() => { setActiveTab('downloads'); fetchLibrary(); }}
-        >
-          <Download size={20} strokeWidth={2.2} />
-          <span>Offline</span>
-          {libraryFiles.length > 0 && <span className="pwa-bar-badge">{libraryFiles.length}</span>}
-        </button>
-      </nav>
-
-      {/* Hidden Audio Element */}
-      <audio 
-        ref={audioRef}
-        onTimeUpdate={handleTimeUpdate}
-        onEnded={handleNext}
-      />
-    </div>
+    </>
   );
 }

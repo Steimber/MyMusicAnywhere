@@ -1,19 +1,25 @@
 import { NextResponse } from 'next/server';
 import fs from 'fs';
 import path from 'path';
+import { getDownloadsDir, getSessionUser } from '../../../lib/store';
 
-const DOWNLOADS_DIR = path.join(process.cwd(), 'downloads');
-
-export async function GET() {
+export async function GET(request) {
   try {
-    if (!fs.existsSync(DOWNLOADS_DIR)) {
+    const user = getSessionUser(request);
+    if (!user) {
+      return NextResponse.json({ files: [], unauthorized: true }, { status: 401 });
+    }
+
+    const downloadsDir = getDownloadsDir();
+    if (!fs.existsSync(downloadsDir)) {
       return NextResponse.json({ files: [] });
     }
 
-    const files = fs.readdirSync(DOWNLOADS_DIR)
+    const files = fs
+      .readdirSync(downloadsDir)
       .filter(f => f.endsWith('.mp3') || f.endsWith('.m4a') || f.endsWith('.opus'))
       .map(name => {
-        const filePath = path.join(DOWNLOADS_DIR, name);
+        const filePath = path.join(downloadsDir, name);
         const stat = fs.statSync(filePath);
         return {
           filename: name,

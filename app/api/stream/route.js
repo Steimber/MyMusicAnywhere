@@ -1,7 +1,6 @@
 import fs from 'fs';
 import path from 'path';
-
-const DOWNLOADS_DIR = path.join(process.cwd(), 'downloads');
+import { getDownloadsDir } from '../../../lib/store';
 
 export async function GET(request) {
   const { searchParams } = new URL(request.url);
@@ -12,8 +11,9 @@ export async function GET(request) {
     return new Response('Archivo no especificado', { status: 400 });
   }
 
-  const safePath = path.normalize(path.join(DOWNLOADS_DIR, file));
-  if (!safePath.startsWith(DOWNLOADS_DIR) || !fs.existsSync(safePath)) {
+  const downloadsDir = getDownloadsDir();
+  const safePath = path.normalize(path.join(downloadsDir, file));
+  if (!safePath.startsWith(downloadsDir) || !fs.existsSync(safePath)) {
     return new Response('Archivo no encontrado', { status: 404 });
   }
 

@@ -1,37 +1,33 @@
-# myMusicAnywhere
+# MyMusicAnywhere
 
-A mobile-first Progressive Web App (PWA) for exploring audio catalogs, managing favorite tracks, and caching audio for offline playback.
+A self-hosted Progressive Web App (PWA) for exploring music catalogs, extracting MP3 audio, caching tracks for offline playback, and managing multi-user access via invitation codes.
 
 ## Features
 
-- **Catalog Exploration**: Search tracks, artists, and albums with 30-second audio previews and high-resolution cover art.
-- **Favorites Collection**: Save favorite tracks to `localStorage` and queue them in the built-in audio player.
-- **Offline Audio Caching**: Uses a Service Worker (`public/sw.js`) and the browser Cache Storage API (`mymusic-offline-audio`) for offline playback.
-- **Full Audio Player**: Supports shuffle, repeat (all/one), track scrubbing, and background queue navigation.
-- **Installable PWA**: Includes a Web App Manifest and mobile bottom navigation bar designed for iOS, Android, and desktop.
+- **Invite-Only Authentication & Admin Panel**: Users sign in or register using single- or multi-use invitation codes (`MMA-XXXX-XXXX`) generated from the built-in admin panel.
+- **Catalog Exploration**: Search tracks, artists, and albums with 30-second audio previews and cover art.
+- **Library & Offline Audio Caching**: Save favorite tracks, download MP3 files directly to your device, and cache audio streams in browser `CacheStorage` for offline playback.
+- **Automatic Storage Quota (FIFO)**: Caps server-side MP3 storage at `MAX_STORAGE_MB` (default `2048` MB), automatically pruning the oldest files so shared VPS disks never fill up.
+- **Editorial Studio UI**: Tactile paper-and-ink design system with responsive desktop pill navigation, mobile bottom bar, and floating vinyl player deck.
 
-## Getting Started
+## Environment Variables (`.env`)
 
-### Prerequisites
+Copy `.env.example` to `.env`:
 
-- **Node.js** 18+
-- **Python 3** & **FFmpeg** (for local audio transcoding and media processing)
+- `PORT` — HTTP port (default: `3333`)
+- `ADMIN_USERNAME` — Initial administrator username
+- `ADMIN_PASSWORD` — Initial administrator password
+- `SESSION_SECRET` — Secret key used to sign session cookies
+- `DOWNLOADS_DIR` — Directory where extracted `.mp3` files are stored (default: `./downloads`)
+- `MAX_STORAGE_MB` — Maximum disk space in MB for `DOWNLOADS_DIR` before oldest files are pruned (default: `2048`)
+- `YTDLP_BIN` — Optional binary path or command for `yt-dlp` (defaults to `yt-dlp` in `PATH`)
+- `FFMPEG_BIN` — Optional binary path or directory for `ffmpeg` (defaults to `ffmpeg` in `PATH`)
 
-### Local Development
-
-```bash
-npm install
-npm run dev
-```
-
-Open `http://localhost:3333` in your browser.
-
-### Production Build (VPS / Self-Hosted)
+## Production Build (VPS / Self-Hosted)
 
 ```bash
+cp .env.example .env
 npm install
 npm run build
 pm2 start ecosystem.config.cjs
 ```
-
-See `deploy/setup-vps.sh` and `deploy/nginx-site.conf` for automated deployment and reverse proxy configuration.

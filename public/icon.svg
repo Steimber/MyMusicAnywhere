@@ -1,12 +1,16 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
-  <defs>
-    <linearGradient id="grad" x1="0%" y1="0%" x2="100%" y2="100%">
-      <stop offset="0%" stop-color="#818cf8"/>
-      <stop offset="50%" stop-color="#6366f1"/>
-      <stop offset="100%" stop-color="#4338ca"/>
-    </linearGradient>
-  </defs>
-  <rect width="512" height="512" rx="128" fill="url(#grad)"/>
-  <!-- Musical note icon -->
-  <path d="M352 112v198.5c-9.6-6-21.7-9.5-35-9.5-37 0-67 25.5-67 57s30 57 67 57 67-25.5 67-57V188l80-24v-52l-112 0zM176 280c-37 0-67 25.5-67 57s30 57 67 57 67-25.5 67-57V144l112-32v-40L176 104v176z" fill="#ffffff" fill-opacity="0.95"/>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+  <!-- Editorial badge base -->
+  <rect x="4" y="4" width="56" height="56" rx="14" fill="#12131A" stroke="#2B44FF" stroke-width="2.5"/>
+  <!-- Vinyl disc outer ring -->
+  <circle cx="30" cy="32" r="20" fill="#1B1D29" stroke="#F3F1EB" stroke-width="2"/>
+  <!-- Vinyl grooves -->
+  <circle cx="30" cy="32" r="15" stroke="#5C5F6E" stroke-width="1.2" stroke-dasharray="6 4"/>
+  <circle cx="30" cy="32" r="11" stroke="#5C5F6E" stroke-width="1.2" stroke-dasharray="4 3"/>
+  <!-- Electric cobalt center label -->
+  <circle cx="30" cy="32" r="7" fill="#2B44FF" stroke="#F3F1EB" stroke-width="1.8"/>
+  <circle cx="30" cy="32" r="2.2" fill="#F3F1EB"/>
+  <!-- Tonearm & stylus needle -->
+  <circle cx="50" cy="14" r="3.5" fill="#FF4D6D" stroke="#F3F1EB" stroke-width="1.5"/>
+  <path d="M50 17.5V34L41 43" stroke="#F3F1EB" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+  <rect x="38" y="41" width="5" height="3.5" rx="1" transform="rotate(-45 38 41)" fill="#2B44FF" stroke="#F3F1EB" stroke-width="1.2"/>
 </svg>

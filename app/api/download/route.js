@@ -2,20 +2,35 @@ import { NextResponse } from 'next/server';
 import fs from 'fs';
 import path from 'path';
 import { spawn } from 'child_process';
+import {
+  getDownloadsDir,
+  getSessionUser,
+  enforceStorageQuota
+} from '../../../lib/store';
 
-const DOWNLOADS_DIR = path.join(process.cwd(), 'downloads');
-if (!fs.existsSync(DOWNLOADS_DIR)) {
-  fs.mkdirSync(DOWNLOADS_DIR, { recursive: true });
-}
-
-// Global state in Node memory across requests
 if (!global.__activeDownloads) {
   global.__activeDownloads = new Map();
 }
 const activeDownloads = global.__activeDownloads;
 
+function resolveYtDlpCommand(extraArgs) {
+  const configuredBin = process.env.YTDLP_BIN?.trim();
+  if (configuredBin) {
+    return { cmd: configuredBin, args: extraArgs };
+  }
+  if (process.platform === 'win32') {
+    return { cmd: 'python', args: ['-m', 'yt_dlp', ...extraArgs] };
+  }
+  return { cmd: 'yt-dlp', args: extraArgs };
+}
+
 export async function POST(request) {
   try {
+    const user = getSessionUser(request);
+    if (!user) {
+      return NextResponse.json({ error: 'Inicia sesión para descargar' }, { status: 401 });
+    }
+
     const data = await request.json();
     const query = data.query || `${data.title || ''} ${data.artist || ''}`.trim();
 
@@ -23,6 +38,7 @@ export async function POST(request) {
       return NextResponse.json({ error: 'Nombre o búsqueda requerida' }, { status: 400 });
     }
 
+    const downloadsDir = getDownloadsDir();
     const downloadId = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
     activeDownloads.set(downloadId, {
       id: downloadId,
@@ -36,26 +52,33 @@ export async function POST(request) {
 
     const isUrl = /^https?:\/\//i.test(query);
     const target = isUrl ? query : `ytsearch1:${query}`;
-    const outputTemplate = path.join(DOWNLOADS_DIR, '%(title)s.%(ext)s');
+    const outputTemplate = path.join(downloadsDir, '%(title)s.%(ext)s');
 
-    const args = [
-      '-m', 'yt_dlp',
+    const ytdlpArgs = [
       '-x',
       '--audio-format', 'mp3',
       '--audio-quality', '0',
       '--embed-metadata',
       '--embed-thumbnail',
       '--no-playlist',
-      '-o', outputTemplate,
-      target
+      '-o', outputTemplate
     ];
 
-    const child = spawn('python', args);
+    if (process.env.FFMPEG_BIN?.trim()) {
+      ytdlpArgs.push('--ffmpeg-location', process.env.FFMPEG_BIN.trim());
+    }
+
+    ytdlpArgs.push(target);
+
+    const { cmd, args } = resolveYtDlpCommand(ytdlpArgs);
+    const child = spawn(cmd, args);
     let detectedFilename = null;
 
     child.stdout.on('data', d => {
       const text = d.toString();
-      const destMatch = text.match(/\[ExtractAudio\] Destination: (.+\.mp3)/i) || text.match(/\[download\] Destination: (.+\.mp3)/i);
+      const destMatch =
+        text.match(/\[ExtractAudio\] Destination: (.+\.mp3)/i) ||
+        text.match(/\[download\] Destination: (.+\.mp3)/i);
       if (destMatch) {
         detectedFilename = path.basename(destMatch[1]);
       }
@@ -66,24 +89,34 @@ export async function POST(request) {
       }
     });
 
+    child.on('error', err => {
+      const item = activeDownloads.get(downloadId);
+      if (item) {
+        item.status = 'error';
+        item.error = err.message;
+      }
+    });
+
     child.on('close', code => {
       const item = activeDownloads.get(downloadId);
       if (!item) return;
 
       if (code === 0) {
         if (!detectedFilename) {
-          const files = fs.readdirSync(DOWNLOADS_DIR)
+          const files = fs
+            .readdirSync(downloadsDir)
             .filter(f => f.endsWith('.mp3'))
-            .map(f => ({ name: f, time: fs.statSync(path.join(DOWNLOADS_DIR, f)).mtimeMs }))
+            .map(f => ({ name: f, time: fs.statSync(path.join(downloadsDir, f)).mtimeMs }))
             .sort((a, b) => b.time - a.time);
           if (files.length > 0) detectedFilename = files[0].name;
         }
+        enforceStorageQuota();
         item.status = 'ready';
         item.progress = 100;
         item.filename = detectedFilename;
       } else {
         item.status = 'error';
-        item.error = `yt-dlp exited with code ${code}`;
+        item.error = `yt-dlp finalizó con código ${code}`;
       }
     });
 
