@@ -1,8 +1,13 @@
 import fs from 'fs';
 import path from 'path';
-import { getDownloadsDir, scheduleFileCleanup } from '../../../lib/store';
+import { getDownloadsDir, getSessionUser, scheduleFileCleanup } from '../../../lib/store';
 
 export async function GET(request) {
+  const user = getSessionUser(request);
+  if (!user) {
+    return new Response('No autorizado', { status: 401 });
+  }
+
   const { searchParams } = new URL(request.url);
   const file = searchParams.get('file');
   const isDownload = searchParams.get('download') === '1';
@@ -11,9 +16,14 @@ export async function GET(request) {
     return new Response('Archivo no especificado', { status: 400 });
   }
 
+  const cleanFile = path.basename(file);
+  if (cleanFile !== file || !/\.(mp3|m4a|opus|wav|flac)$/i.test(cleanFile)) {
+    return new Response('Nombre de archivo inválido', { status: 400 });
+  }
+
   const downloadsDir = getDownloadsDir();
-  const safePath = path.normalize(path.join(downloadsDir, file));
-  if (!safePath.startsWith(downloadsDir) || !fs.existsSync(safePath)) {
+  const safePath = path.resolve(downloadsDir, cleanFile);
+  if (!safePath.startsWith(path.resolve(downloadsDir) + path.sep) || !fs.existsSync(safePath)) {
     return new Response('Archivo no encontrado', { status: 404 });
   }
 
@@ -27,7 +37,7 @@ export async function GET(request) {
   };
 
   if (isDownload) {
-    headers['Content-Disposition'] = `attachment; filename="${encodeURIComponent(path.basename(safePath))}"`;
+    headers['Content-Disposition'] = `attachment; filename="${encodeURIComponent(cleanFile)}"`;
     scheduleFileCleanup(safePath, 25000);
   }
 

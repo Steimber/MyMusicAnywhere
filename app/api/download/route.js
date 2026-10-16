@@ -14,6 +14,61 @@ if (!global.__activeDownloads) {
 }
 const activeDownloads = global.__activeDownloads;
 
+const ALLOWED_MEDIA_HOSTS = new Set([
+  'youtube.com',
+  'www.youtube.com',
+  'm.youtube.com',
+  'music.youtube.com',
+  'youtu.be',
+  'soundcloud.com',
+  'www.soundcloud.com',
+  'm.soundcloud.com',
+  'on.soundcloud.com'
+]);
+
+const ALLOWED_PREVIEW_HOSTS = new Set([
+  'audio-ssl.itunes.apple.com'
+]);
+
+export function isAllowedMediaUrl(rawUrl) {
+  try {
+    const parsed = new URL(rawUrl);
+    if (parsed.protocol !== 'https:' || parsed.port !== '' || parsed.username || parsed.password) {
+      return false;
+    }
+    const host = parsed.hostname.toLowerCase();
+    return ALLOWED_MEDIA_HOSTS.has(host);
+  } catch {
+    return false;
+  }
+}
+
+export function isAllowedPreviewUrl(rawUrl) {
+  try {
+    const parsed = new URL(rawUrl);
+    if (parsed.protocol !== 'https:' || parsed.port !== '' || parsed.username || parsed.password) {
+      return false;
+    }
+    const host = parsed.hostname.toLowerCase();
+    if (ALLOWED_PREVIEW_HOSTS.has(host)) return true;
+    if (host.endsWith('.mzstatic.com') && host.length > '.mzstatic.com'.length) {
+      return /^[a-z0-9.-]+\.mzstatic\.com$/.test(host);
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+function sanitizeSearchQuery(raw) {
+  return String(raw || '')
+    .replace(/https?:\/\/\S+/gi, '')
+    .replace(/[^\p{L}\p{N}\s.,'&()-]/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 120);
+}
+
 function resolveYtDlpCommand(extraArgs) {
   const configuredBin = process.env.YTDLP_BIN?.trim();
   if (configuredBin) {
@@ -45,13 +100,15 @@ function runYtDlpAttempt(target, outputTemplate, onProgress) {
       '--no-playlist',
       '--no-cache-dir',
       '--newline',
-      '-o', outputTemplate,
-      target
+      '-o', outputTemplate
     ];
 
     if (process.env.FFMPEG_BIN?.trim()) {
-      ytdlpArgs.splice(ytdlpArgs.length - 1, 0, '--ffmpeg-location', process.env.FFMPEG_BIN.trim());
+      ytdlpArgs.push('--ffmpeg-location', process.env.FFMPEG_BIN.trim());
     }
+
+    // Use '--' separator to prevent option/flag injection
+    ytdlpArgs.push('--', target);
 
     const { cmd, args } = resolveYtDlpCommand(ytdlpArgs);
     let stderrText = '';
@@ -85,7 +142,7 @@ function runYtDlpAttempt(target, outputTemplate, onProgress) {
   });
 }
 
-async function runExtractionPipeline(downloadId, query, previewUrl, downloadsDir, baseSlug) {
+async function runExtractionPipeline(downloadId, rawQuery, previewUrl, downloadsDir, baseSlug) {
   const item = activeDownloads.get(downloadId);
   if (!item) return;
 
@@ -98,13 +155,26 @@ async function runExtractionPipeline(downloadId, query, previewUrl, downloadsDir
     if (cur) cur.progress = Math.max(cur.progress || 5, Math.min(98, p));
   };
 
-  const isDirectUrl = /^https?:\/\//i.test(query);
-  const targets = isDirectUrl
-    ? [query]
-    : [
-        `scsearch1:${query}`, // Works reliably on VPS datacenter IPs without YouTube bot blocks
-        `ytsearch1:${query}`  // Secondary fallback
-      ];
+  let targets = [];
+  if (/^https?:\/\//i.test(rawQuery)) {
+    if (!isAllowedMediaUrl(rawQuery)) {
+      item.status = 'error';
+      item.error = 'Dominio de URL no permitido.';
+      return;
+    }
+    targets = [rawQuery];
+  } else {
+    const safeQuery = sanitizeSearchQuery(rawQuery);
+    if (!safeQuery) {
+      item.status = 'error';
+      item.error = 'Búsqueda inválida.';
+      return;
+    }
+    targets = [
+      `scsearch1:${safeQuery}`,
+      `ytsearch1:${safeQuery}`
+    ];
+  }
 
   for (const target of targets) {
     const res = await runYtDlpAttempt(target, outputTemplate, updateProg);
@@ -118,8 +188,8 @@ async function runExtractionPipeline(downloadId, query, previewUrl, downloadsDir
     }
   }
 
-  // Final fallback: if previewUrl is provided, convert/fetch preview audio so download never fails
-  if (previewUrl && /^https?:\/\//i.test(previewUrl)) {
+  // Final fallback: only allow verified Apple Music / iTunes CDN preview URLs
+  if (previewUrl && isAllowedPreviewUrl(previewUrl)) {
     const res = await runYtDlpAttempt(previewUrl, outputTemplate, updateProg);
     if (res.ok && fs.existsSync(expectedMp3Path)) {
       enforceStorageQuota();
@@ -144,19 +214,33 @@ export async function POST(request) {
     }
 
     const data = await request.json();
-    const query = (data.query || `${data.title || ''} ${data.artist || ''}`).trim();
+    const rawQuery = (data.query || `${data.title || ''} ${data.artist || ''}`).trim();
 
-    if (!query) {
+    if (!rawQuery) {
       return NextResponse.json({ error: 'Nombre o búsqueda requerida' }, { status: 400 });
+    }
+
+    if (/^https?:\/\//i.test(rawQuery) && !isAllowedMediaUrl(rawQuery)) {
+      return NextResponse.json(
+        { error: 'Solo se permiten URLs de YouTube o SoundCloud.' },
+        { status: 400 }
+      );
+    }
+
+    if (data.previewUrl && !isAllowedPreviewUrl(data.previewUrl)) {
+      return NextResponse.json(
+        { error: 'Dominio de previewUrl no permitido.' },
+        { status: 400 }
+      );
     }
 
     const downloadsDir = getDownloadsDir();
     const downloadId = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
-    const baseSlug = `${sanitizeSlug(`${data.artist || ''} ${data.title || query}`)}_${downloadId}`;
+    const baseSlug = `${sanitizeSlug(`${data.artist || ''} ${data.title || rawQuery}`)}_${downloadId}`;
 
     activeDownloads.set(downloadId, {
       id: downloadId,
-      title: data.title || query,
+      title: data.title || rawQuery,
       artist: data.artist || '',
       artwork: data.artwork || '',
       status: 'downloading',
@@ -164,8 +248,7 @@ export async function POST(request) {
       filename: null
     });
 
-    // Launch non-blocking extraction pipeline
-    runExtractionPipeline(downloadId, query, data.previewUrl, downloadsDir, baseSlug).catch(err => {
+    runExtractionPipeline(downloadId, rawQuery, data.previewUrl, downloadsDir, baseSlug).catch(err => {
       const item = activeDownloads.get(downloadId);
       if (item) {
         item.status = 'error';
