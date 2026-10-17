@@ -1,5 +1,6 @@
 import { NextResponse } from 'next/server';
 import fs from 'fs';
+import os from 'os';
 import path from 'path';
 import { spawn } from 'child_process';
 import {
@@ -89,6 +90,8 @@ function sanitizeSearchQuery(raw) {
     .slice(0, 120);
 }
 
+let cachedLinuxYtDlpBin = null;
+
 function resolveYtDlpCommand(extraArgs) {
   const configuredBin = process.env.YTDLP_BIN?.trim();
   if (configuredBin) {
@@ -97,7 +100,26 @@ function resolveYtDlpCommand(extraArgs) {
   if (process.platform === 'win32') {
     return { cmd: 'python', args: ['-m', 'yt_dlp', ...extraArgs] };
   }
-  return { cmd: 'yt-dlp', args: extraArgs };
+  if (!cachedLinuxYtDlpBin) {
+    const cwd = process.cwd();
+    const home = os.homedir();
+    const candidates = [
+      path.join(cwd, 'venv', 'bin', 'yt-dlp'),
+      path.join(cwd, '.venv', 'bin', 'yt-dlp'),
+      path.join(home, 'venv', 'bin', 'yt-dlp'),
+      path.join(home, '.venv', 'bin', 'yt-dlp'),
+      path.join(home, '.local', 'bin', 'yt-dlp')
+    ];
+    cachedLinuxYtDlpBin =
+      candidates.find(p => {
+        try {
+          return fs.existsSync(p);
+        } catch {
+          return false;
+        }
+      }) || 'yt-dlp';
+  }
+  return { cmd: cachedLinuxYtDlpBin, args: extraArgs };
 }
 
 function sanitizeSlug(text) {
@@ -659,19 +681,18 @@ function scoreLoopCandidate(cand, ctx) {
 
 function discoverCandidatesFromSearch(searchQueries) {
   return new Promise(resolve => {
-    const cookiesPath = getYtCookiesFilePath();
+    // Do NOT pass --cookies during --flat-playlist metadata search: public search metadata never
+    // requires login and omitting cookies prevents Google session rotation / account flagging.
     const ytdlpArgs = [
       '--flat-playlist',
       '--ignore-errors',
       '--no-warnings',
       '--socket-timeout', '10',
       '--js-runtimes', 'node',
-      '--print', '%(extractor)s\t%(id)s\t%(webpage_url)s\t%(url)s\t%(duration)s\t%(uploader)s\t%(title)s'
+      '--print', '%(extractor)s\t%(id)s\t%(webpage_url)s\t%(url)s\t%(duration)s\t%(uploader)s\t%(title)s',
+      '--',
+      ...searchQueries
     ];
-    if (cookiesPath) {
-      ytdlpArgs.push('--cookies', cookiesPath);
-    }
-    ytdlpArgs.push('--', ...searchQueries);
 
     const { cmd, args } = resolveYtDlpCommand(ytdlpArgs);
     let stdoutText = '';
@@ -798,7 +819,8 @@ function runYtDlpAttempt(target, outputTemplate, options, onProgress) {
     maxDuration = 900,
     rejectTitleRegex = null,
     trimDurationSec = null,
-    fadeOutSec = 0
+    fadeOutSec = 0,
+    useCookies = false
   } = options || {};
 
   return new Promise(resolve => {
@@ -812,7 +834,24 @@ function runYtDlpAttempt(target, outputTemplate, options, onProgress) {
       }
     }
 
-    const cookiesPath = getYtCookiesFilePath();
+    const isYouTubeTarget = /youtube\.com|youtu\.be|^ytsearch/i.test(String(target || ''));
+    const masterCookiesPath = isYouTubeTarget && useCookies ? getYtCookiesFilePath() : null;
+    let tempCookiesPath = null;
+
+    if (masterCookiesPath) {
+      try {
+        tempCookiesPath = path.join(
+          os.tmpdir(),
+          `mma_ytc_${process.pid}_${Date.now()}_${Math.random().toString(36).slice(2, 7)}.txt`
+        );
+        fs.copyFileSync(masterCookiesPath, tempCookiesPath);
+        try {
+          fs.chmodSync(tempCookiesPath, 0o600);
+        } catch {}
+      } catch {
+        tempCookiesPath = null;
+      }
+    }
 
     // Transparent VBR compression (LAME -V 5 ~128kbps VBR + 44.1kHz joint stereo at compression_level 0):
     // Matches the native 128kbps YouTube/SoundCloud source fidelity with zero audible loss while saving ~60% disk space (~2.4-3MB per track instead of ~8MB)
@@ -833,16 +872,16 @@ function runYtDlpAttempt(target, outputTemplate, options, onProgress) {
       '-o', outputTemplate
     ];
 
-    if (cookiesPath) {
-      ytdlpArgs.push('--cookies', cookiesPath);
+    if (tempCookiesPath) {
+      ytdlpArgs.push('--cookies', tempCookiesPath);
     }
 
-    if (/youtube\.com|youtu\.be|^ytsearch/i.test(String(target || ''))) {
-      // When cookies are present, use web/mweb/web_creator/tv (which support cookies + bgutil PO token);
-      // without cookies, prioritize tv/ios/mweb/web
-      const clientList = cookiesPath
-        ? 'youtube:player_client=web,mweb,web_creator,tv'
-        : 'youtube:player_client=tv,ios,mweb,web';
+    if (isYouTubeTarget) {
+      // With bgutil PO-Token server on 127.0.0.1:4416, mweb/web/tv/ios work seamlessly;
+      // when using cookies, exclude ios since ios does not support cookies in yt-dlp.
+      const clientList = tempCookiesPath
+        ? 'youtube:player_client=mweb,web,web_creator,tv'
+        : 'youtube:player_client=mweb,tv,ios,web';
       ytdlpArgs.push('--extractor-args', clientList);
     }
 
@@ -867,10 +906,20 @@ function runYtDlpAttempt(target, outputTemplate, options, onProgress) {
     let stderrText = '';
     let settled = false;
 
+    const cleanupTempCookies = () => {
+      if (tempCookiesPath) {
+        try {
+          fs.unlinkSync(tempCookiesPath);
+        } catch {}
+        tempCookiesPath = null;
+      }
+    };
+
     let child;
     try {
       child = spawn(cmd, args);
     } catch (err) {
+      cleanupTempCookies();
       return resolve({ ok: false, error: err.message });
     }
 
@@ -878,6 +927,7 @@ function runYtDlpAttempt(target, outputTemplate, options, onProgress) {
       if (settled) return;
       settled = true;
       clearTimeout(killTimer);
+      cleanupTempCookies();
       resolve(result);
     };
 
@@ -1086,21 +1136,33 @@ async function runExtractionPipeline(downloadId, rawQuery, downloadsDir, baseSlu
     });
   }
 
+  const hasCookiesConfigured = Boolean(getYtCookiesFilePath());
+
   for (const t of targets) {
-    await runYtDlpAttempt(t.url, tempOutputTemplate, t, updateProg);
-    const valid = finalizeDownloadedMp3(
-      downloadsDir,
-      baseSlug,
-      expectedMp3Path,
-      expectedDurationSec
-    );
-    if (valid && fs.existsSync(expectedMp3Path)) {
-      enforceStorageQuota();
-      scheduleFileCleanup(expectedMp3Path, 90000);
-      item.status = 'ready';
-      item.progress = 100;
-      item.filename = expectedMp3Name;
-      return;
+    const isYtTarget = /youtube\.com|youtu\.be|^ytsearch/i.test(String(t.url || ''));
+    const cookiePasses = isYtTarget && hasCookiesConfigured ? [false, true] : [false];
+
+    for (const useCookies of cookiePasses) {
+      await runYtDlpAttempt(
+        t.url,
+        tempOutputTemplate,
+        { ...t, useCookies },
+        updateProg
+      );
+      const valid = finalizeDownloadedMp3(
+        downloadsDir,
+        baseSlug,
+        expectedMp3Path,
+        expectedDurationSec
+      );
+      if (valid && fs.existsSync(expectedMp3Path)) {
+        enforceStorageQuota();
+        scheduleFileCleanup(expectedMp3Path, 90000);
+        item.status = 'ready';
+        item.progress = 100;
+        item.filename = expectedMp3Name;
+        return;
+      }
     }
   }
 
