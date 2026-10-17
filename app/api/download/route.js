@@ -815,7 +815,7 @@ function scoreLoopCandidate(cand, ctx) {
   };
 }
 
-function discoverCandidatesFromSearch(searchQueries) {
+function discoverCandidatesFromSearch(searchQueries, timeoutMs = 10000) {
   return new Promise(resolve => {
     // Do NOT pass --cookies during --flat-playlist metadata search: public search metadata never
     // requires login and omitting cookies prevents Google session rotation / account flagging.
@@ -823,7 +823,7 @@ function discoverCandidatesFromSearch(searchQueries) {
       '--flat-playlist',
       '--ignore-errors',
       '--no-warnings',
-      '--socket-timeout', '10',
+      '--socket-timeout', '8',
       '--js-runtimes', 'node',
       '--print', '%(extractor)s\t%(id)s\t%(webpage_url)s\t%(url)s\t%(duration)s\t%(uploader)s\t%(title)s',
       '--',
@@ -853,7 +853,7 @@ function discoverCandidatesFromSearch(searchQueries) {
         child.kill('SIGKILL');
       } catch {}
       finish(parseCandidateLines(stdoutText));
-    }, 14000);
+    }, timeoutMs);
 
     child.stdout.on('data', d => {
       stdoutText += d.toString();
@@ -1184,21 +1184,26 @@ async function runExtractionPipeline(downloadId, rawQuery, downloadsDir, baseSlu
     }
 
     // Step 0 & Step 1 in parallel: Resolve canonical duration + official alternate/album words from iTunes/Deezer
-    // while simultaneously discovering candidates from YouTube (#1) + SoundCloud
-    const discoveryQueries = [
-      `ytsearch8:${artistAndPrimaryTitle || artistAndCleanTitle} official audio`,
+    // while simultaneously running SoundCloud and YouTube candidate discovery in SEPARATE parallel processes
+    // so a slow/throttled YouTube search can never delay or starve SoundCloud discovery!
+    const ytDiscoveryQueries = [
+      `ytsearch6:${artistAndPrimaryTitle || artistAndCleanTitle} official audio`
+    ];
+    const scDiscoveryQueries = [
       `scsearch15:${artistAndPrimaryTitle || artistAndCleanTitle}`
     ];
     if (artistAndCleanTitle && artistAndCleanTitle !== artistAndPrimaryTitle) {
-      discoveryQueries.push(`scsearch10:${artistAndCleanTitle}`);
+      scDiscoveryQueries.push(`scsearch10:${artistAndCleanTitle}`);
     } else if (primaryArtist && cleanTitleOnly && cleanTitleOnly.length >= 3) {
-      discoveryQueries.push(`scsearch10:${cleanTitleOnly}`);
+      scDiscoveryQueries.push(`scsearch10:${cleanTitleOnly}`);
     }
 
-    const [catalogMeta, rawCandidates] = await Promise.all([
+    const [catalogMeta, scRawCandidates, ytRawCandidates] = await Promise.all([
       resolveCatalogMetadata(item.duration, cleanTitle, primaryArtist),
-      discoverCandidatesFromSearch(discoveryQueries)
+      discoverCandidatesFromSearch(scDiscoveryQueries, 10000),
+      discoverCandidatesFromSearch(ytDiscoveryQueries, 7500)
     ]);
+    const rawCandidates = [...ytRawCandidates, ...scRawCandidates];
     expectedDurationSec = catalogMeta.durationSec;
     updateProg(18);
 
@@ -1210,7 +1215,7 @@ async function runExtractionPipeline(downloadId, rawQuery, downloadsDir, baseSlu
       catalogMeta
     );
 
-    // Tier 1: Exact 1x studio recordings (within ±20s of canonical duration), YouTube ranked first
+    // Tier 1: Exact 1x studio recordings (within ±20s of canonical duration)
     const scoredTier1 = rawCandidates
       .map(c => ({ ...c, score: scoreCandidate(c, ctx) }))
       .filter(c => c.score >= 0)
@@ -1229,9 +1234,8 @@ async function runExtractionPipeline(downloadId, rawQuery, downloadsDir, baseSlu
     updateProg(22);
 
     const maxAllowedDur = expectedDurationSec ? expectedDurationSec + 5 : null;
+    const hasCookiesConfigured = Boolean(getYtCookiesFilePath());
 
-    // Pick diverse top YouTube candidates (1 non-Topic official video/audio which is worldwide + 1 - Topic)
-    // AND top SoundCloud candidates so a geo-restricted YouTube upload never starves SoundCloud fallback!
     const ytCands = scoredTier1.filter(c =>
       String(c.extractor || '').toLowerCase().includes('youtube')
     );
@@ -1242,58 +1246,66 @@ async function runExtractionPipeline(downloadId, rawQuery, downloadsDir, baseSlu
     const bestYtNonTopic = ytCands.find(
       c => !String(c.uploader || '').toLowerCase().endsWith('- topic')
     );
-    const bestYtTopic = ytCands.find(c =>
-      String(c.uploader || '').toLowerCase().endsWith('- topic')
-    );
-    const selectedYt = [];
-    if (bestYtNonTopic) selectedYt.push(bestYtNonTopic);
-    if (bestYtTopic && (!bestYtNonTopic || bestYtTopic.webpageUrl !== bestYtNonTopic.webpageUrl)) {
-      selectedYt.push(bestYtTopic);
-    }
-    for (const c of ytCands) {
-      if (selectedYt.length >= 2) break;
-      if (!selectedYt.some(s => s.webpageUrl === c.webpageUrl)) {
-        selectedYt.push(c);
-      }
+    const bestYt = bestYtNonTopic || ytCands[0] || null;
+
+    const scDirectTargets = scCands.slice(0, 2).map(best => ({
+      url: best.webpageUrl,
+      isSearchPool: false,
+      trimDurationSec: maxAllowedDur,
+      fadeOutSec: 0,
+      useCookies: false
+    }));
+
+    const scLoopTargets = scoredLoopTier2.slice(0, 2).map(loopCand => ({
+      url: loopCand.webpageUrl,
+      isSearchPool: false,
+      trimDurationSec: loopCand.trimDurationSec,
+      fadeOutSec: loopCand.fadeOutSec,
+      useCookies: false
+    }));
+
+    const ytDirectTargets = bestYt
+      ? [
+          {
+            url: bestYt.webpageUrl,
+            isSearchPool: false,
+            trimDurationSec: maxAllowedDur,
+            fadeOutSec: 0,
+            useCookies: hasCookiesConfigured
+          }
+        ]
+      : [];
+
+    // When cookies.txt is configured (exported from a closed Incognito window), try YouTube #1 first,
+    // followed immediately by SoundCloud 1x and SoundCloud loop-trimmed.
+    // When no cookies are configured on the VPS, try SoundCloud 1x and loop-trimmed FIRST (0s wasted on YouTube IP bot checks),
+    // with YouTube as secondary fallback.
+    if (hasCookiesConfigured) {
+      targets.push(...ytDirectTargets, ...scDirectTargets, ...scLoopTargets);
+    } else {
+      targets.push(...scDirectTargets, ...scLoopTargets, ...ytDirectTargets);
     }
 
-    for (const best of [...selectedYt, ...scCands.slice(0, 2)]) {
-      targets.push({
-        url: best.webpageUrl,
-        isSearchPool: false,
-        trimDurationSec: maxAllowedDur,
-        fadeOutSec: 0
-      });
-    }
-
-    for (const loopCand of scoredLoopTier2.slice(0, 2)) {
-      targets.push({
-        url: loopCand.webpageUrl,
-        isSearchPool: false,
-        trimDurationSec: loopCand.trimDurationSec,
-        fadeOutSec: loopCand.fadeOutSec
-      });
-    }
-
-    // Fallback search pools if direct URLs all failed (YouTube #1, then SoundCloud, then Bilibili)
     const minDur = expectedDurationSec ? Math.max(45, expectedDurationSec - 15) : 55;
     const maxDur = expectedDurationSec ? expectedDurationSec + 15 : 540;
     const searchQueryBase = artistAndPrimaryTitle || artistAndCleanTitle;
-    targets.push({
-      url: `ytsearch6:${searchQueryBase} official audio`,
-      isSearchPool: true,
-      minDuration: minDur,
-      maxDuration: maxDur,
-      rejectTitleRegex,
-      trimDurationSec: maxAllowedDur
-    });
     targets.push({
       url: `scsearch15:${searchQueryBase}`,
       isSearchPool: true,
       minDuration: minDur,
       maxDuration: maxDur,
       rejectTitleRegex,
-      trimDurationSec: maxAllowedDur
+      trimDurationSec: maxAllowedDur,
+      useCookies: false
+    });
+    targets.push({
+      url: `ytsearch5:${searchQueryBase} official audio`,
+      isSearchPool: true,
+      minDuration: minDur,
+      maxDuration: maxDur,
+      rejectTitleRegex,
+      trimDurationSec: maxAllowedDur,
+      useCookies: hasCookiesConfigured
     });
     targets.push({
       url: `bilisearch3:${searchQueryBase}`,
@@ -1301,15 +1313,16 @@ async function runExtractionPipeline(downloadId, rawQuery, downloadsDir, baseSlu
       minDuration: minDur,
       maxDuration: maxDur,
       rejectTitleRegex,
-      trimDurationSec: maxAllowedDur
+      trimDurationSec: maxAllowedDur,
+      useCookies: false
     });
   }
 
   for (const t of targets) {
-    await runYtDlpAttempt(
+    const res = await runYtDlpAttempt(
       t.url,
       tempOutputTemplate,
-      { ...t, useCookies: false },
+      { ...t, useCookies: Boolean(t.useCookies) },
       updateProg
     );
     const valid = finalizeDownloadedMp3(
@@ -1319,6 +1332,7 @@ async function runExtractionPipeline(downloadId, rawQuery, downloadsDir, baseSlu
       expectedDurationSec
     );
     if (valid && fs.existsSync(expectedMp3Path)) {
+      console.log(`[download] OK: ${expectedMp3Name} <- ${t.url}`);
       enforceStorageQuota();
       scheduleFileCleanup(expectedMp3Path, 90000);
       item.status = 'ready';
@@ -1326,6 +1340,14 @@ async function runExtractionPipeline(downloadId, rawQuery, downloadsDir, baseSlu
       item.filename = expectedMp3Name;
       return;
     }
+    const lastErrLine = String(res?.error || '')
+      .split(/\r?\n/)
+      .map(l => l.trim())
+      .filter(Boolean)
+      .pop();
+    console.warn(
+      `[download] skip ${t.url} (code=${res?.code ?? 'err'}): ${lastErrLine || 'no valid mp3'}`
+    );
   }
 
   enforceStorageQuota();
