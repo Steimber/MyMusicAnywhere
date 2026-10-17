@@ -999,10 +999,10 @@ function runYtDlpAttempt(target, outputTemplate, options, onProgress) {
       '--postprocessor-args', extractAudioArgs,
       '--embed-metadata',
       '--restrict-filenames',
-      '--no-cache-dir',
       '--ignore-errors',
       '--no-warnings',
       '--js-runtimes', 'node',
+      '--remote-components', 'ejs:github',
       '--socket-timeout', '15',
       '--newline',
       '-o', outputTemplate
@@ -1012,8 +1012,11 @@ function runYtDlpAttempt(target, outputTemplate, options, onProgress) {
       ytdlpArgs.push('--cookies', tempCookiesPath);
     }
 
-    // Do NOT override --extractor-args youtube:player_client=... so yt-dlp 2026+ uses its native
-    // default clients (tv_simply,web_safari,web) that integrate seamlessly with bgutil-ytdlp-pot-provider on 127.0.0.1:4416.
+    if (isYouTubeTarget) {
+      // Mobile Web (mweb) + EJS JS challenge solver (node) + bgutil PO-Token bypasses desktop
+      // LOGIN_REQUIRED ("Sign in to confirm you're not a bot") and HTTP 429 even without cookies.
+      ytdlpArgs.push('--extractor-args', 'youtube:player_client=mweb,web');
+    }
 
     if (isSearchPool) {
       ytdlpArgs.push('--match-filter', `duration >= ${minDuration} & duration <= ${maxDuration}`);
@@ -1276,15 +1279,9 @@ async function runExtractionPipeline(downloadId, rawQuery, downloadsDir, baseSlu
         ]
       : [];
 
-    // When cookies.txt is configured (exported from a closed Incognito window), try YouTube #1 first,
-    // followed immediately by SoundCloud 1x and SoundCloud loop-trimmed.
-    // When no cookies are configured on the VPS, try SoundCloud 1x and loop-trimmed FIRST (0s wasted on YouTube IP bot checks),
-    // with YouTube as secondary fallback.
-    if (hasCookiesConfigured) {
-      targets.push(...ytDirectTargets, ...scDirectTargets, ...scLoopTargets);
-    } else {
-      targets.push(...scDirectTargets, ...scLoopTargets, ...ytDirectTargets);
-    }
+    // Try YouTube #1 first (using mweb + EJS JS challenge solver + bgutil PO-Token),
+    // followed immediately by SoundCloud 1x and SoundCloud loop-trimmed as instant fallback
+    targets.push(...ytDirectTargets, ...scDirectTargets, ...scLoopTargets);
 
     const minDur = expectedDurationSec ? Math.max(45, expectedDurationSec - 15) : 55;
     const maxDur = expectedDurationSec ? expectedDurationSec + 15 : 540;
