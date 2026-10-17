@@ -434,7 +434,7 @@ export default function HomePage() {
   const [queue, setQueue] = useState([]);
   const [currentIndex, setCurrentIndex] = useState(-1);
   const [isPlaying, setIsPlaying] = useState(false);
-  const [shuffle, setShuffle] = useState(false);
+  const [shuffle, setShuffle] = useState(true);
   const [repeatMode, setRepeatMode] = useState('off');
   const [progress, setProgress] = useState(0);
   const [duration, setDuration] = useState(0);
@@ -444,7 +444,7 @@ export default function HomePage() {
   const shuffleStateRef = useRef({ order: [], pos: -1, queueLen: 0 });
   const queueRef = useRef([]);
   const currentIndexRef = useRef(-1);
-  const shuffleRef = useRef(false);
+  const shuffleRef = useRef(true);
   const repeatModeRef = useRef('off');
   const blobUrlCacheRef = useRef(new Map());
   const lastDirectPlayRef = useRef({ index: -1, id: '', src: '' });
@@ -2677,19 +2677,14 @@ export default function HomePage() {
 
     queueRef.current = playableList;
     setQueue(playableList);
-    if (shuffleRef.current || startRandom) {
-      if (startRandom && !shuffleRef.current) {
-        shuffleRef.current = true;
-        setShuffle(true);
-      }
-      const order = buildSmartShuffleOrder(playableList, startRandom ? -1 : mappedIdx);
-      shuffleStateRef.current = { order, pos: 0, queueLen: playableList.length };
-      const firstIdx = order[0] ?? mappedIdx;
-      startTrackAtIndexImmediate(firstIdx, playableList);
-    } else {
-      shuffleStateRef.current = { order: [], pos: -1, queueLen: playableList.length };
-      startTrackAtIndexImmediate(mappedIdx, playableList);
+    if (!shuffleRef.current) {
+      shuffleRef.current = true;
+      setShuffle(true);
     }
+    const order = buildSmartShuffleOrder(playableList, startRandom ? -1 : mappedIdx);
+    shuffleStateRef.current = { order, pos: 0, queueLen: playableList.length };
+    const firstIdx = order[0] ?? mappedIdx;
+    startTrackAtIndexImmediate(firstIdx, playableList);
   }
 
   function togglePlayPause() {
@@ -3818,8 +3813,8 @@ export default function HomePage() {
                     type="button"
                     className="icon-btn play-circle"
                     disabled={playableActiveLibraryTracks.length === 0}
-                    onClick={() => playFromList(activeLibraryTracks, 0)}
-                    title="Reproducir librería"
+                    onClick={() => playFromList(activeLibraryTracks, 0, true)}
+                    title="Reproducir librería en aleatorio"
                   >
                     <Icon name="play" size={18} />
                   </button>
