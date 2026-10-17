@@ -1,5 +1,50 @@
-const STATIC_CACHE = 'mymusic-shell-v11';
+const STATIC_CACHE = 'mymusic-shell-v12';
 const AUDIO_CACHE = 'my-music-offline-audio-v1';
+
+async function serveCachedAudioWithRange(request, cachedResponse) {
+  const rangeHeader = request.headers.get('range');
+  if (!rangeHeader) {
+    const headers = new Headers(cachedResponse.headers);
+    headers.set('Accept-Ranges', 'bytes');
+    if (!headers.get('Content-Type')) headers.set('Content-Type', 'audio/mpeg');
+    return new Response(cachedResponse.body, {
+      status: 200,
+      statusText: 'OK',
+      headers
+    });
+  }
+  try {
+    const arrayBuffer = await cachedResponse.arrayBuffer();
+    const total = arrayBuffer.byteLength;
+    const bytesPrefix = 'bytes=';
+    if (!rangeHeader.startsWith(bytesPrefix)) {
+      return cachedResponse;
+    }
+    const rangeParts = rangeHeader.slice(bytesPrefix.length).split('-');
+    const start = parseInt(rangeParts[0], 10);
+    const end = rangeParts[1] ? Math.min(parseInt(rangeParts[1], 10), total - 1) : total - 1;
+    if (isNaN(start) || isNaN(end) || start > end || start < 0 || total === 0) {
+      return new Response(null, {
+        status: 416,
+        headers: { 'Content-Range': `bytes */${total}` }
+      });
+    }
+    const sliced = arrayBuffer.slice(start, end + 1);
+    return new Response(sliced, {
+      status: 206,
+      statusText: 'Partial Content',
+      headers: {
+        'Content-Type': cachedResponse.headers.get('Content-Type') || 'audio/mpeg',
+        'Content-Length': String(sliced.byteLength),
+        'Content-Range': `bytes ${start}-${end}/${total}`,
+        'Accept-Ranges': 'bytes',
+        'Cache-Control': 'public, max-age=31536000'
+      }
+    });
+  } catch {
+    return cachedResponse;
+  }
+}
 
 const PRECACHE_URLS = [
   '/',
@@ -48,12 +93,16 @@ self.addEventListener('fetch', (event) => {
   if (event.request.method !== 'GET') return;
   const url = new URL(event.request.url);
 
-  // 1. Audio streams: serve from offline AUDIO_CACHE first (instant & offline-proof), fallback to network
+  // 1. Audio streams: serve from offline AUDIO_CACHE first with full HTTP Range (206) support, fallback to network
   if (url.pathname === '/api/stream') {
     event.respondWith(
       caches.open(AUDIO_CACHE).then(async (cache) => {
-        const cached = await cache.match(url.pathname + url.search) || await cache.match(event.request.url);
-        if (cached) return cached;
+        const cached =
+          (await cache.match(url.pathname + url.search)) ||
+          (await cache.match(event.request.url));
+        if (cached) {
+          return serveCachedAudioWithRange(event.request, cached);
+        }
         try {
           return await fetch(event.request);
         } catch {

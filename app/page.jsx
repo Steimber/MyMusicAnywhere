@@ -4,7 +4,7 @@ import { useState, useEffect, useRef, useMemo } from 'react';
 import { NoSleepController } from '../lib/nosleep';
 
 const AUDIO_CACHE_NAME = 'my-music-offline-audio-v1';
-const SHELL_CACHE_NAME = 'mymusic-shell-v11';
+const SHELL_CACHE_NAME = 'mymusic-shell-v12';
 const DEFAULT_TRACK_COVER = '/icon.svg?v=3';
 const USER_STORAGE_KEY = 'mma_cached_user_v1';
 const LIKES_STORAGE_KEY = 'mma_liked_tracks_v1';
@@ -458,6 +458,8 @@ export default function HomePage() {
   const shuffleRef = useRef(true);
   const repeatModeRef = useRef('off');
   const blobUrlCacheRef = useRef(new Map());
+  const lastWarmedKeyRef = useRef('');
+  const warmingBatchIdRef = useRef(0);
   const lastDirectPlayRef = useRef({ index: -1, id: '', src: '' });
   const wasOfflineRef = useRef(false);
   const probeInFlightRef = useRef(false);
@@ -793,10 +795,10 @@ export default function HomePage() {
     let cancelled = false;
     setOptimisticTrack(null);
 
-    // Pre-warm current + upcoming tracks asynchronously so click paint happens in 0ms
-    const warmTimer = setTimeout(() => {
+    // Pre-warm current + upcoming tracks in microtask (never throttled when screen is locked)
+    Promise.resolve().then(() => {
       if (!cancelled) preloadUpcomingQueueBlobs(queue, currentIndex);
-    }, 100);
+    });
 
     const alreadyStartedSync =
       lastDirectPlayRef.current.index === currentIndex &&
@@ -833,7 +835,6 @@ export default function HomePage() {
 
     return () => {
       cancelled = true;
-      clearTimeout(warmTimer);
     };
   }, [currentIndex, queue]);
 
@@ -841,6 +842,8 @@ export default function HomePage() {
   useEffect(() => {
     if (queue.length > 0 && currentIndex >= 0) {
       preloadUpcomingQueueBlobs(queue, currentIndex);
+    } else if (offlineCatalog.length > 0) {
+      preloadUpcomingQueueBlobs(offlineCatalog, 0);
     }
   }, [shuffle, offlineCatalog]);
 
@@ -2565,34 +2568,61 @@ export default function HomePage() {
 
   function preloadUpcomingQueueBlobs(list = queueRef.current, fromIdx = currentIndexRef.current) {
     if (!Array.isArray(list) || list.length === 0) return;
-    const indicesToWarm = new Set();
+    const orderedIndices = [];
+    const seen = new Set();
+    const pushIdx = idx => {
+      if (idx >= 0 && idx < list.length && !seen.has(idx)) {
+        seen.add(idx);
+        orderedIndices.push(idx);
+      }
+    };
+
     if (fromIdx >= 0 && fromIdx < list.length) {
-      indicesToWarm.add(fromIdx);
-      if (fromIdx + 1 < list.length) indicesToWarm.add(fromIdx + 1);
-      if (fromIdx + 2 < list.length) indicesToWarm.add(fromIdx + 2);
-      if (fromIdx - 1 >= 0) indicesToWarm.add(fromIdx - 1);
+      pushIdx(fromIdx);
+      pushIdx(fromIdx + 1);
+      pushIdx(fromIdx + 2);
+      pushIdx(fromIdx - 1);
     }
-    if (list.length > 0) indicesToWarm.add(0);
 
     const { order, pos } = shuffleStateRef.current;
     if (Array.isArray(order) && order.length > 0) {
       const startPos = Math.max(0, pos);
-      for (let offset = 0; offset <= 8; offset++) {
-        const idx = order[(startPos + offset) % order.length];
-        if (idx >= 0 && idx < list.length) indicesToWarm.add(idx);
-      }
-    } else {
-      for (let i = 0; i < Math.min(list.length, 10); i++) {
-        indicesToWarm.add(i);
+      for (let offset = 0; offset < order.length; offset++) {
+        pushIdx(order[(startPos + offset) % order.length]);
       }
     }
 
-    indicesToWarm.forEach(idx => {
+    for (let offset = 0; offset < list.length; offset++) {
+      const base = fromIdx >= 0 ? fromIdx : 0;
+      pushIdx((base + offset) % list.length);
+    }
+
+    // Filter to tracks whose blob URL is not yet in memory
+    const uncachedTracks = [];
+    for (const idx of orderedIndices) {
       const t = list[idx];
-      if (t) {
-        resolvePlayableSource(t).catch(() => {});
+      if (!t) continue;
+      const streamUrl = getTrackStreamUrl(t);
+      if (streamUrl && !blobUrlCacheRef.current.has(streamUrl)) {
+        uncachedTracks.push(t);
       }
-    });
+    }
+    if (uncachedTracks.length === 0) return;
+
+    // Immediately warm the next 16 upcoming tracks in parallel during the active audio wake turn
+    const immediateBatch = uncachedTracks.slice(0, 16);
+    const remainingBatch = uncachedTracks.slice(16);
+    const myBatchId = ++warmingBatchIdRef.current;
+
+    Promise.all(immediateBatch.map(t => resolvePlayableSource(t).catch(() => {}))).then(
+      async () => {
+        for (let i = 0; i < remainingBatch.length; i += 8) {
+          if (warmingBatchIdRef.current !== myBatchId) break;
+          const chunk = remainingBatch.slice(i, i + 8);
+          await Promise.all(chunk.map(t => resolvePlayableSource(t).catch(() => {})));
+        }
+      }
+    );
   }
 
   function startTrackAtIndexImmediate(nextIdx, listOverride = null) {
@@ -2612,12 +2642,19 @@ export default function HomePage() {
     setProgress(0);
     setIsPlaying(true);
 
-    // Pre-warm upcoming tracks asynchronously so the click frame paints in 0ms
-    setTimeout(() => {
+    // Pre-warm upcoming tracks via microtask (never frozen by screen-off timer throttling)
+    Promise.resolve().then(() => {
       preloadUpcomingQueueBlobs(activeQueue, nextIdx);
-    }, 80);
+    });
 
-    const syncSrc = getSyncPlayableSource(nextTrack);
+    const streamUrl = getTrackStreamUrl(nextTrack);
+    const cachedBlobUrl =
+      streamUrl && blobUrlCacheRef.current.has(streamUrl)
+        ? blobUrlCacheRef.current.get(streamUrl)
+        : null;
+
+    // If we already have a ready in-memory Blob URL (or it's an online preview), play synchronously in 0ms
+    const syncSrc = cachedBlobUrl || (!streamUrl ? nextTrack.previewUrl : null);
     if (syncSrc && audioRef.current) {
       lastDirectPlayRef.current = {
         index: nextIdx,
@@ -2652,7 +2689,24 @@ export default function HomePage() {
       } else {
         setIsPlaying(true);
       }
+      return;
     }
+
+    // If the track is in CacheStorage but its Blob URL wasn't in RAM yet, resolve the Blob directly from CacheStorage first
+    resolvePlayableSource(nextTrack).then(resolvedSrc => {
+      if (resolvedSrc && audioRef.current && currentIndexRef.current === nextIdx) {
+        audioRef.current.src = resolvedSrc;
+        lastDirectPlayRef.current = {
+          index: nextIdx,
+          id: String(nextTrack.id),
+          src: resolvedSrc
+        };
+        audioRef.current
+          .play()
+          .then(() => setIsPlaying(true))
+          .catch(() => setIsPlaying(false));
+      }
+    });
   }
 
   function toggleShuffle() {
@@ -4958,15 +5012,17 @@ export default function HomePage() {
         playsInline
         onTimeUpdate={e => {
           const cur = e.currentTarget.currentTime;
-          const dur = e.currentTarget.duration;
           setProgress(cur);
-          if (dur > 0 && dur - cur <= 5 && dur - cur > 4) {
+          const warmKey = `${currentIndexRef.current}_${queueRef.current.length}`;
+          if (cur > 0.5 && lastWarmedKeyRef.current !== warmKey) {
+            lastWarmedKeyRef.current = warmKey;
             preloadUpcomingQueueBlobs(queueRef.current, currentIndexRef.current);
           }
         }}
         onLoadedMetadata={e => {
           const dur = e.currentTarget.duration;
           setDuration(dur);
+          preloadUpcomingQueueBlobs(queueRef.current, currentIndexRef.current);
           if (
             typeof navigator !== 'undefined' &&
             'mediaSession' in navigator &&
@@ -4991,7 +5047,10 @@ export default function HomePage() {
             setIsPlaying(false);
           }
         }}
-        onPlay={() => setIsPlaying(true)}
+        onPlay={() => {
+          setIsPlaying(true);
+          preloadUpcomingQueueBlobs(queueRef.current, currentIndexRef.current);
+        }}
         onPause={() => setIsPlaying(false)}
       />
 
