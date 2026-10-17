@@ -1002,7 +1002,6 @@ function runYtDlpAttempt(target, outputTemplate, options, onProgress) {
       '--ignore-errors',
       '--no-warnings',
       '--js-runtimes', 'node',
-      '--remote-components', 'ejs:github',
       '--socket-timeout', '15',
       '--newline',
       '-o', outputTemplate
@@ -1013,8 +1012,7 @@ function runYtDlpAttempt(target, outputTemplate, options, onProgress) {
     }
 
     if (isYouTubeTarget) {
-      // Mobile Web (mweb) + EJS JS challenge solver (node) + bgutil PO-Token bypasses desktop
-      // LOGIN_REQUIRED ("Sign in to confirm you're not a bot") and HTTP 429 even without cookies.
+      // Mobile Web (mweb) + local yt-dlp-ejs JS solver (node) + bgutil PO-Token
       ytdlpArgs.push('--extractor-args', 'youtube:player_client=mweb,web');
     }
 
@@ -1279,9 +1277,13 @@ async function runExtractionPipeline(downloadId, rawQuery, downloadsDir, baseSlu
         ]
       : [];
 
-    // Try YouTube #1 first (using mweb + EJS JS challenge solver + bgutil PO-Token),
-    // followed immediately by SoundCloud 1x and SoundCloud loop-trimmed as instant fallback
-    targets.push(...ytDirectTargets, ...scDirectTargets, ...scLoopTargets);
+    if (hasCookiesConfigured) {
+      // With valid cookies, try YouTube #1 first (with mweb + local EJS + bgutil PO-Token), then SoundCloud
+      targets.push(...ytDirectTargets, ...scDirectTargets, ...scLoopTargets);
+    } else {
+      // Without cookies, prioritize SoundCloud 1x and loop-trimmed so datacenter IP blocks on YouTube are avoided
+      targets.push(...scDirectTargets, ...scLoopTargets, ...ytDirectTargets);
+    }
 
     const minDur = expectedDurationSec ? Math.max(45, expectedDurationSec - 15) : 55;
     const maxDur = expectedDurationSec ? expectedDurationSec + 15 : 540;
