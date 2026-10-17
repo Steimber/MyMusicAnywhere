@@ -385,6 +385,8 @@ export default function HomePage() {
   const [newPlaylistName, setNewPlaylistName] = useState('');
   const [creatingPlaylist, setCreatingPlaylist] = useState(false);
   const [libraryQuery, setLibraryQuery] = useState('');
+  const [visibleLibraryCount, setVisibleLibraryCount] = useState(10);
+  const libraryLoadMoreRef = useRef(null);
   const [coverSync, setCoverSync] = useState({ active: false, done: 0, total: 0 });
   const enrichedArtworkRef = useRef(new Set());
   const enrichingBusyRef = useRef(false);
@@ -792,6 +794,29 @@ export default function HomePage() {
       preloadUpcomingQueueBlobs(queue, currentIndex);
     }
   }, [shuffle, offlineCatalog]);
+
+  // Reset rendered library DOM window to 10 tracks when switching library or searching
+  useEffect(() => {
+    setVisibleLibraryCount(10);
+  }, [selectedLibrary, libraryQuery, activeTab]);
+
+  // Progressive scroll loader for Library view (loads +15 tracks as user approaches bottom)
+  useEffect(() => {
+    if (activeTab !== 'library') return;
+    const node = libraryLoadMoreRef.current;
+    if (!node || typeof IntersectionObserver === 'undefined') return;
+
+    const observer = new IntersectionObserver(
+      entries => {
+        if (entries[0]?.isIntersecting) {
+          setVisibleLibraryCount(prev => prev + 15);
+        }
+      },
+      { rootMargin: '280px 0px' }
+    );
+    observer.observe(node);
+    return () => observer.disconnect();
+  }, [activeTab, selectedLibrary, libraryQuery, likedTracks.length, offlineCatalog.length, customPlaylists, visibleLibraryCount]);
 
   // Register lock-screen / background MediaSession metadata and hardware transport controls
   useEffect(() => {
@@ -2923,7 +2948,7 @@ export default function HomePage() {
     return (
       <div
         key={`${contextLib || 'exp'}_${track.id}_${idx}`}
-        className={`track-row ${isCurrent ? 'playing' : ''} ${
+        className={`track-row ${idx >= 10 ? 'track-row-deferred' : ''} ${isCurrent ? 'playing' : ''} ${
           isGreyedOffline ? 'offline-unavailable' : ''
         } ${isLibraryUndownloaded ? 'library-undownloaded' : ''}`.trim()}
       >
@@ -2932,7 +2957,10 @@ export default function HomePage() {
           onClick={() => {
             if (isGreyedOffline) return;
             let targetList = list;
-            let targetIdx = idx;
+            const resolvedIdx = Array.isArray(list)
+              ? list.findIndex(t => String(t.id) === String(track.id))
+              : -1;
+            let targetIdx = resolvedIdx >= 0 ? resolvedIdx : idx;
             const wasSearching = Boolean(contextLib && libraryQuery.trim());
 
             if (wasSearching) {
@@ -3882,8 +3910,26 @@ export default function HomePage() {
             </div>
           ) : (
             <div className="track-list">
-              {filteredLibraryTracks.map((track, idx) =>
-                renderTrackRow(track, idx, activeLibraryTracks, selectedLibrary)
+              {filteredLibraryTracks
+                .slice(0, visibleLibraryCount)
+                .map((track, idx) =>
+                  renderTrackRow(track, idx, activeLibraryTracks, selectedLibrary)
+                )}
+              {visibleLibraryCount < filteredLibraryTracks.length && (
+                <div ref={libraryLoadMoreRef} className="library-load-more">
+                  <button
+                    type="button"
+                    className="btn ghost sm"
+                    onClick={() =>
+                      setVisibleLibraryCount(prev =>
+                        Math.min(prev + 15, filteredLibraryTracks.length)
+                      )
+                    }
+                  >
+                    Mostrando {Math.min(visibleLibraryCount, filteredLibraryTracks.length)} de{' '}
+                    {filteredLibraryTracks.length} canciones · Cargar más
+                  </button>
+                </div>
               )}
             </div>
           )}

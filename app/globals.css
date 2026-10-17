@@ -956,6 +956,20 @@ textarea {
   border-bottom: 0;
 }
 
+.track-row.track-row-deferred {
+  content-visibility: auto;
+  contain-intrinsic-size: auto none auto 60px;
+}
+
+.library-load-more {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 12px 14px;
+  border-top: 1px solid var(--border);
+  background: var(--surface);
+}
+
 .track-row.playing {
   background: color-mix(in srgb, var(--clay) 10%, var(--surface));
 }
