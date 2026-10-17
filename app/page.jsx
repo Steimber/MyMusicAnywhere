@@ -1406,6 +1406,10 @@ export default function HomePage() {
           const q = candidateQueries[0] || cleanTitle;
           let smallCover = null;
           let previewUrl = null;
+          let resolvedDuration = null;
+          let resolvedTitle = null;
+          let resolvedArtist = null;
+          let resolvedAlbum = null;
           let directRespondedOk = false;
           let fallbackRespondedOk = false;
 
@@ -1422,6 +1426,13 @@ export default function HomePage() {
               if (hit?.artworkUrl100) {
                 smallCover = compressArtworkUrl(hit.artworkUrl100);
                 previewUrl = hit.previewUrl || null;
+                resolvedTitle = hit.trackName || null;
+                resolvedArtist = hit.artistName || null;
+                resolvedAlbum = hit.collectionName || null;
+                if (hit.trackTimeMillis && hit.trackTimeMillis >= 45000) {
+                  const totalSec = Math.round(hit.trackTimeMillis / 1000);
+                  resolvedDuration = `${Math.floor(totalSec / 60)}:${String(totalSec % 60).padStart(2, '0')}`;
+                }
               }
             }
           } catch {
@@ -1445,6 +1456,10 @@ export default function HomePage() {
                   if (fbHit?.artwork && !isPlaceholderCover(fbHit.artwork)) {
                     smallCover = compressArtworkUrl(fbHit.artwork);
                     previewUrl = fbHit.previewUrl || null;
+                    resolvedTitle = fbHit.title || null;
+                    resolvedArtist = fbHit.artist || null;
+                    resolvedAlbum = fbHit.album || null;
+                    resolvedDuration = fbHit.duration && fbHit.duration !== '—' ? fbHit.duration : null;
                     break;
                   }
                 }
@@ -1476,6 +1491,27 @@ export default function HomePage() {
             const patch = { artwork: smallCover };
             if (!item.previewUrl && previewUrl) {
               patch.previewUrl = previewUrl;
+            }
+            if ((!item.duration || item.duration === '—') && resolvedDuration) {
+              patch.duration = resolvedDuration;
+            }
+            if (
+              (!item.artist ||
+                item.artist === 'Guardado en dispositivo' ||
+                item.artist === 'Artista') &&
+              resolvedArtist
+            ) {
+              patch.artist = resolvedArtist;
+              if (resolvedTitle) patch.title = resolvedTitle;
+            }
+            if (
+              (!item.album ||
+                item.album === 'Offline PWA' ||
+                item.album === 'Spotify CSV' ||
+                item.album === 'Guardado en dispositivo') &&
+              resolvedAlbum
+            ) {
+              patch.album = resolvedAlbum;
             }
             updateTrackMetadataAcrossLibraries(item.id, patch);
             resolvedIdsInRun.add(String(item.id));

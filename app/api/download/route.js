@@ -295,17 +295,21 @@ function parseDurationToSec(rawDur) {
 }
 
 // Universal catalog lookup (iTunes + Deezer in parallel):
-// Resolves the canonical studio duration AND collects official alternate/parenthetical titles and album words
-// so ANY song in the world automatically recognizes its bilingual/subtitle variants and album title.
+// Resolves the canonical studio duration, canonical title/artist (even when artist was missing or combined in title),
+// AND collects official alternate/parenthetical titles and album words.
 async function resolveCatalogMetadata(rawDuration, cleanTitle, primaryArtist) {
   const parsed = parseDurationToSec(rawDuration);
   const extraWords = new Set();
   const extraTokenGroups = [];
+  let canonicalTitle = null;
+  let canonicalArtist = null;
 
   const query = `${stripParentheticalSubtitles(cleanTitle)} ${primaryArtist || ''}`.trim();
   if (!query) {
     return {
       durationSec: parsed || null,
+      canonicalTitle: null,
+      canonicalArtist: null,
       catalogWords: extraWords,
       catalogTokenGroups: extraTokenGroups
     };
@@ -320,17 +324,40 @@ async function resolveCatalogMetadata(rawDuration, cleanTitle, primaryArtist) {
     const hTitle = normalizeText(trackTitle);
     const hArtist = normalizeText(trackArtist);
     if (!wantLive && /\b(live|vivo)\b/i.test(hTitle)) return false;
-    const tOk = titleTokens.every(t => hTitle.includes(t));
-    const aOk = artistTokens.length === 0 || artistTokens.some(t => hArtist.includes(t));
-    return tOk && aOk;
+
+    if (artistTokens.length > 0) {
+      const tOk = titleTokens.every(t => hTitle.includes(t));
+      const aOk = artistTokens.some(t => hArtist.includes(t));
+      return tOk && aOk;
+    }
+
+    // When primaryArtist was empty/generic (e.g. Offline PWA "Two Door Cinema Club I Can Talk"),
+    // verify that all query tokens match across the catalog track's title + artist combined
+    const hCombined = `${hTitle} ${hArtist}`;
+    const hTitleCore = getTitleCoreTokens(stripRemasterNoise(trackTitle));
+    return (
+      titleTokens.every(t => hCombined.includes(t)) &&
+      hTitleCore.length > 0 &&
+      hTitleCore.every(t => normalizeText(cleanTitle).includes(t))
+    );
   };
 
-  const harvestTrackMeta = (trackTitle, albumTitle) => {
-    for (const w of normalizeText(`${trackTitle || ''} ${albumTitle || ''}`).split(/\s+/)) {
+  const harvestTrackMeta = (trackTitle, trackArtist, albumTitle) => {
+    if (!canonicalTitle && trackTitle) {
+      canonicalTitle = stripRemasterNoise(trackTitle) || trackTitle;
+    }
+    if (!canonicalArtist && trackArtist) {
+      canonicalArtist = cleanArtistName(trackArtist) || trackArtist;
+    }
+    for (const w of normalizeText(`${trackTitle || ''} ${trackArtist || ''} ${albumTitle || ''}`).split(/\s+/)) {
       if (w && w.length >= 2) extraWords.add(w);
     }
     for (const grp of extractParentheticalTokenGroups(trackTitle)) {
       extraTokenGroups.push(grp);
+    }
+    const core = getTitleCoreTokens(stripRemasterNoise(trackTitle));
+    if (core.length > 0) {
+      extraTokenGroups.push(core);
     }
   };
 
@@ -346,7 +373,7 @@ async function resolveCatalogMetadata(rawDuration, cleanTitle, primaryArtist) {
       for (const h of hits) {
         const sec = h.trackTimeMillis ? Math.round(h.trackTimeMillis / 1000) : null;
         if (matchCatalogTrack(h.trackName, h.artistName, sec)) {
-          harvestTrackMeta(h.trackName, h.collectionName);
+          harvestTrackMeta(h.trackName, h.artistName, h.collectionName);
           return sec;
         }
       }
@@ -364,7 +391,7 @@ async function resolveCatalogMetadata(rawDuration, cleanTitle, primaryArtist) {
       for (const h of hits) {
         const sec = Number(h.duration);
         if (matchCatalogTrack(h.title, h.artist?.name, sec)) {
-          harvestTrackMeta(h.title, h.album?.title);
+          harvestTrackMeta(h.title, h.artist?.name, h.album?.title);
           return sec;
         }
       }
@@ -384,6 +411,8 @@ async function resolveCatalogMetadata(rawDuration, cleanTitle, primaryArtist) {
 
   return {
     durationSec,
+    canonicalTitle,
+    canonicalArtist,
     catalogWords: extraWords,
     catalogTokenGroups: extraTokenGroups
   };
@@ -677,11 +706,24 @@ function scoreCandidate(cand, ctx) {
   const foreignTitleWords = candTitleWords.filter(
     w => w.length >= 3 && !/^\d+$/.test(w) && !ctx.allowedWords.has(w)
   );
+  const extractorLower = String(cand.extractor || '').toLowerCase();
 
-  // If the uploader is NOT the artist: allow up to 3 extra words (e.g. album/year notes) when artist+duration match closely (±10s),
-  // otherwise reject at 2+ unrelated foreign words (e.g. "GET BACK BEATLES KOVAH OF THE GODZ" which is 28s off).
+  // On SoundCloud, when the official artist track is a 30s Go+ preview, random users often upload
+  // unlabeled home covers (14-18s off studio duration) or festival bootlegs ("Glastonbury 2019", "Deichbrand 2019").
+  // For non-artist SoundCloud uploaders, require studio duration within ±8s and 0 unknown foreign words.
+  if (extractorLower.includes('soundcloud') && !uploaderMatchesArtist) {
+    if (ctx.expectedDurationSec && durDiff > 8) {
+      return -1;
+    }
+    if (foreignTitleWords.length > 0) {
+      return -1;
+    }
+  }
+
+  // If the uploader is NOT the artist: allow up to 2 extra words on YouTube when artist+duration match closely (±10s),
+  // otherwise reject at 2+ unrelated foreign words.
   const maxForeignForNonUploader =
-    artistMatched && ctx.expectedDurationSec && durDiff <= 10 ? 3 : 1;
+    artistMatched && ctx.expectedDurationSec && durDiff <= 10 ? 2 : 1;
   if (!uploaderMatchesArtist && foreignTitleWords.length > maxForeignForNonUploader) {
     return -1;
   }
@@ -722,7 +764,6 @@ function scoreCandidate(cand, ctx) {
 
   score -= foreignTitleWords.length * 15;
 
-  const extractorLower = String(cand.extractor || '').toLowerCase();
   if (extractorLower.includes('youtube')) {
     // YouTube is #1 priority for official master recordings
     score += 38;
@@ -1154,9 +1195,16 @@ async function runExtractionPipeline(downloadId, rawQuery, downloadsDir, baseSlu
   };
 
   const rawTitle = String(item.title || rawQuery || '').trim();
-  const cleanTitle = stripRemasterNoise(rawTitle) || rawTitle;
-  const primaryArtist = cleanArtistName(item.artist);
-  const rejectTitleRegex = buildRejectTitleRegex(rawTitle);
+  let cleanTitle = stripRemasterNoise(rawTitle) || rawTitle;
+  let primaryArtist = cleanArtistName(item.artist);
+  if (!primaryArtist && /\s+[-–—]\s+/.test(cleanTitle)) {
+    const parts = cleanTitle.split(/\s+[-–—]\s+/);
+    if (parts.length >= 2 && parts[0].trim().length >= 2) {
+      primaryArtist = cleanArtistName(parts[0]);
+      cleanTitle = parts.slice(1).join(' - ').trim() || cleanTitle;
+    }
+  }
+  const rejectTitleRegex = buildRejectTitleRegex(cleanTitle);
 
   let targets = [];
   let expectedDurationSec = null;
@@ -1184,7 +1232,7 @@ async function runExtractionPipeline(downloadId, rawQuery, downloadsDir, baseSlu
       return;
     }
 
-    // Step 0 & Step 1 in parallel: Resolve canonical duration + official alternate/album words from iTunes/Deezer
+    // Step 0 & Step 1 in parallel: Resolve canonical duration + official title/artist/album words from iTunes/Deezer
     // while simultaneously running SoundCloud and YouTube candidate discovery in SEPARATE parallel processes
     // so a slow/throttled YouTube search can never delay or starve SoundCloud discovery!
     const ytDiscoveryQueries = [
@@ -1206,17 +1254,20 @@ async function runExtractionPipeline(downloadId, rawQuery, downloadsDir, baseSlu
     ]);
     const rawCandidates = [...ytRawCandidates, ...scRawCandidates];
     expectedDurationSec = catalogMeta.durationSec;
+    const effectiveTitle =
+      !primaryArtist && catalogMeta.canonicalTitle ? catalogMeta.canonicalTitle : cleanTitle;
+    const effectiveArtist = primaryArtist || catalogMeta.canonicalArtist || item.artist || '';
     updateProg(18);
 
     const ctx = buildCandidateContext(
       rawTitle,
-      cleanTitle,
-      item.artist,
+      effectiveTitle,
+      effectiveArtist,
       expectedDurationSec,
       catalogMeta
     );
 
-    // Tier 1: Exact 1x studio recordings (within ±20s of canonical duration)
+    // Tier 1: Exact 1x studio recordings
     const scoredTier1 = rawCandidates
       .map(c => ({ ...c, score: scoreCandidate(c, ctx) }))
       .filter(c => c.score >= 0)
@@ -1277,43 +1328,43 @@ async function runExtractionPipeline(downloadId, rawQuery, downloadsDir, baseSlu
         ]
       : [];
 
-    if (hasCookiesConfigured) {
-      // With valid cookies, try YouTube #1 first (with mweb + local EJS + bgutil PO-Token), then SoundCloud
-      targets.push(...ytDirectTargets, ...scDirectTargets, ...scLoopTargets);
-    } else {
-      // Without cookies, prioritize SoundCloud 1x and loop-trimmed so datacenter IP blocks on YouTube are avoided
-      targets.push(...scDirectTargets, ...scLoopTargets, ...ytDirectTargets);
-    }
+    const minDur = expectedDurationSec ? Math.max(45, expectedDurationSec - 8) : 55;
+    const maxDur = expectedDurationSec ? expectedDurationSec + 8 : 540;
+    const searchQueryBase = sanitizeSearchQuery(
+      effectiveArtist
+        ? `${effectiveArtist} ${stripParentheticalSubtitles(effectiveTitle)}`
+        : stripParentheticalSubtitles(effectiveTitle)
+    )
+      .replace(/\s*[-–—]\s*/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim();
 
-    const minDur = expectedDurationSec ? Math.max(45, expectedDurationSec - 15) : 55;
-    const maxDur = expectedDurationSec ? expectedDurationSec + 15 : 540;
-    const searchQueryBase = artistAndPrimaryTitle || artistAndCleanTitle;
-    targets.push({
-      url: `scsearch15:${searchQueryBase}`,
+    const biliTarget = {
+      url: `bilisearch5:${searchQueryBase || artistAndPrimaryTitle || artistAndCleanTitle}`,
       isSearchPool: true,
       minDuration: minDur,
       maxDuration: maxDur,
       rejectTitleRegex,
       trimDurationSec: maxAllowedDur,
       useCookies: false
-    });
+    };
+
+    if (hasCookiesConfigured) {
+      // With valid cookies, try YouTube #1 first, then SoundCloud 1x/loop, then Bilibili studio match
+      targets.push(...ytDirectTargets, ...scDirectTargets, ...scLoopTargets, biliTarget);
+    } else {
+      // Without cookies, prioritize SoundCloud 1x/loop and Bilibili studio match before YouTube
+      targets.push(...scDirectTargets, ...scLoopTargets, biliTarget, ...ytDirectTargets);
+    }
+
     targets.push({
-      url: `ytsearch5:${searchQueryBase} official audio`,
+      url: `ytsearch5:${searchQueryBase || artistAndPrimaryTitle} official audio`,
       isSearchPool: true,
       minDuration: minDur,
       maxDuration: maxDur,
       rejectTitleRegex,
       trimDurationSec: maxAllowedDur,
       useCookies: hasCookiesConfigured
-    });
-    targets.push({
-      url: `bilisearch3:${searchQueryBase}`,
-      isSearchPool: true,
-      minDuration: minDur,
-      maxDuration: maxDur,
-      rejectTitleRegex,
-      trimDurationSec: maxAllowedDur,
-      useCookies: false
     });
   }
 
