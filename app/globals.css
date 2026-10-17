@@ -613,31 +613,69 @@ textarea {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 10px;
-  padding: 9px 14px;
-  border-radius: 16px;
+  gap: 8px;
+  padding: 7px 11px;
+  border-radius: 13px;
   background: var(--lavender);
   color: #19132c;
-  font-size: 0.8rem;
+  font-size: 0.74rem;
   font-weight: 700;
-  margin-bottom: 14px;
+  margin-bottom: 8px;
+  flex-shrink: 0;
+}
+
+.offline-pill-copy {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  min-width: 0;
+  flex: 1;
+}
+
+.offline-pill-copy .svg-icon {
+  flex-shrink: 0;
+}
+
+.offline-pill-text {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  line-height: 1.18;
+}
+
+.offline-pill-text strong {
+  font-size: 0.75rem;
+  font-weight: 800;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.offline-pill-text span {
+  font-size: 0.68rem;
+  font-weight: 600;
+  opacity: 0.82;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .offline-pill-bar .offline-pill-actions {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 5px;
   flex-shrink: 0;
 }
 
 .offline-pill-bar button {
-  padding: 5px 10px;
+  padding: 5px 9px;
   border-radius: 999px;
   border: 0;
   background: #000000;
   color: var(--paper);
-  font-size: 0.73rem;
+  font-size: 0.69rem;
   font-weight: 800;
+  white-space: nowrap;
   cursor: pointer;
 }
 

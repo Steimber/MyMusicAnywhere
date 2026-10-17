@@ -3545,10 +3545,13 @@ export default function HomePage() {
 
       {isOffline && (
         <div className="offline-pill-bar">
-          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
-            <Icon name="wifi-off" size={15} />
-            <span>Modo sin conexión · Reproduciendo música guardada en tu dispositivo</span>
-          </span>
+          <div className="offline-pill-copy">
+            <Icon name="wifi-off" size={14} />
+            <div className="offline-pill-text">
+              <strong>Modo sin conexión</strong>
+              <span>Reproduciendo música guardada</span>
+            </div>
+          </div>
           <div className="offline-pill-actions">
             {activeTab !== 'library' || selectedLibrary !== 'offline' ? (
               <button
@@ -3558,7 +3561,7 @@ export default function HomePage() {
                   setSelectedLibrary('offline');
                 }}
               >
-                Mis Offline ({offlineCatalog.length})
+                Offline ({offlineCatalog.length})
               </button>
             ) : null}
             <button type="button" onClick={() => verifyInternetConnection()}>
