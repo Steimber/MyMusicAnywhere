@@ -97,7 +97,7 @@ export async function POST(request) {
     }
 
     if (action === 'save_yt_cookies') {
-      const status = saveYtCookiesFile(body.cookiesText || '');
+      const status = saveYtCookiesFile(body.content || body.cookiesText || '');
       return NextResponse.json({ ok: true, ytCookies: status });
     }
 

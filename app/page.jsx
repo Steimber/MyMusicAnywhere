@@ -947,7 +947,8 @@ export default function HomePage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           action: 'save_yt_cookies',
-          content: rawContent
+          content: rawContent,
+          cookiesText: rawContent
         })
       });
       const data = await res.json();
