@@ -4105,7 +4105,7 @@ export default function HomePage() {
                     </span>
                   </div>
                   <div className="section-bar-sub">
-                    Guarda tu archivo <code>cookies.txt</code> (formato Netscape) en el servidor de forma privada para desbloquear YouTube como fuente #1 sin bloqueo de IP.
+                    Pega o sube tus cookies en formato <code>JSON</code> (Cookie-Editor) o <code>cookies.txt</code> (Netscape) para desbloquear YouTube como fuente #1 sin bloqueo de IP.
                   </div>
                 </div>
                 {adminData.ytCookies?.configured && (
@@ -4122,10 +4122,10 @@ export default function HomePage() {
 
               <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
                 <label className="btn ghost sm" style={{ cursor: isOffline ? 'not-allowed' : 'pointer' }}>
-                  <Icon name="upload" size={14} /> Subir archivo cookies.txt
+                  <Icon name="upload" size={14} /> Subir cookies (.json o .txt)
                   <input
                     type="file"
-                    accept=".txt,text/plain"
+                    accept=".txt,.json,text/plain,application/json"
                     disabled={ytCookiesBusy || isOffline}
                     style={{ display: 'none' }}
                     onChange={async e => {
@@ -4143,7 +4143,7 @@ export default function HomePage() {
                 className="search-input"
                 rows={4}
                 style={{ width: '100%', fontFamily: 'monospace', fontSize: '0.76rem', resize: 'vertical', padding: '8px 10px' }}
-                placeholder="# Netscape HTTP Cookie File&#10;.youtube.com	TRUE	/	TRUE	..."
+                placeholder='Pega aquí el JSON exportado ([ { "domain": ".youtube.com", ... } ]) o el archivo Netscape cookies.txt'
                 value={ytCookiesText}
                 disabled={ytCookiesBusy || isOffline}
                 onChange={e => setYtCookiesText(e.target.value)}
