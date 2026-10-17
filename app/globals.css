@@ -956,10 +956,6 @@ textarea {
   border-bottom: 0;
 }
 
-.track-row:hover {
-  background: var(--surface-alt);
-}
-
 .track-row.playing {
   background: color-mix(in srgb, var(--clay) 10%, var(--surface));
 }
@@ -973,12 +969,6 @@ textarea {
   background: color-mix(in srgb, var(--muted) 12%, var(--surface));
   opacity: 0.54;
   filter: grayscale(0.85);
-}
-
-.track-row.library-undownloaded:hover {
-  background: color-mix(in srgb, var(--muted) 16%, var(--surface-alt));
-  opacity: 0.76;
-  filter: grayscale(0.45);
 }
 
 .track-row.library-undownloaded .track-title,
@@ -1033,10 +1023,10 @@ textarea {
   align-items: center;
   justify-content: center;
   opacity: 0;
+  pointer-events: none;
   transition: opacity 0.14s ease;
 }
 
-.track-row-main:hover .track-cover-overlay,
 .track-row.playing .track-cover-overlay {
   opacity: 1;
 }
