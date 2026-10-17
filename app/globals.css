@@ -84,6 +84,7 @@ body {
   -webkit-text-size-adjust: 100%;
   text-size-adjust: 100%;
   overflow-x: clip;
+  overscroll-behavior: none;
   min-height: 100dvh;
   scrollbar-width: none;
 }
