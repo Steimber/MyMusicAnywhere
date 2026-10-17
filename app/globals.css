@@ -69,6 +69,9 @@ body {
   font-family: var(--font-manrope), system-ui, -apple-system, sans-serif;
   line-height: 1.45;
   -webkit-font-smoothing: antialiased;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+  overflow-x: clip;
   min-height: 100dvh;
 }
 
@@ -1119,6 +1122,94 @@ textarea {
   border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: clamp(16px, 2.5vw, 22px);
+  max-width: 100%;
+  overflow: hidden;
+}
+
+.settings-card-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+
+.settings-card-info {
+  min-width: 0;
+  flex: 1;
+}
+
+.settings-card-title {
+  font-family: var(--font-syne), sans-serif;
+  font-size: 1rem;
+  font-weight: 800;
+  line-height: 1.25;
+  color: var(--text);
+  overflow-wrap: break-word;
+}
+
+.settings-card-sub {
+  font-size: 0.78rem;
+  color: var(--muted);
+  font-weight: 600;
+  line-height: 1.42;
+  margin-top: 4px;
+  overflow-wrap: break-word;
+}
+
+.settings-card-sub code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.74rem;
+  padding: 1px 5px;
+  border-radius: 5px;
+  background: var(--surface-alt);
+  border: 1px solid var(--border);
+}
+
+.cookies-textarea {
+  display: block;
+  width: 100%;
+  height: auto;
+  field-sizing: content;
+  min-block-size: 3.5lh;
+  max-block-size: 8lh;
+  padding: 10px 12px;
+  border-radius: 14px;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.76rem;
+  line-height: 1.45;
+  resize: vertical;
+  outline: none;
+  transition: border-color 0.15s ease;
+}
+
+.cookies-textarea:focus {
+  border-color: var(--clay);
+}
+
+.cookies-textarea::placeholder {
+  color: var(--muted);
+  font-family: var(--font-manrope), system-ui, sans-serif;
+  font-size: 0.78rem;
+}
+
+.settings-actions-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.settings-actions-group {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .empty {

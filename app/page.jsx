@@ -3908,12 +3908,12 @@ export default function HomePage() {
           </div>
 
           <div className="card" style={{ marginBottom: 14 }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 10, marginBottom: 12 }}>
-              <div>
-                <div className="track-title" style={{ fontSize: '1rem' }}>
+            <div className="settings-card-head">
+              <div className="settings-card-info">
+                <div className="settings-card-title">
                   Importar desde Spotify
                 </div>
-                <div className="section-bar-sub">
+                <div className="settings-card-sub">
                   Pegá un link público de Spotify o subí tu archivo <code>.csv</code> de Exportify. Podrás elegir en qué librería guardarlo.
                 </div>
               </div>
@@ -4101,11 +4101,11 @@ export default function HomePage() {
 
           <div className="card">
             <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
-              <div>
-                <div className="track-title" style={{ fontSize: '1rem' }}>
+              <div className="settings-card-info">
+                <div className="settings-card-title">
                   Almacenamiento Offline
                 </div>
-                <div className="section-bar-sub">
+                <div className="settings-card-sub">
                   {deviceQuota
                     ? `${deviceQuota.usedMB} MB usados de ~${deviceQuota.quotaGB} GB (${offlineCatalog.length} canciones en caché).`
                     : `${offlineCatalog.length} canciones guardadas en este dispositivo.`}
@@ -4131,20 +4131,72 @@ export default function HomePage() {
 
           {user?.is_admin && (
             <div className="card" style={{ marginTop: 14 }}>
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap', marginBottom: 8 }}>
-                <div>
-                  <div className="track-title" style={{ fontSize: '1rem', display: 'flex', alignItems: 'center', gap: 8 }}>
-                    YouTube Prioritario (Cookies de cuenta secundaria)
-                    <span className={`pill ${adminData.ytCookies?.configured ? 'ready' : ''}`}>
-                      {adminData.ytCookies?.configured
-                        ? `Activas (${adminData.ytCookies.cookieLines} líneas)`
-                        : 'Sin configurar'}
-                    </span>
+              <div className="settings-card-head">
+                <div className="settings-card-info">
+                  <div className="settings-card-title">
+                    Cookies de YouTube
                   </div>
-                  <div className="section-bar-sub">
-                    Pega o sube tus cookies en formato <code>JSON</code> (Cookie-Editor) o <code>cookies.txt</code> (Netscape) para desbloquear YouTube como fuente #1 sin bloqueo de IP.
+                  <div className="settings-card-sub">
+                    Pegá o subí tus cookies en <code>JSON</code> (Cookie-Editor) o <code>cookies.txt</code> (Netscape) para priorizar YouTube en el VPS.
                   </div>
                 </div>
+                <span className={`badge ${adminData.ytCookies?.configured ? 'lime' : ''}`}>
+                  {adminData.ytCookies?.configured
+                    ? `Activas (${adminData.ytCookies.cookieLines})`
+                    : 'Sin configurar'}
+                </span>
+              </div>
+
+              {ytCookiesMsg.text && (
+                <div
+                  className={`alert ${ytCookiesMsg.type === 'error' ? 'err' : 'ok'}`}
+                  style={{ marginBottom: 10 }}
+                >
+                  {ytCookiesMsg.text}
+                </div>
+              )}
+
+              <textarea
+                className="cookies-textarea"
+                rows={4}
+                placeholder='Pegá aquí el JSON exportado ([ { "domain": ".youtube.com", ... } ]) o el contenido de cookies.txt…'
+                value={ytCookiesText}
+                disabled={ytCookiesBusy || isOffline}
+                onChange={e => setYtCookiesText(e.target.value)}
+              />
+
+              <div className="settings-actions-row">
+                <div className="settings-actions-group">
+                  <button
+                    type="button"
+                    className="btn sm"
+                    disabled={ytCookiesBusy || isOffline || !ytCookiesText.trim()}
+                    onClick={() => saveYtCookiesContent(ytCookiesText)}
+                  >
+                    <Icon name="check" size={14} /> {ytCookiesBusy ? 'Guardando…' : 'Guardar cookies'}
+                  </button>
+
+                  <label
+                    className="btn secondary sm"
+                    style={{ cursor: ytCookiesBusy || isOffline ? 'not-allowed' : 'pointer' }}
+                  >
+                    <Icon name="folder" size={14} /> Subir .json / .txt
+                    <input
+                      type="file"
+                      accept=".txt,.json,text/plain,application/json"
+                      disabled={ytCookiesBusy || isOffline}
+                      style={{ display: 'none' }}
+                      onChange={async e => {
+                        const file = e.target.files?.[0];
+                        e.target.value = '';
+                        if (!file) return;
+                        const text = await file.text();
+                        await saveYtCookiesContent(text);
+                      }}
+                    />
+                  </label>
+                </div>
+
                 {adminData.ytCookies?.configured && (
                   <button
                     type="button"
@@ -4152,59 +4204,8 @@ export default function HomePage() {
                     disabled={ytCookiesBusy || isOffline}
                     onClick={handleClearYtCookies}
                   >
-                    <Icon name="trash" size={14} /> Quitar cookies
+                    <Icon name="trash" size={14} /> Quitar
                   </button>
-                )}
-              </div>
-
-              <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginBottom: 8 }}>
-                <label className="btn ghost sm" style={{ cursor: isOffline ? 'not-allowed' : 'pointer' }}>
-                  <Icon name="upload" size={14} /> Subir cookies (.json o .txt)
-                  <input
-                    type="file"
-                    accept=".txt,.json,text/plain,application/json"
-                    disabled={ytCookiesBusy || isOffline}
-                    style={{ display: 'none' }}
-                    onChange={async e => {
-                      const file = e.target.files?.[0];
-                      e.target.value = '';
-                      if (!file) return;
-                      const text = await file.text();
-                      await saveYtCookiesContent(text);
-                    }}
-                  />
-                </label>
-              </div>
-
-              <textarea
-                className="search-input"
-                rows={4}
-                style={{ width: '100%', fontFamily: 'monospace', fontSize: '0.76rem', resize: 'vertical', padding: '8px 10px' }}
-                placeholder='Pega aquí el JSON exportado ([ { "domain": ".youtube.com", ... } ]) o el archivo Netscape cookies.txt'
-                value={ytCookiesText}
-                disabled={ytCookiesBusy || isOffline}
-                onChange={e => setYtCookiesText(e.target.value)}
-              />
-
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginTop: 8, flexWrap: 'wrap' }}>
-                <button
-                  type="button"
-                  className="btn sm"
-                  disabled={ytCookiesBusy || isOffline || !ytCookiesText.trim()}
-                  onClick={() => saveYtCookiesContent(ytCookiesText)}
-                >
-                  <Icon name="check" size={14} /> {ytCookiesBusy ? 'Guardando…' : 'Guardar cookies en VPS'}
-                </button>
-                {ytCookiesMsg.text && (
-                  <span
-                    style={{
-                      fontSize: '0.78rem',
-                      color: ytCookiesMsg.type === 'error' ? 'var(--clay)' : 'var(--sage)',
-                      fontWeight: 600
-                    }}
-                  >
-                    {ytCookiesMsg.text}
-                  </span>
                 )}
               </div>
             </div>
