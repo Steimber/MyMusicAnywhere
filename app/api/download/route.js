@@ -994,6 +994,7 @@ function runYtDlpAttempt(target, outputTemplate, options, onProgress) {
     isSearchPool = false,
     minDuration = 55,
     maxDuration = 900,
+    matchTitleRegex = null,
     rejectTitleRegex = null,
     trimDurationSec = null,
     fadeOutSec = 0,
@@ -1012,6 +1013,7 @@ function runYtDlpAttempt(target, outputTemplate, options, onProgress) {
     }
 
     const isYouTubeTarget = /youtube\.com|youtu\.be|^ytsearch/i.test(String(target || ''));
+    const isBilibiliTarget = /^bilisearch|bilibili\.com/i.test(String(target || ''));
     const masterCookiesPath = isYouTubeTarget && useCookies ? getYtCookiesFilePath() : null;
     let tempCookiesPath = null;
 
@@ -1057,8 +1059,16 @@ function runYtDlpAttempt(target, outputTemplate, options, onProgress) {
       ytdlpArgs.push('--extractor-args', 'youtube:player_client=mweb,web');
     }
 
+    if (isBilibiliTarget) {
+      // Prevent HTTP 412 Precondition Failed on Bilibili search API
+      ytdlpArgs.push('--add-header', 'Referer:https://search.bilibili.com/');
+    }
+
     if (isSearchPool) {
       ytdlpArgs.push('--match-filter', `duration >= ${minDuration} & duration <= ${maxDuration}`);
+      if (matchTitleRegex) {
+        ytdlpArgs.push('--match-title', matchTitleRegex);
+      }
       if (rejectTitleRegex) {
         ytdlpArgs.push('--reject-title', rejectTitleRegex);
       }
@@ -1339,11 +1349,18 @@ async function runExtractionPipeline(downloadId, rawQuery, downloadsDir, baseSlu
       .replace(/\s+/g, ' ')
       .trim();
 
+    const titleCoreWords = getTitleCoreTokens(effectiveTitle).slice(0, 4);
+    const biliMatchTitleRegex =
+      titleCoreWords.length > 0
+        ? `(?i)${titleCoreWords.map(w => `(?=.*${w.replace(/[^a-z0-9]/gi, '')})`).join('')}`
+        : null;
+
     const biliTarget = {
       url: `bilisearch5:${searchQueryBase || artistAndPrimaryTitle || artistAndCleanTitle}`,
       isSearchPool: true,
       minDuration: minDur,
       maxDuration: maxDur,
+      matchTitleRegex: biliMatchTitleRegex,
       rejectTitleRegex,
       trimDurationSec: maxAllowedDur,
       useCookies: false
