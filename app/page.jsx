@@ -3680,17 +3680,6 @@ export default function HomePage() {
                 </div>
 
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
-                  {results.length > 0 && (
-                    <button
-                      type="button"
-                      className="icon-btn"
-                      disabled={isOffline}
-                      onClick={() => playFromList(results, 0, true)}
-                      title="Reproducir mezcla aleatoria"
-                    >
-                      <Icon name="shuffle" size={16} />
-                    </button>
-                  )}
                   <button
                     type="button"
                     className="icon-btn"
