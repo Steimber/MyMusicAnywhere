@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useMemo } from 'react';
 import { NoSleepController } from '../lib/nosleep';
 
 const AUDIO_CACHE_NAME = 'my-music-offline-audio-v1';
@@ -39,8 +39,14 @@ function compressArtworkUrl(rawUrl) {
   return rawUrl;
 }
 
+const dedupKeyMemo = new Map();
+
 function getTrackDedupKey(track) {
   if (!track) return '';
+  const memoSignature = `${track.title || ''}\0${track.artist || ''}\0${track.id || ''}`;
+  const cached = dedupKeyMemo.get(memoSignature);
+  if (cached !== undefined) return cached;
+
   const normTitle = String(track.title || '')
     .toLowerCase()
     .normalize('NFD')
@@ -59,8 +65,10 @@ function getTrackDedupKey(track) {
     .replace(/[\u0300-\u036f]/g, '')
     .replace(/[^\p{L}\p{N}]+/gu, ' ')
     .trim();
-  if (!normTitle) return String(track.id || '');
-  return `${normTitle}|${normArtist}`;
+  const computed = !normTitle ? String(track.id || '') : `${normTitle}|${normArtist}`;
+  if (dedupKeyMemo.size > 5000) dedupKeyMemo.clear();
+  dedupKeyMemo.set(memoSignature, computed);
+  return computed;
 }
 
 function deduplicateTracksList(list) {
@@ -436,6 +444,7 @@ export default function HomePage() {
   const [queue, setQueue] = useState([]);
   const [currentIndex, setCurrentIndex] = useState(-1);
   const [isPlaying, setIsPlaying] = useState(false);
+  const [optimisticTrack, setOptimisticTrack] = useState(null);
   const [shuffle, setShuffle] = useState(true);
   const [repeatMode, setRepeatMode] = useState('off');
   const [progress, setProgress] = useState(0);
@@ -459,6 +468,42 @@ export default function HomePage() {
   repeatModeRef.current = repeatMode;
 
   const currentTrack = currentIndex >= 0 && currentIndex < queue.length ? queue[currentIndex] : null;
+
+  const offlineLookup = useMemo(() => {
+    const byId = new Map();
+    const byFile = new Map();
+    const byDedup = new Map();
+    for (const t of offlineCatalog) {
+      if (!t) continue;
+      if (t.id != null) byId.set(String(t.id), t);
+      if (t.filename) byFile.set(t.filename, t);
+      const dk = getTrackDedupKey(t);
+      if (dk && !byDedup.has(dk)) byDedup.set(dk, t);
+    }
+    return { byId, byFile, byDedup };
+  }, [offlineCatalog]);
+
+  const likedLookup = useMemo(() => {
+    const byId = new Map();
+    const byDedup = new Map();
+    for (const t of likedTracks) {
+      if (!t) continue;
+      if (t.id != null) byId.set(String(t.id), t);
+      const dk = getTrackDedupKey(t);
+      if (dk && !byDedup.has(dk)) byDedup.set(dk, t);
+    }
+    return { byId, byDedup };
+  }, [likedTracks]);
+
+  function findOfflineItem(track) {
+    if (!track) return null;
+    return (
+      offlineLookup.byId.get(String(track.id)) ||
+      (track.filename ? offlineLookup.byFile.get(track.filename) : null) ||
+      offlineLookup.byDedup.get(getTrackDedupKey(track)) ||
+      null
+    );
+  }
 
   function sanitizeLikedTracksList(list) {
     if (!Array.isArray(list)) return [];
@@ -746,9 +791,12 @@ export default function HomePage() {
   useEffect(() => {
     if (!currentTrack || !audioRef.current) return;
     let cancelled = false;
+    setOptimisticTrack(null);
 
-    // Pre-warm current + upcoming tracks in RAM so screen-off onEnded transitions are 100% synchronous (0ms)
-    preloadUpcomingQueueBlobs(queue, currentIndex);
+    // Pre-warm current + upcoming tracks asynchronously so click paint happens in 0ms
+    const warmTimer = setTimeout(() => {
+      if (!cancelled) preloadUpcomingQueueBlobs(queue, currentIndex);
+    }, 100);
 
     const alreadyStartedSync =
       lastDirectPlayRef.current.index === currentIndex &&
@@ -785,6 +833,7 @@ export default function HomePage() {
 
     return () => {
       cancelled = true;
+      clearTimeout(warmTimer);
     };
   }, [currentIndex, queue]);
 
@@ -806,13 +855,14 @@ export default function HomePage() {
     const node = libraryLoadMoreRef.current;
     if (!node || typeof IntersectionObserver === 'undefined') return;
 
+    const scrollRoot = node.closest('.track-list') || null;
     const observer = new IntersectionObserver(
       entries => {
         if (entries[0]?.isIntersecting) {
           setVisibleLibraryCount(prev => prev + 15);
         }
       },
-      { rootMargin: '280px 0px' }
+      { root: scrollRoot, rootMargin: '280px 0px' }
     );
     observer.observe(node);
     return () => observer.disconnect();
@@ -1043,7 +1093,7 @@ export default function HomePage() {
   }
 
   function isLiked(trackId) {
-    return likedTracks.some(t => String(t.id) === String(trackId));
+    return likedLookup.byId.has(String(trackId));
   }
 
   function isTrackInPlaylist(playlistId, trackId) {
@@ -1806,17 +1856,10 @@ export default function HomePage() {
     if (!track) return null;
     const dl = downloads[track.id];
     const dedupKey = getTrackDedupKey(track);
-    const offItem = offlineCatalog.find(
-      t =>
-        String(t.id) === String(track.id) ||
-        (track.filename && t.filename === track.filename) ||
-        (dedupKey && getTrackDedupKey(t) === dedupKey)
-    );
-    const likedItem = likedTracks.find(
-      t =>
-        String(t.id) === String(track.id) ||
-        (dedupKey && getTrackDedupKey(t) === dedupKey)
-    );
+    const offItem = findOfflineItem(track);
+    const likedItem =
+      likedLookup.byId.get(String(track.id)) ||
+      (dedupKey ? likedLookup.byDedup.get(dedupKey) : null);
     const filename =
       track.filename || dl?.filename || offItem?.filename || likedItem?.filename;
     return (
@@ -1931,15 +1974,22 @@ export default function HomePage() {
       .map(([name]) => name)
       .slice(0, 4);
 
-    const excludeKeys = [...cleanLikes, ...playlistTracks]
-      .map(
-        t =>
-          `${String(t.title || '').trim().toLowerCase()}|${String(t.artist || '')
-            .trim()
-            .toLowerCase()}`
+    const allKnownTracks = [...cleanLikes, ...playlistTracks, ...offlineCatalog];
+    const excludeKeys = Array.from(
+      new Set(
+        allKnownTracks
+          .flatMap(t => [
+            `${String(t.title || '').trim().toLowerCase()}|${String(t.artist || '')
+              .trim()
+              .toLowerCase()}`,
+            getTrackDedupKey(t)
+          ])
+          .filter(k => k && k !== '|')
       )
-      .filter(k => k !== '|')
-      .slice(0, 120);
+    ).slice(0, 400);
+
+    const filterOutDownloaded = list =>
+      (Array.isArray(list) ? list : []).filter(t => !isTrackAvailableOffline(t));
 
     const mode = !forceRandom && (topArtists.length > 0 || topGenres.length > 0)
       ? 'recommended'
@@ -1959,12 +2009,13 @@ export default function HomePage() {
       });
       if (res.ok) {
         const data = await res.json();
-        if (Array.isArray(data.tracks) && data.tracks.length > 0) {
+        const freshTracks = filterOutDownloaded(data.tracks);
+        if (freshTracks.length > 0) {
           setFeedInfo({
             mode: data.mode || mode,
             label: data.label || (mode === 'recommended' ? topArtists.slice(0, 2).join(', ') : '')
           });
-          setResults(data.tracks);
+          setResults(freshTracks);
           setLoading(false);
           return;
         }
@@ -1984,15 +2035,17 @@ export default function HomePage() {
   async function searchTracks(searchTerm, meta = null) {
     if (!searchTerm || !searchTerm.trim()) return;
     setLoading(true);
-    if (meta) {
-      setFeedInfo(meta);
-    } else {
-      setFeedInfo({ mode: 'search', label: searchTerm.trim() });
-    }
+    const effectiveMeta = meta || { mode: 'search', label: searchTerm.trim() };
+    setFeedInfo(effectiveMeta);
     try {
       const res = await fetch(`/api/search?q=${encodeURIComponent(searchTerm)}`);
       const data = await res.json();
-      setResults(data.results || data.tracks || []);
+      const rawList = data.results || data.tracks || [];
+      setResults(
+        effectiveMeta.mode === 'search'
+          ? rawList
+          : rawList.filter(t => !isTrackAvailableOffline(t))
+      );
     } catch {}
     setLoading(false);
   }
@@ -2502,13 +2555,7 @@ export default function HomePage() {
     if (!track) return false;
     const dl = downloads[track.id];
     if (dl?.status === 'ready') return true;
-    const dedupKey = getTrackDedupKey(track);
-    const offItem = offlineCatalog.find(
-      t =>
-        String(t.id) === String(track.id) ||
-        (track.filename && t.filename === track.filename) ||
-        (dedupKey && getTrackDedupKey(t) === dedupKey)
-    );
+    const offItem = findOfflineItem(track);
     if (offItem) return true;
     const streamUrl = getTrackStreamUrl(track);
     return Boolean(
@@ -2563,9 +2610,12 @@ export default function HomePage() {
     currentIndexRef.current = nextIdx;
     setCurrentIndex(nextIdx);
     setProgress(0);
+    setIsPlaying(true);
 
-    // Pre-warm upcoming tracks from this new position
-    preloadUpcomingQueueBlobs(activeQueue, nextIdx);
+    // Pre-warm upcoming tracks asynchronously so the click frame paints in 0ms
+    setTimeout(() => {
+      preloadUpcomingQueueBlobs(activeQueue, nextIdx);
+    }, 80);
 
     const syncSrc = getSyncPlayableSource(nextTrack);
     if (syncSrc && audioRef.current) {
@@ -2897,6 +2947,30 @@ export default function HomePage() {
     );
   }
 
+  function renderTrackSkeletons(count = 8) {
+    return Array.from({ length: count }, (_, i) => (
+      <div key={`skel_${i}`} className="track-row skeleton-row" aria-hidden="true">
+        <div className="track-row-main">
+          <div className="skeleton-block skeleton-cover" />
+          <div className="track-text">
+            <div
+              className="skeleton-block skeleton-line-title"
+              style={{ width: `${54 + ((i * 17) % 28)}%` }}
+            />
+            <div
+              className="skeleton-block skeleton-line-sub"
+              style={{ width: `${36 + ((i * 13) % 24)}%` }}
+            />
+          </div>
+        </div>
+        <div className="track-actions">
+          <div className="skeleton-block skeleton-Action" />
+          <div className="skeleton-block skeleton-Action" />
+        </div>
+      </div>
+    ));
+  }
+
   // Unified Single-Line Track Row component used in Explore & Libraries
   function renderTrackRow(track, idx, list, contextLib = null) {
     const dlKey = track.id || track.title;
@@ -2909,12 +2983,7 @@ export default function HomePage() {
         : -1;
     const isQueuedForSlot = dlSlotIndex >= MAX_SIMULTANEOUS_DOWNLOADS;
     const trackDedupKey = getTrackDedupKey(track);
-    const offItem = offlineCatalog.find(
-      t =>
-        String(t.id) === String(track.id) ||
-        (track.filename && t.filename === track.filename) ||
-        (trackDedupKey && getTrackDedupKey(t) === trackDedupKey)
-    );
+    const offItem = findOfflineItem(track);
     const filename = track.filename || dl?.filename || offItem?.filename;
     const streamUrl =
       track.streamUrl ||
@@ -2924,13 +2993,26 @@ export default function HomePage() {
       contextLib === 'offline' ||
       dl?.status === 'ready' ||
       Boolean(offItem) ||
-      Boolean(streamUrl && offlineUrls[streamUrl]);
+      Boolean(streamUrl && (offlineUrls[streamUrl] || blobUrlCacheRef.current.has(streamUrl)));
     const isGreyedOffline = isOffline && !isOfflineReady;
     const isLibraryUndownloaded =
       Boolean(contextLib && contextLib !== 'offline') &&
       !isOfflineReady &&
       dl?.status !== 'downloading';
-    const isCurrent = currentTrack && String(currentTrack.id) === String(track.id);
+    const isActualCurrent = Boolean(
+      currentTrack &&
+        (String(currentTrack.id) === String(track.id) ||
+          (trackDedupKey && getTrackDedupKey(currentTrack) === trackDedupKey))
+    );
+    const isOptimisticCurrent = Boolean(
+      optimisticTrack &&
+        (String(optimisticTrack.id) === String(track.id) ||
+          (trackDedupKey && getTrackDedupKey(optimisticTrack) === trackDedupKey))
+    );
+    const isPromptTarget = Boolean(
+      downloadPrompt?.track && String(downloadPrompt.track.id) === String(track.id)
+    );
+    const isCurrent = isActualCurrent || isOptimisticCurrent || isPromptTarget;
     const liked = isLiked(track.id);
 
     const subtitleParts = [track.artist || 'Artista'];
@@ -2954,8 +3036,14 @@ export default function HomePage() {
       >
         <div
           className="track-row-main"
+          onPointerDown={() => {
+            if (isOfflineReady && !isGreyedOffline) {
+              resolvePlayableSource(track).catch(() => {});
+            }
+          }}
           onClick={() => {
             if (isGreyedOffline) return;
+            setOptimisticTrack(track);
             let targetList = list;
             const resolvedIdx = Array.isArray(list)
               ? list.findIndex(t => String(t.id) === String(track.id))
@@ -2972,7 +3060,7 @@ export default function HomePage() {
               setLibraryQuery('');
             }
 
-            if (isCurrent) {
+            if (isActualCurrent) {
               if (wasSearching && isOfflineReady) {
                 playFromList(targetList, 0);
                 if (!isPlaying) togglePlayPause();
@@ -3009,7 +3097,7 @@ export default function HomePage() {
               }}
             />
             <div className="track-cover-overlay">
-              <Icon name={isCurrent && isPlaying ? 'pause' : 'play'} size={15} />
+              <Icon name={isActualCurrent && isPlaying ? 'pause' : 'play'} size={15} />
             </div>
           </div>
 
@@ -3019,6 +3107,7 @@ export default function HomePage() {
               {isOfflineReady && (
                 <span className="offline-inline-dot" title="Descargada en el dispositivo">
                   <Icon name="offline-pin" size={13} />
+                  {!contextLib && <span className="offline-tag-label">Descargada</span>}
                 </span>
               )}
               <span className="track-sub-text">
@@ -3618,11 +3707,13 @@ export default function HomePage() {
             </div>
           </div>
 
-          {results.length === 0 ? (
+          {loading ? (
+            <div className="track-list" aria-busy="true" aria-label="Cargando canciones">
+              {renderTrackSkeletons(8)}
+            </div>
+          ) : results.length === 0 ? (
             <div className="empty">
-              <div className="empty-title">
-                {loading ? 'Cargando recomendaciones…' : 'Sin resultados por ahora'}
-              </div>
+              <div className="empty-title">Sin resultados por ahora</div>
               <p>Probá buscando otro artista o tocá actualizar.</p>
             </div>
           ) : (
@@ -4732,12 +4823,15 @@ export default function HomePage() {
                 disabled={isOffline}
                 onClick={async () => {
                   const target = downloadPrompt;
+                  setOptimisticTrack(target.track);
                   closeDownloadPromptModal();
                   const ok = await startDownload(target.track, true);
                   if (ok && target.list?.length > 0) {
                     playFromList(target.list, target.idx, false, {
                       forceIncludeTrack: target.track
                     });
+                  } else if (!ok) {
+                    setOptimisticTrack(null);
                   }
                 }}
               >
@@ -4754,6 +4848,7 @@ export default function HomePage() {
                   disabled={isOffline}
                   onClick={() => {
                     const target = downloadPrompt;
+                    setOptimisticTrack(target.track);
                     closeDownloadPromptModal();
                     playFromList(target.list, target.idx, false, {
                       allowSinglePreview: true
@@ -4769,7 +4864,10 @@ export default function HomePage() {
               <button
                 type="button"
                 className="dialog-option"
-                onClick={closeDownloadPromptModal}
+                onClick={() => {
+                  setOptimisticTrack(null);
+                  closeDownloadPromptModal();
+                }}
               >
                 <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
                   <Icon name="close" size={15} /> Cancelar
