@@ -203,44 +203,78 @@ function getArtistTokens(rawArtist) {
     .filter(w => w.length >= 3 && !stopWords.has(w));
 }
 
-function getTitleCoreTokens(cleanTitle) {
-  const stopWords = new Set([
-    'the',
-    'los',
-    'las',
-    'les',
-    'and',
-    'con',
-    'del',
-    'por',
-    'para',
-    'una',
-    'uno',
-    'feat',
-    'ft',
-    'with',
-    'remaster',
-    'remastered',
-    'version',
-    'spanglish',
-    'spanish',
-    'english',
-    'edit',
-    'mix'
-  ]);
-  // Prefer the primary title outside parentheses (e.g. "The Ketchup Song (Aserejé)" -> ["ketchup", "song"])
-  // while keeping parenthetical words inside allowedWords so neither form is penalized
-  const primaryPart = stripParentheticalSubtitles(cleanTitle);
-  const primaryTokens = normalizeText(primaryPart)
+const TITLE_STOP_WORDS = new Set([
+  'the',
+  'los',
+  'las',
+  'les',
+  'and',
+  'con',
+  'del',
+  'por',
+  'para',
+  'una',
+  'uno',
+  'feat',
+  'ft',
+  'with',
+  'remaster',
+  'remastered',
+  'remasterizado',
+  'version',
+  'spanglish',
+  'spanish',
+  'espanol',
+  'english',
+  'original',
+  'official',
+  'oficial',
+  'audio',
+  'video',
+  'radio',
+  'single',
+  'album',
+  'edit',
+  'mix',
+  'vol',
+  'volumen',
+  'volume',
+  'pt',
+  'part',
+  'parte'
+]);
+
+function extractMeaningfulTokens(text) {
+  return normalizeText(text)
     .split(/\s+/)
-    .filter(w => w.length >= 2 && !stopWords.has(w));
+    .filter(w => w.length >= 2 && !TITLE_STOP_WORDS.has(w));
+}
+
+function getTitleCoreTokens(cleanTitle) {
+  const primaryPart = stripParentheticalSubtitles(cleanTitle);
+  const primaryTokens = extractMeaningfulTokens(primaryPart);
   if (primaryTokens.length > 0) {
     return primaryTokens;
   }
-  const tokens = normalizeText(cleanTitle)
-    .split(/\s+/)
-    .filter(w => w.length >= 2 && !stopWords.has(w));
+  const tokens = extractMeaningfulTokens(cleanTitle);
   return tokens.length > 0 ? tokens : normalizeText(cleanTitle).split(/\s+/).filter(Boolean);
+}
+
+function extractParentheticalTokenGroups(rawText) {
+  const groups = [];
+  const regex = /[\(\[]([^\)\]]+)[\)\]]/g;
+  let match;
+  while ((match = regex.exec(String(rawText || ''))) !== null) {
+    const inner = stripRemasterNoise(match[1]);
+    if (!inner || /\b(feat|ft|with|prod|remix|live|vivo|cover|karaoke)\b/i.test(inner)) {
+      continue;
+    }
+    const tokens = extractMeaningfulTokens(inner);
+    if (tokens.length > 0) {
+      groups.push(tokens);
+    }
+  }
+  return groups;
 }
 
 function parseDurationToSec(rawDur) {
@@ -260,12 +294,22 @@ function parseDurationToSec(rawDur) {
   return sec >= 45 && sec <= 1200 ? sec : null;
 }
 
-async function resolveExpectedDurationSec(rawDuration, cleanTitle, primaryArtist) {
+// Universal catalog lookup (iTunes + Deezer in parallel):
+// Resolves the canonical studio duration AND collects official alternate/parenthetical titles and album words
+// so ANY song in the world automatically recognizes its bilingual/subtitle variants and album title.
+async function resolveCatalogMetadata(rawDuration, cleanTitle, primaryArtist) {
   const parsed = parseDurationToSec(rawDuration);
-  if (parsed && parsed <= 420) return parsed;
+  const extraWords = new Set();
+  const extraTokenGroups = [];
 
-  const query = `${ stripParentheticalSubtitles(cleanTitle) } ${primaryArtist || ''}`.trim();
-  if (!query) return parsed || null;
+  const query = `${stripParentheticalSubtitles(cleanTitle)} ${primaryArtist || ''}`.trim();
+  if (!query) {
+    return {
+      durationSec: parsed || null,
+      catalogWords: extraWords,
+      catalogTokenGroups: extraTokenGroups
+    };
+  }
 
   const titleTokens = getTitleCoreTokens(cleanTitle);
   const artistTokens = getArtistTokens(primaryArtist);
@@ -281,43 +325,68 @@ async function resolveExpectedDurationSec(rawDuration, cleanTitle, primaryArtist
     return tOk && aOk;
   };
 
-  const fetchItunesSec = async () => {
+  const harvestTrackMeta = (trackTitle, albumTitle) => {
+    for (const w of normalizeText(`${trackTitle || ''} ${albumTitle || ''}`).split(/\s+/)) {
+      if (w && w.length >= 2) extraWords.add(w);
+    }
+    for (const grp of extractParentheticalTokenGroups(trackTitle)) {
+      extraTokenGroups.push(grp);
+    }
+  };
+
+  const fetchItunes = async () => {
     try {
       const itunesUrl = `https://itunes.apple.com/search?term=${encodeURIComponent(
         query
       )}&media=music&entity=song&limit=6`;
-      const res = await fetch(itunesUrl, { signal: AbortSignal.timeout(2500) });
+      const res = await fetch(itunesUrl, { signal: AbortSignal.timeout(2200) });
       if (!res.ok) return null;
       const data = await res.json();
       const hits = Array.isArray(data?.results) ? data.results : [];
       for (const h of hits) {
         const sec = h.trackTimeMillis ? Math.round(h.trackTimeMillis / 1000) : null;
-        if (matchCatalogTrack(h.trackName, h.artistName, sec)) return sec;
+        if (matchCatalogTrack(h.trackName, h.artistName, sec)) {
+          harvestTrackMeta(h.trackName, h.collectionName);
+          return sec;
+        }
       }
     } catch {}
     return null;
   };
 
-  const fetchDeezerSec = async () => {
+  const fetchDeezer = async () => {
     try {
       const dzUrl = `https://api.deezer.com/search?q=${encodeURIComponent(query)}&limit=6`;
-      const res = await fetch(dzUrl, { signal: AbortSignal.timeout(2500) });
+      const res = await fetch(dzUrl, { signal: AbortSignal.timeout(2200) });
       if (!res.ok) return null;
       const data = await res.json();
       const hits = Array.isArray(data?.data) ? data.data : [];
       for (const h of hits) {
         const sec = Number(h.duration);
-        if (matchCatalogTrack(h.title, h.artist?.name, sec)) return sec;
+        if (matchCatalogTrack(h.title, h.artist?.name, sec)) {
+          harvestTrackMeta(h.title, h.album?.title);
+          return sec;
+        }
       }
     } catch {}
     return null;
   };
 
-  const [itSec, dzSec] = await Promise.all([fetchItunesSec(), fetchDeezerSec()]);
-  if (itSec && dzSec) {
-    return Math.abs(itSec - dzSec) <= 8 ? Math.min(itSec, dzSec) : dzSec;
+  const [itSec, dzSec] = await Promise.all([fetchItunes(), fetchDeezer()]);
+  let durationSec = parsed && parsed <= 420 ? parsed : null;
+  if (!durationSec) {
+    if (itSec && dzSec) {
+      durationSec = Math.abs(itSec - dzSec) <= 8 ? Math.min(itSec, dzSec) : dzSec;
+    } else {
+      durationSec = dzSec || itSec || parsed || null;
+    }
   }
-  return dzSec || itSec || parsed || null;
+
+  return {
+    durationSec,
+    catalogWords: extraWords,
+    catalogTokenGroups: extraTokenGroups
+  };
 }
 
 const STANDARD_AUDIO_METADATA_WORDS = new Set([
@@ -370,6 +439,13 @@ const STANDARD_AUDIO_METADATA_WORDS = new Set([
   'deluxe',
   'bonus',
   'track',
+  'completo',
+  'full',
+  'vol',
+  'volumen',
+  'volume',
+  'sessions',
+  'session',
   'the',
   'and',
   'con',
@@ -380,26 +456,69 @@ const STANDARD_AUDIO_METADATA_WORDS = new Set([
   'para'
 ]);
 
-function buildCandidateContext(rawTitle, cleanTitle, rawArtist, expectedDurationSec) {
+function buildCandidateContext(rawTitle, cleanTitle, rawArtist, expectedDurationSec, catalogMeta = null) {
   const rawTitleNorm = normalizeText(rawTitle);
   const cleanTitleNorm = normalizeText(cleanTitle);
   const rawArtistNorm = normalizeText(rawArtist);
   const titleTokens = getTitleCoreTokens(cleanTitle);
   const artistTokens = getArtistTokens(rawArtist);
 
+  // Build alternative title token groups so songs with parenthetical titles (e.g. "Title A (Title B)")
+  // match uploads titled with either Title A, Title B, or both
+  const titleTokenGroups = [titleTokens];
+  const artistTokenSet = new Set(artistTokens);
+  const nonArtistPrimary = titleTokens.filter(t => !artistTokenSet.has(t));
+  if (nonArtistPrimary.length >= 2 && nonArtistPrimary.length < titleTokens.length) {
+    titleTokenGroups.push(nonArtistPrimary);
+  }
+  for (const grp of extractParentheticalTokenGroups(rawTitle)) {
+    titleTokenGroups.push(grp);
+  }
+  if (catalogMeta?.catalogTokenGroups) {
+    for (const grp of catalogMeta.catalogTokenGroups) {
+      titleTokenGroups.push(grp);
+    }
+  }
+
   const allowedWords = new Set(STANDARD_AUDIO_METADATA_WORDS);
   for (const w of `${rawTitleNorm} ${cleanTitleNorm} ${rawArtistNorm}`.split(/\s+/)) {
     if (w) allowedWords.add(w);
+  }
+  if (catalogMeta?.catalogWords) {
+    for (const w of catalogMeta.catalogWords) {
+      if (w) allowedWords.add(w);
+    }
   }
 
   return {
     rawTitleLower: String(rawTitle || '').toLowerCase(),
     rawArtistLower: String(rawArtist || '').toLowerCase(),
     titleTokens,
+    titleTokenGroups,
     artistTokens,
     allowedWords,
     expectedDurationSec
   };
+}
+
+function candidateMatchesAnyTitleGroup(candTitleWordSet, candTitleNorm, ctx) {
+  const groups =
+    Array.isArray(ctx.titleTokenGroups) && ctx.titleTokenGroups.length > 0
+      ? ctx.titleTokenGroups
+      : [ctx.titleTokens || []];
+
+  for (const group of groups) {
+    if (!group || group.length === 0) continue;
+    const matchedCount = group.filter(
+      t => candTitleWordSet.has(t) || candTitleNorm.includes(t)
+    ).length;
+    const minRequired =
+      group.length === 1 ? 1 : Math.max(2, Math.ceil(group.length * 0.7));
+    if (matchedCount >= minRequired) {
+      return true;
+    }
+  }
+  return false;
 }
 
 const CORE_ALTERED_AUDIO_TERMS = [
@@ -529,16 +648,9 @@ function scoreCandidate(cand, ctx) {
   const candTitleWordSet = new Set(candTitleWords);
   const candUploaderWordSet = new Set(candUploaderNorm.split(/\s+/).filter(Boolean));
 
-  // Verify title core tokens
-  if (ctx.titleTokens.length > 0) {
-    const matchedTitleCount = ctx.titleTokens.filter(
-      t => candTitleWordSet.has(t) || candTitleNorm.includes(t)
-    ).length;
-    const minRequired =
-      ctx.titleTokens.length === 1 ? 1 : Math.max(2, Math.ceil(ctx.titleTokens.length * 0.7));
-    if (matchedTitleCount < minRequired) {
-      return -1;
-    }
+  // Verify title matches primary title OR any official parenthetical/catalog alternate title
+  if (!candidateMatchesAnyTitleGroup(candTitleWordSet, candTitleNorm, ctx)) {
+    return -1;
   }
 
   // Verify artist match with strict word boundary (so "thejukebox" doesn't count as "the")
@@ -561,13 +673,16 @@ function scoreCandidate(cand, ctx) {
     }
   }
 
-  // Count foreign words in the candidate title that don't belong to the song title, artist, or audio metadata
+  // Count foreign words in the candidate title that don't belong to the song title, artist, album, or audio metadata
   const foreignTitleWords = candTitleWords.filter(
     w => w.length >= 3 && !/^\d+$/.test(w) && !ctx.allowedWords.has(w)
   );
 
-  // If the uploader is NOT the artist and the title has 2+ unrelated foreign words (e.g. "GET BACK BEATLES KOVAH OF THE GODZ"), reject!
-  if (!uploaderMatchesArtist && foreignTitleWords.length >= 2) {
+  // If the uploader is NOT the artist: allow up to 3 extra words (e.g. album/year notes) when artist+duration match closely (±10s),
+  // otherwise reject at 2+ unrelated foreign words (e.g. "GET BACK BEATLES KOVAH OF THE GODZ" which is 28s off).
+  const maxForeignForNonUploader =
+    artistMatched && ctx.expectedDurationSec && durDiff <= 10 ? 3 : 1;
+  if (!uploaderMatchesArtist && foreignTitleWords.length > maxForeignForNonUploader) {
     return -1;
   }
 
@@ -664,11 +779,8 @@ function scoreLoopCandidate(cand, ctx) {
   const candTitleWordSet = new Set(candTitleWords);
   const candUploaderWordSet = new Set(candUploaderNorm.split(/\s+/).filter(Boolean));
 
-  if (ctx.titleTokens.length > 0) {
-    const matchedTitleCount = ctx.titleTokens.filter(
-      t => candTitleWordSet.has(t) || candTitleNorm.includes(t)
-    ).length;
-    if (matchedTitleCount < ctx.titleTokens.length) return null;
+  if (!candidateMatchesAnyTitleGroup(candTitleWordSet, candTitleNorm, ctx)) {
+    return null;
   }
 
   const uploaderMatchesArtist =
@@ -1071,15 +1183,8 @@ async function runExtractionPipeline(downloadId, rawQuery, downloadsDir, baseSlu
       return;
     }
 
-    // Step 0: Resolve canonical track duration (from Spotify CSV metadata or parallel iTunes/Deezer API)
-    expectedDurationSec = await resolveExpectedDurationSec(
-      item.duration,
-      cleanTitle,
-      primaryArtist
-    );
-    updateProg(14);
-
-    // Step 1: Fast candidate discovery prioritizing YouTube (#1) + SoundCloud fallback
+    // Step 0 & Step 1 in parallel: Resolve canonical duration + official alternate/album words from iTunes/Deezer
+    // while simultaneously discovering candidates from YouTube (#1) + SoundCloud
     const discoveryQueries = [
       `ytsearch8:${artistAndPrimaryTitle || artistAndCleanTitle} official audio`,
       `scsearch15:${artistAndPrimaryTitle || artistAndCleanTitle}`
@@ -1090,8 +1195,20 @@ async function runExtractionPipeline(downloadId, rawQuery, downloadsDir, baseSlu
       discoveryQueries.push(`scsearch10:${cleanTitleOnly}`);
     }
 
-    const ctx = buildCandidateContext(rawTitle, cleanTitle, item.artist, expectedDurationSec);
-    const rawCandidates = await discoverCandidatesFromSearch(discoveryQueries);
+    const [catalogMeta, rawCandidates] = await Promise.all([
+      resolveCatalogMetadata(item.duration, cleanTitle, primaryArtist),
+      discoverCandidatesFromSearch(discoveryQueries)
+    ]);
+    expectedDurationSec = catalogMeta.durationSec;
+    updateProg(18);
+
+    const ctx = buildCandidateContext(
+      rawTitle,
+      cleanTitle,
+      item.artist,
+      expectedDurationSec,
+      catalogMeta
+    );
 
     // Tier 1: Exact 1x studio recordings (within ±20s of canonical duration), YouTube ranked first
     const scoredTier1 = rawCandidates
