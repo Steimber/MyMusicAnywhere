@@ -4,7 +4,7 @@ import { useState, useEffect, useRef, useMemo } from 'react';
 import { NoSleepController } from '../lib/nosleep';
 
 const AUDIO_CACHE_NAME = 'my-music-offline-audio-v1';
-const SHELL_CACHE_NAME = 'mymusic-shell-v12';
+const SHELL_CACHE_NAME = 'mymusic-shell-v13';
 const DEFAULT_TRACK_COVER = '/icon.svg?v=3';
 const USER_STORAGE_KEY = 'mma_cached_user_v1';
 const LIKES_STORAGE_KEY = 'mma_liked_tracks_v1';
@@ -455,17 +455,20 @@ export default function HomePage() {
   const shuffleStateRef = useRef({ order: [], pos: -1, queueLen: 0 });
   const queueRef = useRef([]);
   const currentIndexRef = useRef(-1);
+  const isPlayingRef = useRef(false);
   const shuffleRef = useRef(true);
   const repeatModeRef = useRef('off');
   const blobUrlCacheRef = useRef(new Map());
+  const inflightBlobPromisesRef = useRef(new Map());
+  const audioCachePromiseRef = useRef(null);
   const lastWarmedKeyRef = useRef('');
-  const warmingBatchIdRef = useRef(0);
   const lastDirectPlayRef = useRef({ index: -1, id: '', src: '' });
   const wasOfflineRef = useRef(false);
   const probeInFlightRef = useRef(false);
 
   queueRef.current = queue;
   currentIndexRef.current = currentIndex;
+  isPlayingRef.current = isPlaying;
   shuffleRef.current = shuffle;
   repeatModeRef.current = repeatMode;
 
@@ -803,8 +806,7 @@ export default function HomePage() {
     const alreadyStartedSync =
       lastDirectPlayRef.current.index === currentIndex &&
       String(lastDirectPlayRef.current.id) === String(currentTrack.id) &&
-      audioRef.current.src &&
-      !audioRef.current.paused;
+      Boolean(audioRef.current.src);
 
     if (!alreadyStartedSync) {
       const playTrack = async () => {
@@ -813,7 +815,7 @@ export default function HomePage() {
         if (
           lastDirectPlayRef.current.index === currentIndex &&
           String(lastDirectPlayRef.current.id) === String(currentTrack.id) &&
-          !audioRef.current.paused
+          Boolean(audioRef.current.src)
         ) {
           return;
         }
@@ -1652,14 +1654,43 @@ export default function HomePage() {
     }
   }, [user, isOffline, selectedLibrary, likedTracks.length, customPlaylists.length]);
 
+  function getOpenAudioCache() {
+    if (typeof window === 'undefined' || !('caches' in window)) return Promise.resolve(null);
+    if (!audioCachePromiseRef.current) {
+      audioCachePromiseRef.current = caches.open(AUDIO_CACHE_NAME).catch(() => {
+        audioCachePromiseRef.current = null;
+        return null;
+      });
+    }
+    return audioCachePromiseRef.current;
+  }
+
+  function registerBlobUrlForKeys(blobUrl, streamUrl, filename = null) {
+    if (!blobUrl) return;
+    if (streamUrl) {
+      blobUrlCacheRef.current.set(streamUrl, blobUrl);
+      try {
+        const fullUrl = new URL(streamUrl, window.location.origin).href;
+        blobUrlCacheRef.current.set(fullUrl, blobUrl);
+      } catch {}
+    }
+    if (filename) {
+      blobUrlCacheRef.current.set(`file:${filename}`, blobUrl);
+      const encodedRel = `/api/stream?file=${encodeURIComponent(filename)}`;
+      blobUrlCacheRef.current.set(encodedRel, blobUrl);
+    }
+  }
+
   async function refreshOfflineCacheList() {
     if (typeof window === 'undefined') return;
     if ('caches' in window) {
       try {
-        const cache = await caches.open(AUDIO_CACHE_NAME);
+        const cache = await getOpenAudioCache();
+        if (!cache) return;
         const keys = await cache.keys();
         const map = {};
         const cachedFilenames = [];
+        const entriesToWarm = [];
         for (const req of keys) {
           const url = new URL(req.url);
           const rel = url.pathname + url.search;
@@ -1668,8 +1699,34 @@ export default function HomePage() {
           if (fileParam) {
             cachedFilenames.push({ filename: fileParam, streamUrl: rel });
           }
+          if (!blobUrlCacheRef.current.has(rel)) {
+            entriesToWarm.push({ req, rel, fileParam });
+          }
         }
         setOfflineUrls(map);
+
+        // Warm 100% of cached audio tracks into blobUrlCacheRef while the screen is awake
+        if (entriesToWarm.length > 0) {
+          (async () => {
+            for (let i = 0; i < entriesToWarm.length; i += 24) {
+              const chunk = entriesToWarm.slice(i, i + 24);
+              await Promise.all(
+                chunk.map(async ({ req, rel, fileParam }) => {
+                  if (blobUrlCacheRef.current.has(rel)) return;
+                  try {
+                    const resp = await cache.match(req);
+                    if (!resp) return;
+                    const blob = await resp.blob();
+                    if (blob && blob.size > 0 && !blobUrlCacheRef.current.has(rel)) {
+                      const blobUrl = URL.createObjectURL(blob);
+                      registerBlobUrlForKeys(blobUrl, rel, fileParam);
+                    }
+                  } catch {}
+                })
+              );
+            }
+          })();
+        }
 
         setOfflineCatalog(prev => {
           const validSet = new Set(cachedFilenames.map(c => c.streamUrl));
@@ -1727,18 +1784,23 @@ export default function HomePage() {
   async function saveUrlToOfflineCache(url, trackMeta = null) {
     if (typeof window === 'undefined' || !('caches' in window)) return false;
     try {
-      const cache = await caches.open(AUDIO_CACHE_NAME);
+      const cache = await getOpenAudioCache();
+      if (!cache) return false;
       const response = await fetch(url);
       if (response.ok) {
         const clonedForCache = response.clone();
         const clonedForBlob = response.clone();
         await cache.put(url, clonedForCache);
+        const fileToDelete =
+          trackMeta?.filename ||
+          new URL(url, window.location.origin).searchParams.get('file');
         try {
           const blob = await clonedForBlob.blob();
           if (blob && blob.size > 0) {
             const existingBlobUrl = blobUrlCacheRef.current.get(url);
             if (existingBlobUrl) URL.revokeObjectURL(existingBlobUrl);
-            blobUrlCacheRef.current.set(url, URL.createObjectURL(blob));
+            const blobUrl = URL.createObjectURL(blob);
+            registerBlobUrlForKeys(blobUrl, url, fileToDelete);
           }
         } catch {}
         if (trackMeta) {
@@ -1755,9 +1817,6 @@ export default function HomePage() {
         }
         await refreshOfflineCacheList();
 
-        const fileToDelete =
-          trackMeta?.filename ||
-          new URL(url, window.location.origin).searchParams.get('file');
         if (fileToDelete) {
           fetch(`/api/library?file=${encodeURIComponent(fileToDelete)}`, {
             method: 'DELETE'
@@ -1776,9 +1835,9 @@ export default function HomePage() {
     const url = streamUrl || `/api/stream?file=${encodeURIComponent(filename)}`;
     if ('caches' in window) {
       try {
-        const cache = await caches.open(AUDIO_CACHE_NAME);
+        const cache = await getOpenAudioCache();
         const fullUrl = new URL(url, window.location.origin).href;
-        const cachedResp = (await cache.match(url)) || (await cache.match(fullUrl));
+        const cachedResp = cache ? (await cache.match(url)) || (await cache.match(fullUrl)) : null;
         if (cachedResp) {
           const blob = await cachedResp.blob();
           const blobUrl = URL.createObjectURL(blob);
@@ -1816,10 +1875,13 @@ export default function HomePage() {
       } catch {}
       blobUrlCacheRef.current.delete(streamUrl);
     }
+    if (filename && blobUrlCacheRef.current.has(`file:${filename}`)) {
+      blobUrlCacheRef.current.delete(`file:${filename}`);
+    }
 
     try {
-      const cache = await caches.open(AUDIO_CACHE_NAME);
-      if (streamUrl) {
+      const cache = await getOpenAudioCache();
+      if (cache && streamUrl) {
         await cache.delete(streamUrl);
         const fullUrl = new URL(streamUrl, window.location.origin).href;
         await cache.delete(fullUrl);
@@ -1873,40 +1935,75 @@ export default function HomePage() {
     );
   }
 
-  function getSyncPlayableSource(track) {
+  function getCachedBlobUrlForTrack(track) {
     if (!track) return null;
     const streamUrl = getTrackStreamUrl(track);
     if (streamUrl && blobUrlCacheRef.current.has(streamUrl)) {
       return blobUrlCacheRef.current.get(streamUrl);
     }
+    const offItem = findOfflineItem(track);
+    const filename = track.filename || offItem?.filename || downloads[track.id]?.filename;
+    if (filename && blobUrlCacheRef.current.has(`file:${filename}`)) {
+      return blobUrlCacheRef.current.get(`file:${filename}`);
+    }
+    return null;
+  }
+
+  function getSyncPlayableSource(track) {
+    if (!track) return null;
+    const cachedBlob = getCachedBlobUrlForTrack(track);
+    if (cachedBlob) return cachedBlob;
+    const streamUrl = getTrackStreamUrl(track);
     return streamUrl || track.previewUrl || null;
   }
 
   async function resolvePlayableSource(track) {
     if (!track) return null;
+    const existingBlob = getCachedBlobUrlForTrack(track);
+    if (existingBlob) return existingBlob;
+
     const streamUrl = getTrackStreamUrl(track);
-    if (streamUrl && blobUrlCacheRef.current.has(streamUrl)) {
-      return blobUrlCacheRef.current.get(streamUrl);
+    if (!streamUrl) return track.previewUrl || null;
+
+    if (inflightBlobPromisesRef.current.has(streamUrl)) {
+      return inflightBlobPromisesRef.current.get(streamUrl);
     }
 
-    if (streamUrl && typeof window !== 'undefined' && 'caches' in window) {
-      try {
-        const cache = await caches.open(AUDIO_CACHE_NAME);
-        const fullUrl = new URL(streamUrl, window.location.origin).href;
-        const cachedResp = (await cache.match(streamUrl)) || (await cache.match(fullUrl));
-        if (cachedResp) {
-          const blob = await cachedResp.blob();
-          if (blob && blob.size > 0) {
-            const blobUrl = URL.createObjectURL(blob);
-            blobUrlCacheRef.current.set(streamUrl, blobUrl);
-            return blobUrl;
+    if (typeof window !== 'undefined' && 'caches' in window) {
+      const promise = (async () => {
+        try {
+          const already = getCachedBlobUrlForTrack(track);
+          if (already) return already;
+          const cache = await getOpenAudioCache();
+          if (!cache) return streamUrl;
+          const fullUrl = new URL(streamUrl, window.location.origin).href;
+          const cachedResp = (await cache.match(streamUrl)) || (await cache.match(fullUrl));
+          if (cachedResp) {
+            const blob = await cachedResp.blob();
+            if (blob && blob.size > 0) {
+              const recheck = getCachedBlobUrlForTrack(track);
+              if (recheck) return recheck;
+              const blobUrl = URL.createObjectURL(blob);
+              const offItem = findOfflineItem(track);
+              const filename =
+                track.filename ||
+                offItem?.filename ||
+                new URL(fullUrl).searchParams.get('file');
+              registerBlobUrlForKeys(blobUrl, streamUrl, filename);
+              return blobUrl;
+            }
           }
+        } catch {} finally {
+          inflightBlobPromisesRef.current.delete(streamUrl);
         }
-      } catch {}
+        return streamUrl;
+      })();
+
+      inflightBlobPromisesRef.current.set(streamUrl, promise);
+      return promise;
     }
 
-    if (streamUrl) return streamUrl;
-    return track.previewUrl || null;
+    return streamUrl || track.previewUrl || null;
   }
 
   function isIgnoredTasteTerm(val) {
@@ -2560,6 +2657,7 @@ export default function HomePage() {
     if (dl?.status === 'ready') return true;
     const offItem = findOfflineItem(track);
     if (offItem) return true;
+    if (getCachedBlobUrlForTrack(track)) return true;
     const streamUrl = getTrackStreamUrl(track);
     return Boolean(
       streamUrl && (offlineUrls[streamUrl] || blobUrlCacheRef.current.has(streamUrl))
@@ -2597,29 +2695,31 @@ export default function HomePage() {
       pushIdx((base + offset) % list.length);
     }
 
-    // Filter to tracks whose blob URL is not yet in memory
+    // Filter to tracks whose blob URL is not yet in memory and not already in-flight
     const uncachedTracks = [];
     for (const idx of orderedIndices) {
       const t = list[idx];
-      if (!t) continue;
+      if (!t || getCachedBlobUrlForTrack(t)) continue;
       const streamUrl = getTrackStreamUrl(t);
-      if (streamUrl && !blobUrlCacheRef.current.has(streamUrl)) {
+      if (streamUrl && !inflightBlobPromisesRef.current.has(streamUrl)) {
         uncachedTracks.push(t);
       }
     }
     if (uncachedTracks.length === 0) return;
 
-    // Immediately warm the next 16 upcoming tracks in parallel during the active audio wake turn
-    const immediateBatch = uncachedTracks.slice(0, 16);
-    const remainingBatch = uncachedTracks.slice(16);
-    const myBatchId = ++warmingBatchIdRef.current;
+    // Warm the entire queue without ever cancelling batches; in-flight deduplication prevents duplicate work
+    const immediateBatch = uncachedTracks.slice(0, 32);
+    const remainingBatch = uncachedTracks.slice(32);
 
     Promise.all(immediateBatch.map(t => resolvePlayableSource(t).catch(() => {}))).then(
       async () => {
-        for (let i = 0; i < remainingBatch.length; i += 8) {
-          if (warmingBatchIdRef.current !== myBatchId) break;
-          const chunk = remainingBatch.slice(i, i + 8);
-          await Promise.all(chunk.map(t => resolvePlayableSource(t).catch(() => {})));
+        for (let i = 0; i < remainingBatch.length; i += 32) {
+          const chunk = remainingBatch
+            .slice(i, i + 32)
+            .filter(t => !getCachedBlobUrlForTrack(t));
+          if (chunk.length > 0) {
+            await Promise.all(chunk.map(t => resolvePlayableSource(t).catch(() => {})));
+          }
         }
       }
     );
@@ -2640,6 +2740,7 @@ export default function HomePage() {
     currentIndexRef.current = nextIdx;
     setCurrentIndex(nextIdx);
     setProgress(0);
+    isPlayingRef.current = true;
     setIsPlaying(true);
 
     // Pre-warm upcoming tracks via microtask (never frozen by screen-off timer throttling)
@@ -2647,14 +2748,10 @@ export default function HomePage() {
       preloadUpcomingQueueBlobs(activeQueue, nextIdx);
     });
 
-    const streamUrl = getTrackStreamUrl(nextTrack);
-    const cachedBlobUrl =
-      streamUrl && blobUrlCacheRef.current.has(streamUrl)
-        ? blobUrlCacheRef.current.get(streamUrl)
-        : null;
-
-    // If we already have a ready in-memory Blob URL (or it's an online preview), play synchronously in 0ms
-    const syncSrc = cachedBlobUrl || (!streamUrl ? nextTrack.previewUrl : null);
+    // CRITICAL for iOS WebKit screen-off playback:
+    // Always assign audio.src and call audio.play() SYNCHRONOUSLY inside the onEnded / action handler turn.
+    // Waiting for an async Promise before calling .play() loses WebKit's background media gesture token.
+    const syncSrc = getSyncPlayableSource(nextTrack);
     if (syncSrc && audioRef.current) {
       lastDirectPlayRef.current = {
         index: nextIdx,
@@ -2665,7 +2762,10 @@ export default function HomePage() {
       const playPromise = audioRef.current.play();
       if (playPromise && typeof playPromise.then === 'function') {
         playPromise
-          .then(() => setIsPlaying(true))
+          .then(() => {
+            isPlayingRef.current = true;
+            setIsPlaying(true);
+          })
           .catch(() => {
             resolvePlayableSource(nextTrack).then(resolvedSrc => {
               if (
@@ -2673,7 +2773,9 @@ export default function HomePage() {
                 audioRef.current &&
                 currentIndexRef.current === nextIdx
               ) {
-                audioRef.current.src = resolvedSrc;
+                if (audioRef.current.src !== resolvedSrc) {
+                  audioRef.current.src = resolvedSrc;
+                }
                 lastDirectPlayRef.current = {
                   index: nextIdx,
                   id: String(nextTrack.id),
@@ -2681,18 +2783,24 @@ export default function HomePage() {
                 };
                 audioRef.current
                   .play()
-                  .then(() => setIsPlaying(true))
-                  .catch(() => setIsPlaying(false));
+                  .then(() => {
+                    isPlayingRef.current = true;
+                    setIsPlaying(true);
+                  })
+                  .catch(() => {
+                    isPlayingRef.current = false;
+                    setIsPlaying(false);
+                  });
               }
             });
           });
       } else {
+        isPlayingRef.current = true;
         setIsPlaying(true);
       }
       return;
     }
 
-    // If the track is in CacheStorage but its Blob URL wasn't in RAM yet, resolve the Blob directly from CacheStorage first
     resolvePlayableSource(nextTrack).then(resolvedSrc => {
       if (resolvedSrc && audioRef.current && currentIndexRef.current === nextIdx) {
         audioRef.current.src = resolvedSrc;
@@ -2703,8 +2811,14 @@ export default function HomePage() {
         };
         audioRef.current
           .play()
-          .then(() => setIsPlaying(true))
-          .catch(() => setIsPlaying(false));
+          .then(() => {
+            isPlayingRef.current = true;
+            setIsPlaying(true);
+          })
+          .catch(() => {
+            isPlayingRef.current = false;
+            setIsPlaying(false);
+          });
       }
     });
   }
@@ -5020,9 +5134,19 @@ export default function HomePage() {
           }
         }}
         onLoadedMetadata={e => {
-          const dur = e.currentTarget.duration;
+          const audioEl = e.currentTarget;
+          const dur = audioEl.duration;
           setDuration(dur);
           preloadUpcomingQueueBlobs(queueRef.current, currentIndexRef.current);
+          if (isPlayingRef.current && audioEl.paused) {
+            audioEl
+              .play()
+              .then(() => {
+                isPlayingRef.current = true;
+                setIsPlaying(true);
+              })
+              .catch(() => {});
+          }
           if (
             typeof navigator !== 'undefined' &&
             'mediaSession' in navigator &&
@@ -5033,8 +5157,8 @@ export default function HomePage() {
             try {
               navigator.mediaSession.setPositionState({
                 duration: dur,
-                playbackRate: e.currentTarget.playbackRate || 1,
-                position: Math.min(dur, e.currentTarget.currentTime || 0)
+                playbackRate: audioEl.paused ? 0 : audioEl.playbackRate || 1,
+                position: Math.min(dur, audioEl.currentTime || 0)
               });
             } catch {}
           }
@@ -5044,14 +5168,56 @@ export default function HomePage() {
           if (queueRef.current.length > 1) {
             playNext();
           } else {
+            isPlayingRef.current = false;
             setIsPlaying(false);
           }
         }}
-        onPlay={() => {
+        onPlay={e => {
+          const audioEl = e.currentTarget;
+          isPlayingRef.current = true;
           setIsPlaying(true);
           preloadUpcomingQueueBlobs(queueRef.current, currentIndexRef.current);
+          if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
+            try {
+              navigator.mediaSession.playbackState = 'playing';
+              const dur = audioEl.duration;
+              if (
+                typeof navigator.mediaSession.setPositionState === 'function' &&
+                dur > 0 &&
+                Number.isFinite(dur)
+              ) {
+                navigator.mediaSession.setPositionState({
+                  duration: dur,
+                  playbackRate: audioEl.playbackRate || 1,
+                  position: Math.min(dur, audioEl.currentTime || 0)
+                });
+              }
+            } catch {}
+          }
         }}
-        onPause={() => setIsPlaying(false)}
+        onPause={e => {
+          const audioEl = e.currentTarget;
+          if (audioEl.ended) return;
+          isPlayingRef.current = false;
+          setIsPlaying(false);
+          if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
+            try {
+              navigator.mediaSession.playbackState = 'paused';
+              const dur = audioEl.duration;
+              if (
+                typeof navigator.mediaSession.setPositionState === 'function' &&
+                dur > 0 &&
+                Number.isFinite(dur)
+              ) {
+                navigator.mediaSession.setPositionState({
+                  duration: dur,
+                  playbackRate: 0,
+                  position: Math.min(dur, audioEl.currentTime || 0)
+                });
+              }
+            } catch {}
+          }
+        }}
       />
 
       {/* ==================== MOBILE BOTTOM NAV (MINERAL TAREAS STYLE) ==================== */}

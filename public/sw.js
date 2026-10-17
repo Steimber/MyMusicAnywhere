@@ -1,4 +1,4 @@
-const STATIC_CACHE = 'mymusic-shell-v12';
+const STATIC_CACHE = 'mymusic-shell-v13';
 const AUDIO_CACHE = 'my-music-offline-audio-v1';
 
 async function serveCachedAudioWithRange(request, cachedResponse) {
