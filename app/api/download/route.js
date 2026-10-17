@@ -144,16 +144,24 @@ function normalizeText(str) {
 function stripRemasterNoise(raw) {
   return String(raw || '')
     .replace(
-      /\s*[-–—]\s*(remaster(ed)?(\s+\d{4})?|\d{4}\s+remaster(ed)?|radio\s+edit|album\s+version|single\s+version|explicit|clean|mono|stereo|\d+\/\d+.*).*/i,
+      /\s*[-–—]\s*(remaster(ed)?(\s+\d{4})?|\d{4}\s+remaster(ed)?|radio\s+edit|album\s+version|single\s+version|spanglish\s+version|spanish\s+version|english\s+version|original\s+version|video\s+version|vocal\s+version|explicit|clean|mono|stereo|\d+\/\d+.*).*/i,
       ''
     )
     .replace(
-      /\s*\((remaster(ed)?(\s+\d{4})?|\d{4}\s+remaster(ed)?|feat\.?[^)]+|ft\.?[^)]+|explicit|clean|mono|stereo)\)/gi,
+      /\s*\((remaster(ed)?(\s+\d{4})?|\d{4}\s+remaster(ed)?|feat\.?[^)]+|ft\.?[^)]+|spanglish(\s+version)?|spanish(\s+version)?|english(\s+version)?|original(\s+version)?|video(\s+version)?|vocal(\s+version)?|explicit|clean|mono|stereo)\)/gi,
       ''
     )
     .replace(/\s*\[[^\]]+\]/g, '')
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+function stripParentheticalSubtitles(raw) {
+  const stripped = String(raw || '')
+    .replace(/\s*[\(\[][^\)\]]*[\)\]]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return stripped.length >= 3 ? stripped : String(raw || '').trim();
 }
 
 function cleanArtistName(raw) {
@@ -214,9 +222,21 @@ function getTitleCoreTokens(cleanTitle) {
     'remaster',
     'remastered',
     'version',
+    'spanglish',
+    'spanish',
+    'english',
     'edit',
     'mix'
   ]);
+  // Prefer the primary title outside parentheses (e.g. "The Ketchup Song (Aserejé)" -> ["ketchup", "song"])
+  // while keeping parenthetical words inside allowedWords so neither form is penalized
+  const primaryPart = stripParentheticalSubtitles(cleanTitle);
+  const primaryTokens = normalizeText(primaryPart)
+    .split(/\s+/)
+    .filter(w => w.length >= 2 && !stopWords.has(w));
+  if (primaryTokens.length > 0) {
+    return primaryTokens;
+  }
   const tokens = normalizeText(cleanTitle)
     .split(/\s+/)
     .filter(w => w.length >= 2 && !stopWords.has(w));
@@ -244,7 +264,7 @@ async function resolveExpectedDurationSec(rawDuration, cleanTitle, primaryArtist
   const parsed = parseDurationToSec(rawDuration);
   if (parsed && parsed <= 420) return parsed;
 
-  const query = `${cleanTitle} ${primaryArtist || ''}`.trim();
+  const query = `${ stripParentheticalSubtitles(cleanTitle) } ${primaryArtist || ''}`.trim();
   if (!query) return parsed || null;
 
   const titleTokens = getTitleCoreTokens(cleanTitle);
@@ -302,6 +322,7 @@ async function resolveExpectedDurationSec(rawDuration, cleanTitle, primaryArtist
 
 const STANDARD_AUDIO_METADATA_WORDS = new Set([
   'official',
+  'oficial',
   'audio',
   'video',
   'music',
@@ -310,6 +331,8 @@ const STANDARD_AUDIO_METADATA_WORDS = new Set([
   'letra',
   'sub',
   'espanol',
+  'spanish',
+  'spanglish',
   'english',
   'hd',
   'hq',
@@ -317,6 +340,7 @@ const STANDARD_AUDIO_METADATA_WORDS = new Set([
   '8k',
   'remaster',
   'remastered',
+  'remasterizado',
   'mix',
   'stereo',
   'mono',
@@ -665,7 +689,7 @@ function scoreLoopCandidate(cand, ctx) {
       !ctx.allowedWords.has(w) &&
       !loopMetaWords.has(w)
   );
-  if (foreignWords.length > 0) return null;
+  if (foreignWords.length > 1) return null;
 
   const trimDurationSec = Math.max(
     45,
@@ -673,7 +697,7 @@ function scoreLoopCandidate(cand, ctx) {
   );
 
   return {
-    score: Math.round(90 - cycleDiff * 3 - repeatCount * 2),
+    score: Math.round(90 - cycleDiff * 3 - repeatCount * 2 - foreignWords.length * 8),
     trimDurationSec,
     fadeOutSec: 2
   };
@@ -876,14 +900,8 @@ function runYtDlpAttempt(target, outputTemplate, options, onProgress) {
       ytdlpArgs.push('--cookies', tempCookiesPath);
     }
 
-    if (isYouTubeTarget) {
-      // With bgutil PO-Token server on 127.0.0.1:4416, mweb/web/tv/ios work seamlessly;
-      // when using cookies, exclude ios since ios does not support cookies in yt-dlp.
-      const clientList = tempCookiesPath
-        ? 'youtube:player_client=mweb,web,web_creator,tv'
-        : 'youtube:player_client=mweb,tv,ios,web';
-      ytdlpArgs.push('--extractor-args', clientList);
-    }
+    // Do NOT override --extractor-args youtube:player_client=... so yt-dlp 2026+ uses its native
+    // default clients (tv_simply,web_safari,web) that integrate seamlessly with bgutil-ytdlp-pot-provider on 127.0.0.1:4416.
 
     if (isSearchPool) {
       ytdlpArgs.push('--match-filter', `duration >= ${minDuration} & duration <= ${maxDuration}`);
@@ -1038,10 +1056,14 @@ async function runExtractionPipeline(downloadId, rawQuery, downloadsDir, baseSlu
     }
     targets = [{ url: rawQuery, isSearchPool: false }];
   } else {
+    const primaryTitle = stripParentheticalSubtitles(cleanTitle);
     const artistAndCleanTitle = sanitizeSearchQuery(
       primaryArtist ? `${primaryArtist} - ${cleanTitle}` : cleanTitle
     );
-    const cleanTitleOnly = sanitizeSearchQuery(cleanTitle);
+    const artistAndPrimaryTitle = sanitizeSearchQuery(
+      primaryArtist ? `${primaryArtist} - ${primaryTitle}` : primaryTitle
+    );
+    const cleanTitleOnly = sanitizeSearchQuery(primaryTitle);
 
     if (!artistAndCleanTitle) {
       item.status = 'error';
@@ -1059,10 +1081,12 @@ async function runExtractionPipeline(downloadId, rawQuery, downloadsDir, baseSlu
 
     // Step 1: Fast candidate discovery prioritizing YouTube (#1) + SoundCloud fallback
     const discoveryQueries = [
-      `ytsearch10:${artistAndCleanTitle} official audio`,
-      `scsearch20:${artistAndCleanTitle}`
+      `ytsearch8:${artistAndPrimaryTitle || artistAndCleanTitle} official audio`,
+      `scsearch15:${artistAndPrimaryTitle || artistAndCleanTitle}`
     ];
-    if (primaryArtist && cleanTitleOnly && cleanTitleOnly.length >= 3) {
+    if (artistAndCleanTitle && artistAndCleanTitle !== artistAndPrimaryTitle) {
+      discoveryQueries.push(`scsearch10:${artistAndCleanTitle}`);
+    } else if (primaryArtist && cleanTitleOnly && cleanTitleOnly.length >= 3) {
       discoveryQueries.push(`scsearch10:${cleanTitleOnly}`);
     }
 
@@ -1075,7 +1099,7 @@ async function runExtractionPipeline(downloadId, rawQuery, downloadsDir, baseSlu
       .filter(c => c.score >= 0)
       .sort((a, b) => b.score - a.score);
 
-    // Tier 2: Anti-copyright N-x looped studio uploads (e.g. "Intruso - Enjambre" 3x = 608.4s on SoundCloud),
+    // Tier 2: Anti-copyright N-x looped studio uploads (e.g. "Intruso - Enjambre" 3x = 608.4s or "The Ketchup Song" 4x = 867.5s on SoundCloud),
     // automatically trimmed by ffmpeg to 1x single-play duration with a smooth 2s fade-out
     const scoredLoopTier2 = rawCandidates
       .map(c => {
@@ -1089,7 +1113,34 @@ async function runExtractionPipeline(downloadId, rawQuery, downloadsDir, baseSlu
 
     const maxAllowedDur = expectedDurationSec ? expectedDurationSec + 5 : null;
 
-    for (const best of scoredTier1.slice(0, 4)) {
+    // Pick diverse top YouTube candidates (1 non-Topic official video/audio which is worldwide + 1 - Topic)
+    // AND top SoundCloud candidates so a geo-restricted YouTube upload never starves SoundCloud fallback!
+    const ytCands = scoredTier1.filter(c =>
+      String(c.extractor || '').toLowerCase().includes('youtube')
+    );
+    const scCands = scoredTier1.filter(c =>
+      !String(c.extractor || '').toLowerCase().includes('youtube')
+    );
+
+    const bestYtNonTopic = ytCands.find(
+      c => !String(c.uploader || '').toLowerCase().endsWith('- topic')
+    );
+    const bestYtTopic = ytCands.find(c =>
+      String(c.uploader || '').toLowerCase().endsWith('- topic')
+    );
+    const selectedYt = [];
+    if (bestYtNonTopic) selectedYt.push(bestYtNonTopic);
+    if (bestYtTopic && (!bestYtNonTopic || bestYtTopic.webpageUrl !== bestYtNonTopic.webpageUrl)) {
+      selectedYt.push(bestYtTopic);
+    }
+    for (const c of ytCands) {
+      if (selectedYt.length >= 2) break;
+      if (!selectedYt.some(s => s.webpageUrl === c.webpageUrl)) {
+        selectedYt.push(c);
+      }
+    }
+
+    for (const best of [...selectedYt, ...scCands.slice(0, 2)]) {
       targets.push({
         url: best.webpageUrl,
         isSearchPool: false,
@@ -1110,8 +1161,9 @@ async function runExtractionPipeline(downloadId, rawQuery, downloadsDir, baseSlu
     // Fallback search pools if direct URLs all failed (YouTube #1, then SoundCloud, then Bilibili)
     const minDur = expectedDurationSec ? Math.max(45, expectedDurationSec - 15) : 55;
     const maxDur = expectedDurationSec ? expectedDurationSec + 15 : 540;
+    const searchQueryBase = artistAndPrimaryTitle || artistAndCleanTitle;
     targets.push({
-      url: `ytsearch8:${artistAndCleanTitle} official audio`,
+      url: `ytsearch6:${searchQueryBase} official audio`,
       isSearchPool: true,
       minDuration: minDur,
       maxDuration: maxDur,
@@ -1119,7 +1171,7 @@ async function runExtractionPipeline(downloadId, rawQuery, downloadsDir, baseSlu
       trimDurationSec: maxAllowedDur
     });
     targets.push({
-      url: `scsearch15:${artistAndCleanTitle}`,
+      url: `scsearch15:${searchQueryBase}`,
       isSearchPool: true,
       minDuration: minDur,
       maxDuration: maxDur,
@@ -1127,7 +1179,7 @@ async function runExtractionPipeline(downloadId, rawQuery, downloadsDir, baseSlu
       trimDurationSec: maxAllowedDur
     });
     targets.push({
-      url: `bilisearch3:${artistAndCleanTitle}`,
+      url: `bilisearch3:${searchQueryBase}`,
       isSearchPool: true,
       minDuration: minDur,
       maxDuration: maxDur,
@@ -1136,33 +1188,26 @@ async function runExtractionPipeline(downloadId, rawQuery, downloadsDir, baseSlu
     });
   }
 
-  const hasCookiesConfigured = Boolean(getYtCookiesFilePath());
-
   for (const t of targets) {
-    const isYtTarget = /youtube\.com|youtu\.be|^ytsearch/i.test(String(t.url || ''));
-    const cookiePasses = isYtTarget && hasCookiesConfigured ? [false, true] : [false];
-
-    for (const useCookies of cookiePasses) {
-      await runYtDlpAttempt(
-        t.url,
-        tempOutputTemplate,
-        { ...t, useCookies },
-        updateProg
-      );
-      const valid = finalizeDownloadedMp3(
-        downloadsDir,
-        baseSlug,
-        expectedMp3Path,
-        expectedDurationSec
-      );
-      if (valid && fs.existsSync(expectedMp3Path)) {
-        enforceStorageQuota();
-        scheduleFileCleanup(expectedMp3Path, 90000);
-        item.status = 'ready';
-        item.progress = 100;
-        item.filename = expectedMp3Name;
-        return;
-      }
+    await runYtDlpAttempt(
+      t.url,
+      tempOutputTemplate,
+      { ...t, useCookies: false },
+      updateProg
+    );
+    const valid = finalizeDownloadedMp3(
+      downloadsDir,
+      baseSlug,
+      expectedMp3Path,
+      expectedDurationSec
+    );
+    if (valid && fs.existsSync(expectedMp3Path)) {
+      enforceStorageQuota();
+      scheduleFileCleanup(expectedMp3Path, 90000);
+      item.status = 'ready';
+      item.progress = 100;
+      item.filename = expectedMp3Name;
+      return;
     }
   }
 
