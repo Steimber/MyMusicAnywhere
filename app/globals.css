@@ -1770,3 +1770,338 @@ dialog.save-dialog::backdrop {
 .spin {
   animation: spin 0.9s linear infinite;
 }
+
+/* ==========================================================================
+   GPU-COMPOSITOR SPRING PHYSICS, BUTTON MICRO-INTERACTIONS & VIEW TRANSITIONS
+   (Only transform / scale / translate / opacity — zero layout thrashing)
+   ========================================================================== */
+
+:root {
+  /* Standard cubic-bezier fallbacks for older engines */
+  --ease-spring: cubic-bezier(0.34, 1.56, 0.64, 1);
+  --ease-bounce: cubic-bezier(0.28, 1.48, 0.54, 1);
+  --ease-snappy: cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+@supports (transition-timing-function: linear(0, 1)) {
+  :root {
+    /* Physics-based spring easing with subtle natural overshoot */
+    --ease-spring: linear(
+      0, 0.009, 0.035 2.1%, 0.141, 0.281 6.7%, 0.723 12.9%, 0.938 16.7%, 1.017,
+      1.077, 1.121, 1.149 24.3%, 1.159, 1.163, 1.161, 1.154 29.9%, 1.129 32.8%,
+      1.051 39.6%, 1.017 43.1%, 0.991, 0.977 51%, 0.974 53.8%, 0.975 57.1%,
+      0.997 69.8%, 1.003 76.9%, 1
+    );
+    --ease-bounce: linear(
+      0, 0.016 0.5%, 0.06 1%, 0.226 2%, 1.116 5.4%, 1.32 6.8%, 1.38 8%,
+      1.31 10.2%, 0.94 14.5%, 0.86 16.8%, 0.92 19.5%, 1.05 24%, 1.07 26.5%,
+      0.98 33%, 1.01 42%, 1
+    );
+  }
+}
+
+/* Keep persistent chrome anchored during View Transitions so only tab content morphs */
+.topbar {
+  view-transition-name: mma-topbar;
+}
+
+.bottom-nav {
+  view-transition-name: mma-bottom-nav;
+}
+
+.player-dock {
+  view-transition-name: mma-player-dock;
+}
+
+@keyframes vtFadeOut {
+  from {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+  to {
+    opacity: 0;
+    transform: translateY(6px) scale(0.992);
+  }
+}
+
+@keyframes vtFadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.992);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+::view-transition-old(root) {
+  animation: vtFadeOut 0.15s var(--ease-snappy) both;
+}
+
+::view-transition-new(root) {
+  animation: vtFadeIn 0.24s var(--ease-snappy) both;
+}
+
+/* Universal tactile spring feedback for EVERY button in the app */
+button:not(:disabled),
+.btn:not(:disabled),
+.icon-btn:not(:disabled),
+.ctrl-btn:not(:disabled),
+.chip-pill:not(:disabled),
+.library-pill:not(:disabled),
+.nav-link:not(:disabled),
+.bottom-nav button:not(:disabled),
+.account-btn:not(:disabled),
+.account-item:not(:disabled),
+.dialog-option:not(:disabled),
+.auth-tabs button:not(:disabled),
+.offline-pill-bar button:not(:disabled),
+.brand:not(:disabled) {
+  transition:
+    transform 0.42s var(--ease-spring),
+    scale 0.42s var(--ease-spring),
+    background-color 0.16s ease,
+    border-color 0.16s ease,
+    color 0.16s ease,
+    opacity 0.16s ease;
+  will-change: transform;
+}
+
+/* Fast tactile compression on pointer/finger press (:active) */
+button:active:not(:disabled),
+.btn:active:not(:disabled),
+.chip-pill:active:not(:disabled),
+.library-pill:active:not(:disabled),
+.nav-link:active:not(:disabled),
+.auth-tabs button:active:not(:disabled),
+.offline-pill-bar button:active:not(:disabled),
+.brand:active:not(:disabled) {
+  transition-duration: 0.065s;
+  transition-timing-function: ease-out;
+  transform: scale(0.94);
+}
+
+/* Stronger tactile press for circular icon & player buttons */
+.icon-btn:active:not(:disabled),
+.ctrl-btn:active:not(:disabled),
+.account-btn:active:not(:disabled) {
+  transition-duration: 0.06s;
+  transition-timing-function: ease-out;
+  transform: scale(0.87);
+}
+
+.icon-btn.play-circle:active:not(:disabled),
+.ctrl-btn.play-main:active:not(:disabled) {
+  transition-duration: 0.06s;
+  transition-timing-function: ease-out;
+  transform: scale(0.88);
+}
+
+/* Subtle press for full-width menu & dialog rows */
+.account-item:active:not(:disabled),
+.dialog-option:active:not(:disabled),
+.bottom-nav button:active:not(:disabled) {
+  transition-duration: 0.065s;
+  transition-timing-function: ease-out;
+  transform: scale(0.96);
+}
+
+/* Inner SVG icon micro-spring inside buttons */
+button .svg-icon,
+.btn .svg-icon,
+.icon-btn .svg-icon,
+.ctrl-btn .svg-icon,
+.chip-pill .svg-icon,
+.library-pill .svg-icon,
+.nav-link .svg-icon,
+.bottom-nav button .svg-icon {
+  transition: transform 0.45s var(--ease-spring);
+}
+
+button:active:not(:disabled) .svg-icon,
+.btn:active:not(:disabled) .svg-icon,
+.icon-btn:active:not(:disabled) .svg-icon,
+.ctrl-btn:active:not(:disabled) .svg-icon,
+.chip-pill:active:not(:disabled) .svg-icon,
+.library-pill:active:not(:disabled) .svg-icon {
+  transition-duration: 0.06s;
+  transform: scale(0.86);
+}
+
+/* Keyframes for active/liked/selected icon pops & surface reveals */
+@keyframes iconSpringPop {
+  0% {
+    transform: scale(0.72);
+  }
+  55% {
+    transform: scale(1.22);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+@keyframes pillIndicatorStretch {
+  0% {
+    transform: scaleX(0.3);
+    opacity: 0.4;
+  }
+  100% {
+    transform: scaleX(1);
+    opacity: 1;
+  }
+}
+
+@keyframes surfaceRiseIn {
+  from {
+    opacity: 0;
+    transform: translateY(8px) scale(0.985);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes menuSpringDrop {
+  from {
+    opacity: 0;
+    transform: translateY(-6px) scale(0.94);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0) scale(1);
+  }
+}
+
+@keyframes rowFadeSlideIn {
+  from {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes playingCoverPop {
+  0% {
+    transform: scale(0.9);
+  }
+  60% {
+    transform: scale(1.06);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+/* Pop animation when heart/offline/active state activates */
+.icon-btn.liked .svg-icon,
+.icon-btn.offline-done .svg-icon,
+.ctrl-btn.active .svg-icon,
+.nav-link.active .svg-icon,
+.bottom-nav button.active .svg-icon,
+.chip-pill.active .svg-icon,
+.library-pill.active .svg-icon {
+  animation: iconSpringPop 0.42s var(--ease-spring) both;
+}
+
+.bottom-nav button.active::before {
+  transform-origin: center;
+  animation: pillIndicatorStretch 0.36s var(--ease-spring) both;
+}
+
+/* Account dropdown menu & dialogs spring entry */
+.account-menu {
+  transform-origin: top right;
+  animation: menuSpringDrop 0.28s var(--ease-spring) both;
+}
+
+dialog.save-dialog[open] {
+  animation: surfaceRiseIn 0.32s var(--ease-spring) both;
+}
+
+@supports (transition-behavior: allow-discrete) {
+  dialog.save-dialog {
+    transition:
+      opacity 0.22s var(--ease-snappy),
+      transform 0.32s var(--ease-spring),
+      overlay 0.22s allow-discrete,
+      display 0.22s allow-discrete;
+  }
+
+  @starting-style {
+    dialog.save-dialog[open] {
+      opacity: 0;
+      transform: translateY(12px) scale(0.95);
+    }
+  }
+}
+
+/* Cards, alerts, banners & download slots subtle entrance */
+.card,
+.empty,
+.alert,
+.import-destination-box,
+.sim-download-bar,
+.offline-pill-bar {
+  animation: surfaceRiseIn 0.26s var(--ease-snappy) both;
+}
+
+.sim-download-chip,
+.badge {
+  animation: iconSpringPop 0.32s var(--ease-spring) both;
+}
+
+/* Animate ONLY the first 14 visible track rows to keep 700-song libraries instantaneous */
+.track-row:nth-child(-n + 14) {
+  animation: rowFadeSlideIn 0.22s var(--ease-snappy) both;
+}
+
+.track-row:nth-child(2) { animation-delay: 0.012s; }
+.track-row:nth-child(3) { animation-delay: 0.024s; }
+.track-row:nth-child(4) { animation-delay: 0.036s; }
+.track-row:nth-child(5) { animation-delay: 0.048s; }
+.track-row:nth-child(6) { animation-delay: 0.060s; }
+.track-row:nth-child(7) { animation-delay: 0.072s; }
+.track-row:nth-child(8) { animation-delay: 0.084s; }
+
+/* Tactile press feedback on track row main tap area & playing artwork pop */
+.track-row-main {
+  transition: transform 0.32s var(--ease-spring), opacity 0.15s ease;
+}
+
+.track-row:not(.offline-unavailable) .track-row-main:active {
+  transition-duration: 0.06s;
+  transform: scale(0.985);
+}
+
+.track-row.playing .track-cover {
+  animation: playingCoverPop 0.4s var(--ease-spring) both;
+}
+
+@property --animation-reduced {
+  syntax: '*';
+  inherits: false;
+  initial-value: none;
+}
+
+/* Strict accessibility compliance: disable motion & view transitions when requested */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation: var(--animation-reduced) !important;
+    transition: none !important;
+    scroll-behavior: auto !important;
+  }
+
+  ::view-transition-old(root),
+  ::view-transition-new(root) {
+    animation: none !important;
+  }
+}
+

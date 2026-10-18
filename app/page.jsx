@@ -4,7 +4,7 @@ import { useState, useEffect, useRef, useMemo } from 'react';
 import { NoSleepController } from '../lib/nosleep';
 
 const AUDIO_CACHE_NAME = 'my-music-offline-audio-v1';
-const SHELL_CACHE_NAME = 'mymusic-shell-v14';
+const SHELL_CACHE_NAME = 'mymusic-shell-v15';
 const DEFAULT_TRACK_COVER = '/icon.svg?v=3';
 const USER_STORAGE_KEY = 'mma_cached_user_v1';
 const LIKES_STORAGE_KEY = 'mma_liked_tracks_v1';
@@ -376,8 +376,42 @@ export default function HomePage() {
   const [accountOpen, setAccountOpen] = useState(false);
 
   // Navigation: 'explore' | 'library' | 'files' | 'settings' | 'admin'
-  const [activeTab, setActiveTab] = useState('explore');
-  const [selectedLibrary, setSelectedLibrary] = useState('liked');
+  const [activeTab, rawSetActiveTab] = useState('explore');
+  const [selectedLibrary, rawSetSelectedLibrary] = useState('liked');
+
+  const setActiveTab = nextTab => {
+    if (
+      typeof document !== 'undefined' &&
+      typeof document.startViewTransition === 'function' &&
+      typeof window !== 'undefined' &&
+      !window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches
+    ) {
+      try {
+        document.startViewTransition(() => {
+          rawSetActiveTab(nextTab);
+        });
+        return;
+      } catch {}
+    }
+    rawSetActiveTab(nextTab);
+  };
+
+  const setSelectedLibrary = nextLib => {
+    if (
+      typeof document !== 'undefined' &&
+      typeof document.startViewTransition === 'function' &&
+      typeof window !== 'undefined' &&
+      !window.matchMedia?.('(prefers-reduced-motion: reduce)')?.matches
+    ) {
+      try {
+        document.startViewTransition(() => {
+          rawSetSelectedLibrary(nextLib);
+        });
+        return;
+      } catch {}
+    }
+    rawSetSelectedLibrary(nextLib);
+  };
 
   // Explore & Search
   const [query, setQuery] = useState('');
