@@ -18,43 +18,234 @@ if (!global.__activeDownloads) {
 }
 const activeDownloads = global.__activeDownloads;
 
-const MAX_CONCURRENT_EXTRACTIONS = 2;
-if (!global.__extractionQueue) {
-  global.__extractionQueue = { running: 0, queue: [] };
+function parsePositiveIntEnv(name, fallback, min = 1, max = 500) {
+  const parsed = parseInt(process.env[name] || '', 10);
+  if (!Number.isFinite(parsed) || parsed < min) return fallback;
+  return Math.min(max, parsed);
 }
-const extractionPool = global.__extractionQueue;
 
-function enqueueExtraction(taskFn, priority = false) {
-  return new Promise((resolve, reject) => {
-    const runNext = () => {
-      if (extractionPool.running >= MAX_CONCURRENT_EXTRACTIONS || extractionPool.queue.length === 0) {
-        return;
+const MAX_NET_DOWNLOADS = parsePositiveIntEnv('MAX_NET_DOWNLOADS', 4, 1, 16);
+const MAX_CPU_JOBS = parsePositiveIntEnv('MAX_CPU_JOBS', 2, 1, 8);
+const MAX_PER_USER = parsePositiveIntEnv('MAX_PER_USER', 2, 1, 8);
+const MAX_QUEUED_PER_USER = parsePositiveIntEnv('MAX_QUEUED_PER_USER', 50, 1, 500);
+
+if (!global.__extractionPools) {
+  global.__extractionPools = {
+    netRunning: 0,
+    netActiveByUser: new Map(),
+    netQueuesByUser: new Map(),
+    netTurnOrder: [],
+    cpuRunning: 0,
+    cpuActiveByUser: new Map(),
+    cpuQueuesByUser: new Map(),
+    cpuTurnOrder: []
+  };
+}
+const pools = global.__extractionPools;
+if (!pools.cpuActiveByUser) {
+  pools.cpuActiveByUser = new Map();
+}
+
+function getUserQueuedCount(userId) {
+  const uid = String(userId || 'anon');
+  const q = pools.netQueuesByUser.get(uid);
+  return q ? q.length : 0;
+}
+
+function pumpNetQueue() {
+  while (pools.netRunning < MAX_NET_DOWNLOADS && pools.netTurnOrder.length > 0) {
+    let pickedIndex = -1;
+    for (let i = 0; i < pools.netTurnOrder.length; i++) {
+      const candidateUid = pools.netTurnOrder[i];
+      const q = pools.netQueuesByUser.get(candidateUid);
+      if (!q || q.length === 0) {
+        pools.netQueuesByUser.delete(candidateUid);
+        pools.netTurnOrder.splice(i, 1);
+        i -= 1;
+        continue;
       }
-      extractionPool.running += 1;
-      const next = extractionPool.queue.shift();
-      Promise.resolve()
-        .then(() => next.fn())
-        .then(next.resolve, next.reject)
-        .finally(() => {
-          extractionPool.running = Math.max(0, extractionPool.running - 1);
-          runNext();
-        });
-    };
-    const entry = { fn: taskFn, resolve, reject };
-    if (priority) {
-      extractionPool.queue.unshift(entry);
-    } else {
-      extractionPool.queue.push(entry);
+      const userActive = pools.netActiveByUser.get(candidateUid) || 0;
+      if (userActive < MAX_PER_USER) {
+        pickedIndex = i;
+        break;
+      }
     }
-    runNext();
+
+    if (pickedIndex === -1) break;
+
+    const [uid] = pools.netTurnOrder.splice(pickedIndex, 1);
+    const q = pools.netQueuesByUser.get(uid);
+    const entry = q.shift();
+    if (q.length > 0) {
+      pools.netTurnOrder.push(uid);
+    } else {
+      pools.netQueuesByUser.delete(uid);
+    }
+
+    pools.netRunning += 1;
+    pools.netActiveByUser.set(uid, (pools.netActiveByUser.get(uid) || 0) + 1);
+
+    let slotReleased = false;
+    const releaseNetSlot = () => {
+      if (slotReleased) return;
+      slotReleased = true;
+      pools.netRunning = Math.max(0, pools.netRunning - 1);
+      const curUserActive = (pools.netActiveByUser.get(uid) || 1) - 1;
+      if (curUserActive <= 0) {
+        pools.netActiveByUser.delete(uid);
+      } else {
+        pools.netActiveByUser.set(uid, curUserActive);
+      }
+      pumpNetQueue();
+    };
+
+    Promise.resolve()
+      .then(() => entry.fn(releaseNetSlot))
+      .then(entry.resolve, entry.reject)
+      .finally(() => {
+        releaseNetSlot();
+      });
+  }
+}
+
+function enqueueNetDownload(userId, downloadId, isManualRequest, taskFn) {
+  const uid = String(userId || 'anon');
+  return new Promise((resolve, reject) => {
+    let userQueue = pools.netQueuesByUser.get(uid);
+    if (!userQueue) {
+      userQueue = [];
+      pools.netQueuesByUser.set(uid, userQueue);
+    }
+    if (!pools.netTurnOrder.includes(uid)) {
+      pools.netTurnOrder.push(uid);
+    }
+
+    // Server-controlled priority: a single manual download can move ahead of the same user's bulk items,
+    // but never bypasses the round-robin turn order of other users.
+    const hasQueuedManual = userQueue.some(e => e.isManualPriority);
+    const grantLocalPriority = Boolean(isManualRequest) && !hasQueuedManual;
+    const entry = {
+      downloadId,
+      isManualPriority: grantLocalPriority,
+      fn: taskFn,
+      resolve,
+      reject
+    };
+
+    if (grantLocalPriority) {
+      userQueue.unshift(entry);
+    } else {
+      userQueue.push(entry);
+    }
+    pumpNetQueue();
   });
 }
 
-function getPoolStatus() {
+function acquireContinuationNetSlot(userId) {
+  return new Promise(resolve => {
+    enqueueNetDownload(userId, null, true, releaseSlot => {
+      return new Promise(done => {
+        resolve(() => {
+          releaseSlot();
+          done();
+        });
+      });
+    });
+  });
+}
+
+function pumpCpuQueue() {
+  while (pools.cpuRunning < MAX_CPU_JOBS && pools.cpuTurnOrder.length > 0) {
+    const uid = pools.cpuTurnOrder.shift();
+    const q = pools.cpuQueuesByUser.get(uid);
+    if (!q || q.length === 0) {
+      pools.cpuQueuesByUser.delete(uid);
+      continue;
+    }
+
+    const entry = q.shift();
+    if (q.length > 0) {
+      pools.cpuTurnOrder.push(uid);
+    } else {
+      pools.cpuQueuesByUser.delete(uid);
+    }
+
+    pools.cpuRunning += 1;
+    pools.cpuActiveByUser.set(uid, (pools.cpuActiveByUser.get(uid) || 0) + 1);
+    if (typeof entry.onSlotAcquired === 'function') {
+      try {
+        entry.onSlotAcquired();
+      } catch {}
+    }
+    Promise.resolve()
+      .then(() => entry.fn())
+      .then(entry.resolve, entry.reject)
+      .finally(() => {
+        pools.cpuRunning = Math.max(0, pools.cpuRunning - 1);
+        const curCpuActive = (pools.cpuActiveByUser.get(uid) || 1) - 1;
+        if (curCpuActive <= 0) {
+          pools.cpuActiveByUser.delete(uid);
+        } else {
+          pools.cpuActiveByUser.set(uid, curCpuActive);
+        }
+        pumpCpuQueue();
+      });
+  }
+}
+
+function enqueueCpuJob(userId, taskFn, onSlotAcquired = null) {
+  const uid = String(userId || 'anon');
+  return new Promise((resolve, reject) => {
+    let q = pools.cpuQueuesByUser.get(uid);
+    if (!q) {
+      q = [];
+      pools.cpuQueuesByUser.set(uid, q);
+    }
+    if (!pools.cpuTurnOrder.includes(uid)) {
+      pools.cpuTurnOrder.push(uid);
+    }
+    q.push({ fn: taskFn, onSlotAcquired, resolve, reject });
+    pumpCpuQueue();
+  });
+}
+
+function getPoolStatus(userId = null, downloadId = null) {
+  const uid = String(userId || 'anon');
+  const userNetActive = pools.netActiveByUser.get(uid) || 0;
+  const userCpuActive = pools.cpuActiveByUser.get(uid) || 0;
+  const userActive = userNetActive + userCpuActive;
+  const userQueue = pools.netQueuesByUser.get(uid) || [];
+  const userQueued = userQueue.length;
+
+  let aheadInQueue = 0;
+  const targetIdx = downloadId
+    ? userQueue.findIndex(e => e.downloadId === downloadId)
+    : userQueued > 0
+    ? 0
+    : -1;
+
+  if (targetIdx >= 0) {
+    const turnPos = pools.netTurnOrder.indexOf(uid);
+    for (let i = 0; i < pools.netTurnOrder.length; i++) {
+      const otherUid = pools.netTurnOrder[i];
+      const otherLen = pools.netQueuesByUser.get(otherUid)?.length || 0;
+      if (otherUid === uid) {
+        aheadInQueue += targetIdx;
+      } else if (turnPos === -1 || i < turnPos) {
+        aheadInQueue += Math.min(otherLen, targetIdx + 1);
+      } else {
+        aheadInQueue += Math.min(otherLen, targetIdx);
+      }
+    }
+  }
+
   return {
-    active: extractionPool.running,
-    queued: extractionPool.queue.length,
-    max: MAX_CONCURRENT_EXTRACTIONS
+    active: userActive,
+    queued: userQueued,
+    aheadInQueue,
+    statusText: aheadInQueue > 0 ? `${aheadInQueue} delante de ti` : null,
+    max: MAX_PER_USER,
+    maxQueued: MAX_QUEUED_PER_USER
   };
 }
 
@@ -1141,10 +1332,11 @@ function runYtDlpAttempt(target, outputTemplate, options, onProgress) {
     });
 
     child.on('close', code => {
+      // With --progress --newline --progress-template, yt-dlp emits progress on stdout before after_move lines
       const outLines = stdoutText
         .split(/\r?\n/)
         .map(l => l.trim())
-        .filter(Boolean);
+        .filter(l => l && !/^\[download\]\s+[\d\.]+%\s*$/.test(l));
       const filepath = outLines.length >= 1 ? outLines[outLines.length - 1] : null;
       const acodec = outLines.length >= 2 ? outLines[outLines.length - 2] : null;
       // Exit code 101 in yt-dlp means --max-downloads limit was reached after downloading the 1st valid full song
@@ -1358,9 +1550,19 @@ function finalizeDownloadedMp3(downloadsDir, baseSlug, expectedAudioPath, expect
   }
 }
 
-async function runExtractionPipeline(downloadId, rawQuery, downloadsDir, baseSlug) {
+async function runExtractionPipeline(
+  downloadId,
+  rawQuery,
+  downloadsDir,
+  baseSlug,
+  userId,
+  initialReleaseNetSlot
+) {
   const item = activeDownloads.get(downloadId);
   if (!item) return;
+
+  let releaseNetSlot = initialReleaseNetSlot;
+  let netSlotReleased = false;
 
   registerActiveRawJob(baseSlug);
   try {
@@ -1557,10 +1759,19 @@ async function runExtractionPipeline(downloadId, rawQuery, downloadsDir, baseSlu
       });
     }
 
+    const minRawBytes = expectedDurationSec
+      ? Math.max(240 * 1024, Math.min(700 * 1024, Math.round(expectedDurationSec * 4000)))
+      : 240 * 1024;
+
     for (const t of targets) {
       let stepRes = null;
       let ffmpegErr = '';
       try {
+        if (netSlotReleased) {
+          releaseNetSlot = await acquireContinuationNetSlot(userId);
+          netSlotReleased = false;
+        }
+
         cleanupRawStageFiles(downloadsDir, baseSlug);
         stepRes = await runYtDlpAttempt(
           t.url,
@@ -1571,16 +1782,35 @@ async function runExtractionPipeline(downloadId, rawQuery, downloadsDir, baseSlu
 
         const rawFilePath = findRawStageFile(downloadsDir, baseSlug, stepRes?.filepath);
         if (rawFilePath) {
-          updateProg(92);
-          const postRes = await runFfmpegPostProcess(rawFilePath, expectedM4aPath, {
-            acodec: stepRes?.acodec,
-            trimDurationSec: t.trimDurationSec,
-            title: metaTitle,
-            artist: metaArtist,
-            album: metaAlbum
-          });
-          if (!postRes.ok) {
-            ffmpegErr = postRes.error || '';
+          let rawSize = 0;
+          try {
+            rawSize = fs.statSync(rawFilePath).size;
+          } catch {}
+
+          if (rawSize > minRawBytes) {
+            updateProg(92);
+            const postRes = await enqueueCpuJob(
+              userId,
+              () =>
+                runFfmpegPostProcess(rawFilePath, expectedM4aPath, {
+                  acodec: stepRes?.acodec,
+                  trimDurationSec: t.trimDurationSec,
+                  title: metaTitle,
+                  artist: metaArtist,
+                  album: metaAlbum
+                }),
+              () => {
+                // Release Network slot as soon as the CPU slot is granted so the next queued
+                // download starts Paso A while providing automatic backpressure if CPU is full
+                if (releaseNetSlot) {
+                  releaseNetSlot();
+                  netSlotReleased = true;
+                }
+              }
+            );
+            if (!postRes.ok) {
+              ffmpegErr = postRes.error || '';
+            }
           }
         }
       } finally {
@@ -1616,6 +1846,10 @@ async function runExtractionPipeline(downloadId, rawQuery, downloadsDir, baseSlu
     item.status = 'error';
     item.error = 'No se encontró versión original completa de esta pista.';
   } finally {
+    if (releaseNetSlot && !netSlotReleased) {
+      releaseNetSlot();
+      netSlotReleased = true;
+    }
     cleanupRawStageFiles(downloadsDir, baseSlug);
     unregisterActiveRawJob(baseSlug);
   }
@@ -1642,12 +1876,20 @@ export async function POST(request) {
       );
     }
 
+    if (getUserQueuedCount(user.id) >= MAX_QUEUED_PER_USER) {
+      return NextResponse.json(
+        { error: 'Tienes demasiadas descargas en cola' },
+        { status: 429 }
+      );
+    }
+
     const downloadsDir = getDownloadsDir();
     const downloadId = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
     const baseSlug = `${sanitizeSlug(`${data.artist || ''} ${data.title || rawQuery}`)}_${downloadId}`;
 
     activeDownloads.set(downloadId, {
       id: downloadId,
+      userId: user.id,
       title: data.title || rawQuery,
       artist: data.artist || '',
       duration: data.duration || null,
@@ -1657,10 +1899,16 @@ export async function POST(request) {
       filename: null
     });
 
-    const isPriority = Boolean(data.priority);
-    enqueueExtraction(
-      () => runExtractionPipeline(downloadId, rawQuery, downloadsDir, baseSlug),
-      isPriority
+    const isManualRequest = Boolean(data.priority);
+    enqueueNetDownload(user.id, downloadId, isManualRequest, releaseNetSlot =>
+      runExtractionPipeline(
+        downloadId,
+        rawQuery,
+        downloadsDir,
+        baseSlug,
+        user.id,
+        releaseNetSlot
+      )
     ).catch(err => {
       const item = activeDownloads.get(downloadId);
       if (item) {
@@ -1672,7 +1920,7 @@ export async function POST(request) {
     return NextResponse.json({
       ok: true,
       downloadId,
-      pool: getPoolStatus()
+      pool: getPoolStatus(user.id, downloadId)
     });
   } catch (err) {
     return NextResponse.json({ error: err.message }, { status: 500 });
@@ -1680,20 +1928,29 @@ export async function POST(request) {
 }
 
 export async function GET(request) {
+  const user = getSessionUser(request);
+  if (!user) {
+    return NextResponse.json({ error: 'No autorizado' }, { status: 401 });
+  }
+
   const { searchParams } = new URL(request.url);
   const id = searchParams.get('id');
 
   if (!id) {
-    return NextResponse.json({ pool: getPoolStatus() });
+    return NextResponse.json({ pool: getPoolStatus(user.id) });
   }
 
   const item = activeDownloads.get(id);
-  if (!item) {
-    return NextResponse.json({ error: 'Descarga no encontrada', pool: getPoolStatus() }, { status: 404 });
+  if (!item || (item.userId && item.userId !== user.id && !user.is_admin)) {
+    return NextResponse.json(
+      { error: 'Descarga no encontrada', pool: getPoolStatus(user.id) },
+      { status: 404 }
+    );
   }
 
+  const { userId: _ownerId, ...publicItem } = item;
   return NextResponse.json({
-    ...item,
-    pool: getPoolStatus()
+    ...publicItem,
+    pool: getPoolStatus(user.id, id)
   });
 }
