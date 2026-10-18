@@ -8,13 +8,18 @@ import {
 } from '../../../lib/store';
 
 const AUTH_WINDOW_MS = 15 * 60 * 1000; // 15 minutes
-const AUTH_MAX_ATTEMPTS = 5;
+const AUTH_MAX_ATTEMPTS_USER = 5;
+const AUTH_MAX_ATTEMPTS_IP = 20;
 const AUTH_MAX_TRACKED_KEYS = 5000;
 
 if (!global.__authRateLimiter) {
   global.__authRateLimiter = new Map();
 }
 const authRateLimiter = global.__authRateLimiter;
+
+function getMaxAttemptsForKey(key) {
+  return String(key).startsWith('ip:') ? AUTH_MAX_ATTEMPTS_IP : AUTH_MAX_ATTEMPTS_USER;
+}
 
 function getClientIp(request) {
   const realIp = request.headers.get('x-real-ip')?.trim();
@@ -43,7 +48,8 @@ function checkRateLimit(keys) {
   let retryAfterSec = 0;
   for (const key of keys) {
     const rec = getActiveAttemptRecord(key, now);
-    if (rec && rec.count >= AUTH_MAX_ATTEMPTS) {
+    const maxAttempts = getMaxAttemptsForKey(key);
+    if (rec && rec.count >= maxAttempts) {
       const remainingMs = Math.max(1000, AUTH_WINDOW_MS - (now - rec.firstAttemptAt));
       retryAfterSec = Math.max(retryAfterSec, Math.ceil(remainingMs / 1000));
     }

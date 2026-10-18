@@ -6,7 +6,8 @@
   "scripts": {
     "dev": "next dev -H 0.0.0.0 -p 3333",
     "build": "next build",
-    "start": "next start -H 0.0.0.0 -p 3333"
+    "start": "next start -H 0.0.0.0 -p 3333",
+    "test": "node --test tests/*.test.mjs"
   },
   "dependencies": {
     "lucide-react": "^0.453.0",
