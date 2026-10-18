@@ -6,7 +6,7 @@ import { NoSleepController } from '../lib/nosleep';
 import { buildSmartShuffleOrder, getShuffleTrackKey } from '../lib/shuffle';
 
 const AUDIO_CACHE_NAME = 'my-music-offline-audio-v1';
-const SHELL_CACHE_NAME = 'mymusic-shell-v18';
+const SHELL_CACHE_NAME = 'mymusic-shell-v19';
 const DEFAULT_TRACK_COVER = '/icon.svg?v=3';
 const USER_STORAGE_KEY = 'mma_cached_user_v1';
 const LIKES_STORAGE_KEY = 'mma_liked_tracks_v1';
