@@ -8,7 +8,9 @@ import {
   getSessionUser,
   enforceStorageQuota,
   scheduleFileCleanup,
-  getYtCookiesFilePath
+  getYtCookiesFilePath,
+  registerActiveRawJob,
+  unregisterActiveRawJob
 } from '../../../lib/store';
 
 if (!global.__activeDownloads) {
@@ -851,8 +853,7 @@ function scoreLoopCandidate(cand, ctx) {
 
   return {
     score: Math.round(90 - cycleDiff * 3 - repeatCount * 2 - foreignWords.length * 8),
-    trimDurationSec,
-    fadeOutSec: 2
+    trimDurationSec
   };
 }
 
@@ -996,22 +997,10 @@ function runYtDlpAttempt(target, outputTemplate, options, onProgress) {
     maxDuration = 900,
     matchTitleRegex = null,
     rejectTitleRegex = null,
-    trimDurationSec = null,
-    fadeOutSec = 0,
     useCookies = false
   } = options || {};
 
   return new Promise(resolve => {
-    let extractAudioArgs = 'ExtractAudio:-ac 2 -ar 44100 -compression_level 0';
-    if (trimDurationSec && trimDurationSec >= 45) {
-      const tSec = Math.round(trimDurationSec);
-      extractAudioArgs += ` -t ${tSec}`;
-      if (fadeOutSec && fadeOutSec > 0 && tSec > fadeOutSec + 6) {
-        const stSec = Math.round(tSec - fadeOutSec);
-        extractAudioArgs += ` -af afade=t=out:st=${stSec}:d=${Math.round(fadeOutSec)}`;
-      }
-    }
-
     const isYouTubeTarget = /youtube\.com|youtu\.be|^ytsearch/i.test(String(target || ''));
     const isBilibiliTarget = /^bilisearch|bilibili\.com/i.test(String(target || ''));
     const masterCookiesPath = isYouTubeTarget && useCookies ? getYtCookiesFilePath() : null;
@@ -1032,21 +1021,21 @@ function runYtDlpAttempt(target, outputTemplate, options, onProgress) {
       }
     }
 
-    // Transparent VBR compression (LAME -V 5 ~128kbps VBR + 44.1kHz joint stereo at compression_level 0):
-    // Matches the native 128kbps YouTube/SoundCloud source fidelity with zero audible loss while saving ~60% disk space (~2.4-3MB per track instead of ~8MB)
+    // Paso A (Network stage): Download native AAC/m4a stream (or best audio fallback) without re-encoding or fixup
     const ytdlpArgs = [
-      '-f', 'bestaudio/best',
-      '-x',
-      '--audio-format', 'mp3',
-      '--audio-quality', '5',
-      '--postprocessor-args', extractAudioArgs,
-      '--embed-metadata',
+      '-f', 'bestaudio[ext=m4a]/bestaudio[acodec^=mp4a]/bestaudio/best',
+      '--fixup', 'never',
+      '--no-simulate',
+      '--progress',
+      '--newline',
+      '--progress-template', 'download:[download] %(progress._percent_str)s',
+      '--print', 'after_move:%(acodec)s',
+      '--print', 'after_move:filepath',
       '--restrict-filenames',
       '--ignore-errors',
       '--no-warnings',
       '--js-runtimes', 'node',
       '--socket-timeout', '15',
-      '--newline',
       '-o', outputTemplate
     ];
 
@@ -1077,14 +1066,11 @@ function runYtDlpAttempt(target, outputTemplate, options, onProgress) {
       ytdlpArgs.push('--no-playlist');
     }
 
-    if (process.env.FFMPEG_BIN?.trim()) {
-      ytdlpArgs.push('--ffmpeg-location', process.env.FFMPEG_BIN.trim());
-    }
-
     // Use '--' separator to prevent option/flag injection
     ytdlpArgs.push('--', target);
 
     const { cmd, args } = resolveYtDlpCommand(ytdlpArgs);
+    let stdoutText = '';
     let stderrText = '';
     let settled = false;
 
@@ -1113,21 +1099,129 @@ function runYtDlpAttempt(target, outputTemplate, options, onProgress) {
       resolve(result);
     };
 
-    // Guard against stuck connections so the extraction pool never deadlocks
+    // 60s timeout for Paso A (Network download)
     const killTimer = setTimeout(() => {
       try {
         child.kill('SIGKILL');
       } catch {}
-      finish({ ok: false, error: 'Tiempo de espera agotado en extracción' });
-    }, 45000);
+      finish({ ok: false, error: 'Tiempo de espera agotado en descarga (Paso A)' });
+    }, 60000);
+
+    const handleProgressText = text => {
+      if (!onProgress) return;
+      const matches = [...text.matchAll(/\[download\]\s+([\d\.]+)%/g)];
+      if (matches.length > 0) {
+        const pct = parseFloat(matches[matches.length - 1][1]);
+        if (Number.isFinite(pct)) {
+          onProgress(pct);
+        }
+      }
+    };
 
     child.stdout.on('data', d => {
       const text = d.toString();
-      const progMatch = text.match(/\[download\]\s+([\d\.]+)%/);
-      if (progMatch && onProgress) {
-        onProgress(parseFloat(progMatch[1]));
+      stdoutText += text;
+      handleProgressText(text);
+    });
+
+    child.stderr.on('data', d => {
+      const text = d.toString();
+      handleProgressText(text);
+      const nonProgressLines = text
+        .split(/\r?\n/)
+        .filter(line => !/^\[download\]\s+[\d\.]+%\s*$/.test(line.trim()))
+        .join('\n');
+      if (nonProgressLines.trim()) {
+        stderrText += `${nonProgressLines}\n`;
       }
     });
+
+    child.on('error', err => {
+      finish({ ok: false, error: err.message });
+    });
+
+    child.on('close', code => {
+      const outLines = stdoutText
+        .split(/\r?\n/)
+        .map(l => l.trim())
+        .filter(Boolean);
+      const filepath = outLines.length >= 1 ? outLines[outLines.length - 1] : null;
+      const acodec = outLines.length >= 2 ? outLines[outLines.length - 2] : null;
+      // Exit code 101 in yt-dlp means --max-downloads limit was reached after downloading the 1st valid full song
+      finish({
+        ok: code === 0 || code === 101,
+        code,
+        acodec,
+        filepath,
+        error: stderrText.slice(-300)
+      });
+    });
+  });
+}
+
+function findRawStageFile(downloadsDir, baseSlug, reportedPath = null) {
+  if (reportedPath) {
+    try {
+      const resolved = path.resolve(reportedPath);
+      if (
+        resolved.startsWith(path.resolve(downloadsDir) + path.sep) &&
+        fs.existsSync(resolved) &&
+        fs.statSync(resolved).size > 0
+      ) {
+        return resolved;
+      }
+    } catch {}
+  }
+  try {
+    const files = fs.readdirSync(downloadsDir);
+    const match = files.find(
+      f =>
+        f.startsWith(`${baseSlug}.raw.`) &&
+        !/\.(part|ytdl|temp)$/i.test(f)
+    );
+    return match ? path.join(downloadsDir, match) : null;
+  } catch {
+    return null;
+  }
+}
+
+function cleanupRawStageFiles(downloadsDir, baseSlug) {
+  try {
+    const files = fs.readdirSync(downloadsDir);
+    for (const f of files) {
+      if (f.startsWith(`${baseSlug}.raw.`) || f.startsWith(`${baseSlug}__`)) {
+        try {
+          fs.unlinkSync(path.join(downloadsDir, f));
+        } catch {}
+      }
+    }
+  } catch {}
+}
+
+function spawnFfmpegOnce(ffmpegBin, ffmpegArgs, timeoutMs = 30000) {
+  return new Promise(resolve => {
+    let stderrText = '';
+    let settled = false;
+    let child;
+    try {
+      child = spawn(ffmpegBin, ffmpegArgs);
+    } catch (err) {
+      return resolve({ ok: false, error: err.message });
+    }
+
+    const finish = result => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(killTimer);
+      resolve(result);
+    };
+
+    const killTimer = setTimeout(() => {
+      try {
+        child.kill('SIGKILL');
+      } catch {}
+      finish({ ok: false, error: 'Tiempo de espera agotado en ffmpeg (Paso B)' });
+    }, timeoutMs);
 
     child.stderr.on('data', d => {
       stderrText += d.toString();
@@ -1138,13 +1232,80 @@ function runYtDlpAttempt(target, outputTemplate, options, onProgress) {
     });
 
     child.on('close', code => {
-      // Exit code 101 in yt-dlp means --max-downloads limit was reached after downloading the 1st valid full song
-      finish({ ok: code === 0 || code === 101, code, error: stderrText.slice(-300) });
+      finish({ ok: code === 0, code, error: stderrText.slice(-300) });
     });
   });
 }
 
-function finalizeDownloadedMp3(downloadsDir, baseSlug, expectedMp3Path, expectedDurationSec = null) {
+async function runFfmpegPostProcess(rawFilePath, outputM4aPath, options = {}) {
+  const {
+    acodec = '',
+    trimDurationSec = null,
+    title = '',
+    artist = '',
+    album = ''
+  } = options;
+
+  const ffmpegBin = process.env.FFMPEG_BIN?.trim() || 'ffmpeg';
+  const isNativeAac =
+    /^(mp4a|aac)/i.test(String(acodec || '').trim()) || /\.raw\.m4a$/i.test(rawFilePath);
+
+  const buildArgs = useCopy => {
+    const args = ['-hide_banner', '-loglevel', 'error', '-y', '-i', rawFilePath, '-vn'];
+    if (trimDurationSec && trimDurationSec >= 45) {
+      args.push('-t', String(Math.round(trimDurationSec)));
+    }
+    if (useCopy) {
+      args.push('-c:a', 'copy', '-bsf:a', 'aac_adtstoasc');
+    } else {
+      args.push('-c:a', 'aac', '-b:a', '160k', '-ac', '2', '-ar', '44100');
+    }
+    args.push('-map_metadata', '0');
+    if (title) args.push('-metadata', `title=${String(title)}`);
+    if (artist) args.push('-metadata', `artist=${String(artist)}`);
+    if (album) args.push('-metadata', `album=${String(album)}`);
+    args.push('-movflags', '+faststart', outputM4aPath);
+    return args;
+  };
+
+  // 30s timeout for Paso B (CPU remux or AAC conversion)
+  const firstRes = await spawnFfmpegOnce(ffmpegBin, buildArgs(isNativeAac), 30000);
+  if (firstRes.ok && fs.existsSync(outputM4aPath)) {
+    return firstRes;
+  }
+
+  // Fallback: if stream copy failed on an unusual container, transcode to AAC 160k
+  if (isNativeAac && fs.existsSync(rawFilePath)) {
+    return spawnFfmpegOnce(ffmpegBin, buildArgs(false), 30000);
+  }
+  return firstRes;
+}
+
+function finalizeDownloadedMp3(downloadsDir, baseSlug, expectedAudioPath, expectedDurationSec = null) {
+  const minValidBytes = expectedDurationSec
+    ? Math.max(380 * 1024, Math.min(1050 * 1024, Math.round(expectedDurationSec * 6200)))
+    : 380 * 1024;
+
+  const validateExistingAudio = filePath => {
+    try {
+      if (!filePath || !fs.existsSync(filePath)) return null;
+      const stat = fs.statSync(filePath);
+      if (stat.size <= minValidBytes) {
+        try {
+          fs.unlinkSync(filePath);
+        } catch {}
+        return null;
+      }
+      return {
+        valid: true,
+        filename: path.basename(filePath),
+        filePath
+      };
+    } catch {
+      return null;
+    }
+  };
+
   try {
     const files = fs.readdirSync(downloadsDir);
     const candidateName =
@@ -1161,22 +1322,15 @@ function finalizeDownloadedMp3(downloadsDir, baseSlug, expectedMp3Path, expected
     }
 
     if (!candidateName) {
-      const existingM4a = path.join(downloadsDir, `${baseSlug}.m4a`);
-      if (fs.existsSync(existingM4a)) {
-        return { valid: true, filename: `${baseSlug}.m4a`, filePath: existingM4a };
-      }
-      if (expectedMp3Path && fs.existsSync(expectedMp3Path)) {
-        return { valid: true, filename: path.basename(expectedMp3Path), filePath: expectedMp3Path };
-      }
+      const checkedM4a = validateExistingAudio(path.join(downloadsDir, `${baseSlug}.m4a`));
+      if (checkedM4a) return checkedM4a;
+      const checkedExpected = validateExistingAudio(expectedAudioPath);
+      if (checkedExpected) return checkedExpected;
       return { valid: false, filename: null, filePath: null };
     }
 
     const candidatePath = path.join(downloadsDir, candidateName);
     const stat = fs.statSync(candidatePath);
-    const minValidBytes = expectedDurationSec
-      ? Math.max(380 * 1024, Math.min(1050 * 1024, Math.round(expectedDurationSec * 6200)))
-      : 380 * 1024;
-
     if (stat.size <= minValidBytes) {
       try {
         fs.unlinkSync(candidatePath);
@@ -1196,13 +1350,10 @@ function finalizeDownloadedMp3(downloadsDir, baseSlug, expectedMp3Path, expected
     fs.renameSync(candidatePath, finalFilePath);
     return { valid: true, filename: finalFilename, filePath: finalFilePath };
   } catch {
-    const existingM4a = path.join(downloadsDir, `${baseSlug}.m4a`);
-    if (fs.existsSync(existingM4a)) {
-      return { valid: true, filename: `${baseSlug}.m4a`, filePath: existingM4a };
-    }
-    if (expectedMp3Path && fs.existsSync(expectedMp3Path)) {
-      return { valid: true, filename: path.basename(expectedMp3Path), filePath: expectedMp3Path };
-    }
+    const checkedM4a = validateExistingAudio(path.join(downloadsDir, `${baseSlug}.m4a`));
+    if (checkedM4a) return checkedM4a;
+    const checkedExpected = validateExistingAudio(expectedAudioPath);
+    if (checkedExpected) return checkedExpected;
     return { valid: false, filename: null, filePath: null };
   }
 }
@@ -1211,234 +1362,263 @@ async function runExtractionPipeline(downloadId, rawQuery, downloadsDir, baseSlu
   const item = activeDownloads.get(downloadId);
   if (!item) return;
 
-  const tempOutputTemplate = path.join(
-    downloadsDir,
-    `${baseSlug}__%(title).60s__%(uploader).40s.%(ext)s`
-  );
-  const expectedMp3Name = `${baseSlug}.mp3`;
-  const expectedMp3Path = path.join(downloadsDir, expectedMp3Name);
+  registerActiveRawJob(baseSlug);
+  try {
+    const rawOutputTemplate = path.join(downloadsDir, `${baseSlug}.raw.%(ext)s`);
+    const expectedM4aName = `${baseSlug}.m4a`;
+    const expectedM4aPath = path.join(downloadsDir, expectedM4aName);
 
-  const updateProg = p => {
-    const cur = activeDownloads.get(downloadId);
-    if (cur) cur.progress = Math.max(cur.progress || 8, Math.min(98, p));
-  };
-
-  const rawTitle = String(item.title || rawQuery || '').trim();
-  let cleanTitle = stripRemasterNoise(rawTitle) || rawTitle;
-  let primaryArtist = cleanArtistName(item.artist);
-  if (!primaryArtist && /\s+[-–—]\s+/.test(cleanTitle)) {
-    const parts = cleanTitle.split(/\s+[-–—]\s+/);
-    if (parts.length >= 2 && parts[0].trim().length >= 2) {
-      primaryArtist = cleanArtistName(parts[0]);
-      cleanTitle = parts.slice(1).join(' - ').trim() || cleanTitle;
-    }
-  }
-  const rejectTitleRegex = buildRejectTitleRegex(cleanTitle);
-
-  let targets = [];
-  let expectedDurationSec = null;
-
-  if (/^https?:\/\//i.test(rawQuery)) {
-    if (!isAllowedMediaUrl(rawQuery)) {
-      item.status = 'error';
-      item.error = 'Dominio de URL no permitido.';
-      return;
-    }
-    targets = [{ url: rawQuery, isSearchPool: false }];
-  } else {
-    const primaryTitle = stripParentheticalSubtitles(cleanTitle);
-    const artistAndCleanTitle = sanitizeSearchQuery(
-      primaryArtist ? `${primaryArtist} - ${cleanTitle}` : cleanTitle
-    );
-    const artistAndPrimaryTitle = sanitizeSearchQuery(
-      primaryArtist ? `${primaryArtist} - ${primaryTitle}` : primaryTitle
-    );
-    const cleanTitleOnly = sanitizeSearchQuery(primaryTitle);
-
-    if (!artistAndCleanTitle) {
-      item.status = 'error';
-      item.error = 'Búsqueda inválida.';
-      return;
-    }
-
-    // Step 0 & Step 1 in parallel: Resolve canonical duration + official title/artist/album words from iTunes/Deezer
-    // while simultaneously running SoundCloud and YouTube candidate discovery in SEPARATE parallel processes
-    // so a slow/throttled YouTube search can never delay or starve SoundCloud discovery!
-    const ytDiscoveryQueries = [
-      `ytsearch6:${artistAndPrimaryTitle || artistAndCleanTitle} official audio`
-    ];
-    const scDiscoveryQueries = [
-      `scsearch15:${artistAndPrimaryTitle || artistAndCleanTitle}`
-    ];
-    if (artistAndCleanTitle && artistAndCleanTitle !== artistAndPrimaryTitle) {
-      scDiscoveryQueries.push(`scsearch10:${artistAndCleanTitle}`);
-    } else if (primaryArtist && cleanTitleOnly && cleanTitleOnly.length >= 3) {
-      scDiscoveryQueries.push(`scsearch10:${cleanTitleOnly}`);
-    }
-
-    const [catalogMeta, scRawCandidates, ytRawCandidates] = await Promise.all([
-      resolveCatalogMetadata(item.duration, cleanTitle, primaryArtist),
-      discoverCandidatesFromSearch(scDiscoveryQueries, 10000),
-      discoverCandidatesFromSearch(ytDiscoveryQueries, 7500)
-    ]);
-    const rawCandidates = [...ytRawCandidates, ...scRawCandidates];
-    expectedDurationSec = catalogMeta.durationSec;
-    const effectiveTitle =
-      !primaryArtist && catalogMeta.canonicalTitle ? catalogMeta.canonicalTitle : cleanTitle;
-    const effectiveArtist = primaryArtist || catalogMeta.canonicalArtist || item.artist || '';
-    updateProg(18);
-
-    const ctx = buildCandidateContext(
-      rawTitle,
-      effectiveTitle,
-      effectiveArtist,
-      expectedDurationSec,
-      catalogMeta
-    );
-
-    // Tier 1: Exact 1x studio recordings
-    const scoredTier1 = rawCandidates
-      .map(c => ({ ...c, score: scoreCandidate(c, ctx) }))
-      .filter(c => c.score >= 0)
-      .sort((a, b) => b.score - a.score);
-
-    // Tier 2: Anti-copyright N-x looped studio uploads (e.g. "Intruso - Enjambre" 3x = 608.4s or "The Ketchup Song" 4x = 867.5s on SoundCloud),
-    // automatically trimmed by ffmpeg to 1x single-play duration with a smooth 2s fade-out
-    const scoredLoopTier2 = rawCandidates
-      .map(c => {
-        const loopInfo = scoreLoopCandidate(c, ctx);
-        return loopInfo ? { ...c, ...loopInfo } : null;
-      })
-      .filter(Boolean)
-      .sort((a, b) => b.score - a.score);
-
-    updateProg(22);
-
-    const maxAllowedDur = expectedDurationSec ? expectedDurationSec + 5 : null;
-    const hasCookiesConfigured = Boolean(getYtCookiesFilePath());
-
-    const ytCands = scoredTier1.filter(c =>
-      String(c.extractor || '').toLowerCase().includes('youtube')
-    );
-    const scCands = scoredTier1.filter(c =>
-      !String(c.extractor || '').toLowerCase().includes('youtube')
-    );
-
-    const bestYtNonTopic = ytCands.find(
-      c => !String(c.uploader || '').toLowerCase().endsWith('- topic')
-    );
-    const bestYt = bestYtNonTopic || ytCands[0] || null;
-
-    const scDirectTargets = scCands.slice(0, 2).map(best => ({
-      url: best.webpageUrl,
-      isSearchPool: false,
-      trimDurationSec: maxAllowedDur,
-      fadeOutSec: 0,
-      useCookies: false
-    }));
-
-    const scLoopTargets = scoredLoopTier2.slice(0, 2).map(loopCand => ({
-      url: loopCand.webpageUrl,
-      isSearchPool: false,
-      trimDurationSec: loopCand.trimDurationSec,
-      fadeOutSec: loopCand.fadeOutSec,
-      useCookies: false
-    }));
-
-    const ytDirectTargets = bestYt
-      ? [
-          {
-            url: bestYt.webpageUrl,
-            isSearchPool: false,
-            trimDurationSec: maxAllowedDur,
-            fadeOutSec: 0,
-            useCookies: hasCookiesConfigured
-          }
-        ]
-      : [];
-
-    const minDur = expectedDurationSec ? Math.max(45, expectedDurationSec - 8) : 55;
-    const maxDur = expectedDurationSec ? expectedDurationSec + 8 : 540;
-    const searchQueryBase = sanitizeSearchQuery(
-      effectiveArtist
-        ? `${effectiveArtist} ${stripParentheticalSubtitles(effectiveTitle)}`
-        : stripParentheticalSubtitles(effectiveTitle)
-    )
-      .replace(/\s*[-–—]\s*/g, ' ')
-      .replace(/\s+/g, ' ')
-      .trim();
-
-    const titleCoreWords = getTitleCoreTokens(effectiveTitle).slice(0, 4);
-    const biliMatchTitleRegex =
-      titleCoreWords.length > 0
-        ? `(?i)${titleCoreWords.map(w => `(?=.*${w.replace(/[^a-z0-9]/gi, '')})`).join('')}`
-        : null;
-
-    const biliTarget = {
-      url: `bilisearch5:${searchQueryBase || artistAndPrimaryTitle || artistAndCleanTitle}`,
-      isSearchPool: true,
-      minDuration: minDur,
-      maxDuration: maxDur,
-      matchTitleRegex: biliMatchTitleRegex,
-      rejectTitleRegex,
-      trimDurationSec: maxAllowedDur,
-      useCookies: false
+    const updateProg = p => {
+      const cur = activeDownloads.get(downloadId);
+      if (cur) cur.progress = Math.max(cur.progress || 8, Math.min(98, p));
     };
 
-    if (hasCookiesConfigured) {
-      // With valid cookies, try YouTube #1 first, then SoundCloud 1x/loop, then Bilibili studio match
-      targets.push(...ytDirectTargets, ...scDirectTargets, ...scLoopTargets, biliTarget);
+    const rawTitle = String(item.title || rawQuery || '').trim();
+    let cleanTitle = stripRemasterNoise(rawTitle) || rawTitle;
+    let primaryArtist = cleanArtistName(item.artist);
+    if (!primaryArtist && /\s+[-–—]\s+/.test(cleanTitle)) {
+      const parts = cleanTitle.split(/\s+[-–—]\s+/);
+      if (parts.length >= 2 && parts[0].trim().length >= 2) {
+        primaryArtist = cleanArtistName(parts[0]);
+        cleanTitle = parts.slice(1).join(' - ').trim() || cleanTitle;
+      }
+    }
+    const rejectTitleRegex = buildRejectTitleRegex(cleanTitle);
+
+    let targets = [];
+    let expectedDurationSec = null;
+    let metaTitle = cleanTitle;
+    let metaArtist = primaryArtist || String(item.artist || '').trim();
+    let metaAlbum = String(item.album || '').trim();
+
+    if (/^https?:\/\//i.test(rawQuery)) {
+      if (!isAllowedMediaUrl(rawQuery)) {
+        item.status = 'error';
+        item.error = 'Dominio de URL no permitido.';
+        return;
+      }
+      targets = [{ url: rawQuery, isSearchPool: false }];
     } else {
-      // Without cookies, prioritize SoundCloud 1x/loop and Bilibili studio match before YouTube
-      targets.push(...scDirectTargets, ...scLoopTargets, biliTarget, ...ytDirectTargets);
+      const primaryTitle = stripParentheticalSubtitles(cleanTitle);
+      const artistAndCleanTitle = sanitizeSearchQuery(
+        primaryArtist ? `${primaryArtist} - ${cleanTitle}` : cleanTitle
+      );
+      const artistAndPrimaryTitle = sanitizeSearchQuery(
+        primaryArtist ? `${primaryArtist} - ${primaryTitle}` : primaryTitle
+      );
+      const cleanTitleOnly = sanitizeSearchQuery(primaryTitle);
+
+      if (!artistAndCleanTitle) {
+        item.status = 'error';
+        item.error = 'Búsqueda inválida.';
+        return;
+      }
+
+      // Step 0 & Step 1 in parallel: Resolve canonical duration + official title/artist/album words from iTunes/Deezer
+      // while simultaneously running SoundCloud and YouTube candidate discovery in SEPARATE parallel processes
+      // so a slow/throttled YouTube search can never delay or starve SoundCloud discovery!
+      const ytDiscoveryQueries = [
+        `ytsearch6:${artistAndPrimaryTitle || artistAndCleanTitle} official audio`
+      ];
+      const scDiscoveryQueries = [
+        `scsearch15:${artistAndPrimaryTitle || artistAndCleanTitle}`
+      ];
+      if (artistAndCleanTitle && artistAndCleanTitle !== artistAndPrimaryTitle) {
+        scDiscoveryQueries.push(`scsearch10:${artistAndCleanTitle}`);
+      } else if (primaryArtist && cleanTitleOnly && cleanTitleOnly.length >= 3) {
+        scDiscoveryQueries.push(`scsearch10:${cleanTitleOnly}`);
+      }
+
+      const [catalogMeta, scRawCandidates, ytRawCandidates] = await Promise.all([
+        resolveCatalogMetadata(item.duration, cleanTitle, primaryArtist),
+        discoverCandidatesFromSearch(scDiscoveryQueries, 10000),
+        discoverCandidatesFromSearch(ytDiscoveryQueries, 7500)
+      ]);
+      const rawCandidates = [...ytRawCandidates, ...scRawCandidates];
+      expectedDurationSec = catalogMeta.durationSec;
+      const effectiveTitle =
+        !primaryArtist && catalogMeta.canonicalTitle ? catalogMeta.canonicalTitle : cleanTitle;
+      const effectiveArtist = primaryArtist || catalogMeta.canonicalArtist || item.artist || '';
+      metaTitle = effectiveTitle || metaTitle;
+      metaArtist = effectiveArtist || metaArtist;
+      metaAlbum = catalogMeta.canonicalAlbum || metaAlbum;
+      updateProg(18);
+
+      const ctx = buildCandidateContext(
+        rawTitle,
+        effectiveTitle,
+        effectiveArtist,
+        expectedDurationSec,
+        catalogMeta
+      );
+
+      // Tier 1: Exact 1x studio recordings
+      const scoredTier1 = rawCandidates
+        .map(c => ({ ...c, score: scoreCandidate(c, ctx) }))
+        .filter(c => c.score >= 0)
+        .sort((a, b) => b.score - a.score);
+
+      // Tier 2: Anti-copyright N-x looped studio uploads (e.g. "Intruso - Enjambre" 3x = 608.4s or "The Ketchup Song" 4x = 867.5s on SoundCloud),
+      // automatically trimmed by ffmpeg to 1x single-play duration with stream copy (-t N)
+      const scoredLoopTier2 = rawCandidates
+        .map(c => {
+          const loopInfo = scoreLoopCandidate(c, ctx);
+          return loopInfo ? { ...c, ...loopInfo } : null;
+        })
+        .filter(Boolean)
+        .sort((a, b) => b.score - a.score);
+
+      updateProg(22);
+
+      const maxAllowedDur = expectedDurationSec ? expectedDurationSec + 5 : null;
+      const hasCookiesConfigured = Boolean(getYtCookiesFilePath());
+
+      const ytCands = scoredTier1.filter(c =>
+        String(c.extractor || '').toLowerCase().includes('youtube')
+      );
+      const scCands = scoredTier1.filter(c =>
+        !String(c.extractor || '').toLowerCase().includes('youtube')
+      );
+
+      const bestYtNonTopic = ytCands.find(
+        c => !String(c.uploader || '').toLowerCase().endsWith('- topic')
+      );
+      const bestYt = bestYtNonTopic || ytCands[0] || null;
+
+      const scDirectTargets = scCands.slice(0, 2).map(best => ({
+        url: best.webpageUrl,
+        isSearchPool: false,
+        trimDurationSec: maxAllowedDur,
+        useCookies: false
+      }));
+
+      const scLoopTargets = scoredLoopTier2.slice(0, 2).map(loopCand => ({
+        url: loopCand.webpageUrl,
+        isSearchPool: false,
+        trimDurationSec: loopCand.trimDurationSec,
+        useCookies: false
+      }));
+
+      const ytDirectTargets = bestYt
+        ? [
+            {
+              url: bestYt.webpageUrl,
+              isSearchPool: false,
+              trimDurationSec: maxAllowedDur,
+              useCookies: hasCookiesConfigured
+            }
+          ]
+        : [];
+
+      const minDur = expectedDurationSec ? Math.max(45, expectedDurationSec - 8) : 55;
+      const maxDur = expectedDurationSec ? expectedDurationSec + 8 : 540;
+      const searchQueryBase = sanitizeSearchQuery(
+        effectiveArtist
+          ? `${effectiveArtist} ${stripParentheticalSubtitles(effectiveTitle)}`
+          : stripParentheticalSubtitles(effectiveTitle)
+      )
+        .replace(/\s*[-–—]\s*/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+
+      const titleCoreWords = getTitleCoreTokens(effectiveTitle).slice(0, 4);
+      const biliMatchTitleRegex =
+        titleCoreWords.length > 0
+          ? `(?i)${titleCoreWords.map(w => `(?=.*${w.replace(/[^a-z0-9]/gi, '')})`).join('')}`
+          : null;
+
+      const biliTarget = {
+        url: `bilisearch5:${searchQueryBase || artistAndPrimaryTitle || artistAndCleanTitle}`,
+        isSearchPool: true,
+        minDuration: minDur,
+        maxDuration: maxDur,
+        matchTitleRegex: biliMatchTitleRegex,
+        rejectTitleRegex,
+        trimDurationSec: maxAllowedDur,
+        useCookies: false
+      };
+
+      if (hasCookiesConfigured) {
+        // With valid cookies, try YouTube #1 first, then SoundCloud 1x/loop, then Bilibili studio match
+        targets.push(...ytDirectTargets, ...scDirectTargets, ...scLoopTargets, biliTarget);
+      } else {
+        // Without cookies, prioritize SoundCloud 1x/loop and Bilibili studio match before YouTube
+        targets.push(...scDirectTargets, ...scLoopTargets, biliTarget, ...ytDirectTargets);
+      }
+
+      targets.push({
+        url: `ytsearch5:${searchQueryBase || artistAndPrimaryTitle} official audio`,
+        isSearchPool: true,
+        minDuration: minDur,
+        maxDuration: maxDur,
+        rejectTitleRegex,
+        trimDurationSec: maxAllowedDur,
+        useCookies: hasCookiesConfigured
+      });
     }
 
-    targets.push({
-      url: `ytsearch5:${searchQueryBase || artistAndPrimaryTitle} official audio`,
-      isSearchPool: true,
-      minDuration: minDur,
-      maxDuration: maxDur,
-      rejectTitleRegex,
-      trimDurationSec: maxAllowedDur,
-      useCookies: hasCookiesConfigured
-    });
-  }
+    for (const t of targets) {
+      let stepRes = null;
+      let ffmpegErr = '';
+      try {
+        cleanupRawStageFiles(downloadsDir, baseSlug);
+        stepRes = await runYtDlpAttempt(
+          t.url,
+          rawOutputTemplate,
+          { ...t, useCookies: Boolean(t.useCookies) },
+          pct => updateProg(Math.round(24 + pct * 0.66))
+        );
 
-  for (const t of targets) {
-    const res = await runYtDlpAttempt(
-      t.url,
-      tempOutputTemplate,
-      { ...t, useCookies: Boolean(t.useCookies) },
-      updateProg
-    );
-    const finalized = finalizeDownloadedMp3(
-      downloadsDir,
-      baseSlug,
-      expectedMp3Path,
-      expectedDurationSec
-    );
-    if (finalized.valid && finalized.filePath && fs.existsSync(finalized.filePath)) {
-      console.log(`[download] OK: ${finalized.filename} <- ${t.url}`);
-      enforceStorageQuota();
-      scheduleFileCleanup(finalized.filePath, 90000);
-      item.status = 'ready';
-      item.progress = 100;
-      item.filename = finalized.filename;
-      return;
+        const rawFilePath = findRawStageFile(downloadsDir, baseSlug, stepRes?.filepath);
+        if (rawFilePath) {
+          updateProg(92);
+          const postRes = await runFfmpegPostProcess(rawFilePath, expectedM4aPath, {
+            acodec: stepRes?.acodec,
+            trimDurationSec: t.trimDurationSec,
+            title: metaTitle,
+            artist: metaArtist,
+            album: metaAlbum
+          });
+          if (!postRes.ok) {
+            ffmpegErr = postRes.error || '';
+          }
+        }
+      } finally {
+        cleanupRawStageFiles(downloadsDir, baseSlug);
+      }
+
+      const finalized = finalizeDownloadedMp3(
+        downloadsDir,
+        baseSlug,
+        expectedM4aPath,
+        expectedDurationSec
+      );
+      if (finalized.valid && finalized.filePath && fs.existsSync(finalized.filePath)) {
+        console.log(`[download] OK: ${finalized.filename} <- ${t.url}`);
+        enforceStorageQuota();
+        scheduleFileCleanup(finalized.filePath, 90000);
+        item.status = 'ready';
+        item.progress = 100;
+        item.filename = finalized.filename;
+        return;
+      }
+      const lastErrLine = String(ffmpegErr || stepRes?.error || '')
+        .split(/\r?\n/)
+        .map(l => l.trim())
+        .filter(Boolean)
+        .pop();
+      console.warn(
+        `[download] skip ${t.url} (code=${stepRes?.code ?? 'err'}): ${lastErrLine || 'no valid audio'}`
+      );
     }
-    const lastErrLine = String(res?.error || '')
-      .split(/\r?\n/)
-      .map(l => l.trim())
-      .filter(Boolean)
-      .pop();
-    console.warn(
-      `[download] skip ${t.url} (code=${res?.code ?? 'err'}): ${lastErrLine || 'no valid mp3'}`
-    );
-  }
 
-  enforceStorageQuota();
-  item.status = 'error';
-  item.error = 'No se encontró versión original completa de esta pista.';
+    enforceStorageQuota();
+    item.status = 'error';
+    item.error = 'No se encontró versión original completa de esta pista.';
+  } finally {
+    cleanupRawStageFiles(downloadsDir, baseSlug);
+    unregisterActiveRawJob(baseSlug);
+  }
 }
 
 export async function POST(request) {

@@ -17,7 +17,9 @@ export async function GET(request) {
 
     const files = fs
       .readdirSync(downloadsDir)
-      .filter(f => f.endsWith('.mp3') || f.endsWith('.m4a') || f.endsWith('.opus'))
+      .filter(
+        f => !f.includes('.raw.') && (f.endsWith('.mp3') || f.endsWith('.m4a') || f.endsWith('.opus'))
+      )
       .map(name => {
         const filePath = path.join(downloadsDir, name);
         const stat = fs.statSync(filePath);
