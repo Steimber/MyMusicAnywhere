@@ -6,7 +6,7 @@ import { NoSleepController } from '../lib/nosleep';
 import { buildSmartShuffleOrder, getShuffleTrackKey } from '../lib/shuffle';
 
 const AUDIO_CACHE_NAME = 'my-music-offline-audio-v1';
-const SHELL_CACHE_NAME = 'mymusic-shell-v19';
+const SHELL_CACHE_NAME = 'mymusic-shell-v20';
 const DEFAULT_TRACK_COVER = '/icon.svg?v=3';
 const USER_STORAGE_KEY = 'mma_cached_user_v1';
 const LIKES_STORAGE_KEY = 'mma_liked_tracks_v1';
@@ -3104,23 +3104,18 @@ export default function HomePage() {
   function renderSimultaneousDownloadsBanner() {
     if (totalActiveDownloads === 0) return null;
     const activeSlots = activeDownloadEntries.slice(0, MAX_SIMULTANEOUS_DOWNLOADS);
+    const queueLabel =
+      syncingAll && syncProgress.total > 0
+        ? `${syncProgress.done}/${syncProgress.total} · ${simultaneousActiveCount}/${MAX_SIMULTANEOUS_DOWNLOADS}`
+        : queuedWaitingCount > 0
+        ? `${simultaneousActiveCount}/${MAX_SIMULTANEOUS_DOWNLOADS} (+${queuedWaitingCount})`
+        : `${simultaneousActiveCount}/${MAX_SIMULTANEOUS_DOWNLOADS}`;
     return (
       <div className="sim-download-bar" role="status" aria-live="polite">
-        <div className="sim-download-head">
-          <span className="sim-download-badge">
-            <Icon name="loader" size={12} className="spin" />
-            <span>
-              {simultaneousActiveCount}/{MAX_SIMULTANEOUS_DOWNLOADS} simultáneas
-            </span>
-          </span>
-          <span className="sim-download-summary">
-            {queuedWaitingCount > 0
-              ? `Descargando ${simultaneousActiveCount} a la vez · ${queuedWaitingCount} en espera`
-              : syncingAll && syncProgress.total > 0
-              ? `Cola ${syncProgress.done}/${syncProgress.total} · Máx. ${MAX_SIMULTANEOUS_DOWNLOADS} a la vez`
-              : `Descargando ${simultaneousActiveCount} de ${MAX_SIMULTANEOUS_DOWNLOADS} posibles a la vez`}
-          </span>
-        </div>
+        <span className="sim-download-badge">
+          <Icon name="loader" size={12} className="spin" />
+          <span>{queueLabel}</span>
+        </span>
         <div className="sim-download-slots">
           {activeSlots.map(([key, dl]) => {
             const title = dl.trackMeta?.title || dl.title || 'Canción';
