@@ -1,12 +1,27 @@
 const STATIC_CACHE = 'mymusic-shell-v13';
 const AUDIO_CACHE = 'my-music-offline-audio-v1';
 
+function inferAudioMimeFromUrl(reqUrl, cachedResponse) {
+  const existing = cachedResponse && cachedResponse.headers && cachedResponse.headers.get('Content-Type');
+  if (existing) return existing;
+  try {
+    const u = new URL(reqUrl, self.location.origin);
+    const file = (u.searchParams.get('file') || u.pathname || '').toLowerCase();
+    if (file.endsWith('.m4a')) return 'audio/mp4';
+    if (file.endsWith('.opus')) return 'audio/ogg';
+    if (file.endsWith('.wav')) return 'audio/wav';
+    if (file.endsWith('.flac')) return 'audio/flac';
+  } catch {}
+  return 'audio/mpeg';
+}
+
 async function serveCachedAudioWithRange(request, cachedResponse) {
   const rangeHeader = request.headers.get('range');
+  const resolvedMime = inferAudioMimeFromUrl(request.url, cachedResponse);
   if (!rangeHeader) {
     const headers = new Headers(cachedResponse.headers);
     headers.set('Accept-Ranges', 'bytes');
-    if (!headers.get('Content-Type')) headers.set('Content-Type', 'audio/mpeg');
+    if (!headers.get('Content-Type')) headers.set('Content-Type', resolvedMime);
     return new Response(cachedResponse.body, {
       status: 200,
       statusText: 'OK',
@@ -34,7 +49,7 @@ async function serveCachedAudioWithRange(request, cachedResponse) {
       status: 206,
       statusText: 'Partial Content',
       headers: {
-        'Content-Type': cachedResponse.headers.get('Content-Type') || 'audio/mpeg',
+        'Content-Type': resolvedMime,
         'Content-Length': String(sliced.byteLength),
         'Content-Range': `bytes ${start}-${end}/${total}`,
         'Accept-Ranges': 'bytes',

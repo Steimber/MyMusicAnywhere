@@ -1147,11 +1147,11 @@ function runYtDlpAttempt(target, outputTemplate, options, onProgress) {
 function finalizeDownloadedMp3(downloadsDir, baseSlug, expectedMp3Path, expectedDurationSec = null) {
   try {
     const files = fs.readdirSync(downloadsDir);
-    const candidateName = files.find(
-      f => f.startsWith(`${baseSlug}__`) && f.toLowerCase().endsWith('.mp3')
-    );
+    const candidateName =
+      files.find(f => f.startsWith(`${baseSlug}__`) && f.toLowerCase().endsWith('.m4a')) ||
+      files.find(f => f.startsWith(`${baseSlug}__`) && f.toLowerCase().endsWith('.mp3'));
 
-    // Clean up any leftover non-mp3 temp artifacts from failed attempts for this slug
+    // Clean up any leftover temp artifacts from failed attempts for this slug
     for (const f of files) {
       if (f.startsWith(`${baseSlug}__`) && f !== candidateName) {
         try {
@@ -1161,8 +1161,16 @@ function finalizeDownloadedMp3(downloadsDir, baseSlug, expectedMp3Path, expected
     }
 
     if (!candidateName) {
-      return fs.existsSync(expectedMp3Path);
+      const existingM4a = path.join(downloadsDir, `${baseSlug}.m4a`);
+      if (fs.existsSync(existingM4a)) {
+        return { valid: true, filename: `${baseSlug}.m4a`, filePath: existingM4a };
+      }
+      if (expectedMp3Path && fs.existsSync(expectedMp3Path)) {
+        return { valid: true, filename: path.basename(expectedMp3Path), filePath: expectedMp3Path };
+      }
+      return { valid: false, filename: null, filePath: null };
     }
+
     const candidatePath = path.join(downloadsDir, candidateName);
     const stat = fs.statSync(candidatePath);
     const minValidBytes = expectedDurationSec
@@ -1173,18 +1181,29 @@ function finalizeDownloadedMp3(downloadsDir, baseSlug, expectedMp3Path, expected
       try {
         fs.unlinkSync(candidatePath);
       } catch {}
-      return false;
+      return { valid: false, filename: null, filePath: null };
     }
 
-    if (fs.existsSync(expectedMp3Path)) {
+    const ext = path.extname(candidateName).toLowerCase() || '.m4a';
+    const finalFilename = `${baseSlug}${ext}`;
+    const finalFilePath = path.join(downloadsDir, finalFilename);
+
+    if (fs.existsSync(finalFilePath)) {
       try {
-        fs.unlinkSync(expectedMp3Path);
+        fs.unlinkSync(finalFilePath);
       } catch {}
     }
-    fs.renameSync(candidatePath, expectedMp3Path);
-    return true;
+    fs.renameSync(candidatePath, finalFilePath);
+    return { valid: true, filename: finalFilename, filePath: finalFilePath };
   } catch {
-    return fs.existsSync(expectedMp3Path);
+    const existingM4a = path.join(downloadsDir, `${baseSlug}.m4a`);
+    if (fs.existsSync(existingM4a)) {
+      return { valid: true, filename: `${baseSlug}.m4a`, filePath: existingM4a };
+    }
+    if (expectedMp3Path && fs.existsSync(expectedMp3Path)) {
+      return { valid: true, filename: path.basename(expectedMp3Path), filePath: expectedMp3Path };
+    }
+    return { valid: false, filename: null, filePath: null };
   }
 }
 
@@ -1392,19 +1411,19 @@ async function runExtractionPipeline(downloadId, rawQuery, downloadsDir, baseSlu
       { ...t, useCookies: Boolean(t.useCookies) },
       updateProg
     );
-    const valid = finalizeDownloadedMp3(
+    const finalized = finalizeDownloadedMp3(
       downloadsDir,
       baseSlug,
       expectedMp3Path,
       expectedDurationSec
     );
-    if (valid && fs.existsSync(expectedMp3Path)) {
-      console.log(`[download] OK: ${expectedMp3Name} <- ${t.url}`);
+    if (finalized.valid && finalized.filePath && fs.existsSync(finalized.filePath)) {
+      console.log(`[download] OK: ${finalized.filename} <- ${t.url}`);
       enforceStorageQuota();
-      scheduleFileCleanup(expectedMp3Path, 90000);
+      scheduleFileCleanup(finalized.filePath, 90000);
       item.status = 'ready';
       item.progress = 100;
-      item.filename = expectedMp3Name;
+      item.filename = finalized.filename;
       return;
     }
     const lastErrLine = String(res?.error || '')

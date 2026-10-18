@@ -1740,8 +1740,8 @@ export default function HomePage() {
             );
             if (!exists) {
               const cleanTitle = item.filename
-                .replace(/_\d+\.mp3$/i, '')
-                .replace(/\.mp3$/i, '')
+                .replace(/_\d+\.(mp3|m4a|opus|wav|flac)$/i, '')
+                .replace(/\.(mp3|m4a|opus|wav|flac)$/i, '')
                 .replace(/_/g, ' ');
               next.unshift({
                 id: `offline_${item.filename}`,
@@ -1833,17 +1833,25 @@ export default function HomePage() {
   async function exportTrackFile(filename, streamUrl) {
     if (typeof window === 'undefined') return;
     const url = streamUrl || `/api/stream?file=${encodeURIComponent(filename)}`;
+    let resolvedFilename = filename;
+    if (!resolvedFilename && url) {
+      try {
+        resolvedFilename = new URL(url, window.location.origin).searchParams.get('file');
+      } catch {}
+    }
     if ('caches' in window) {
       try {
         const cache = await getOpenAudioCache();
         const fullUrl = new URL(url, window.location.origin).href;
         const cachedResp = cache ? (await cache.match(url)) || (await cache.match(fullUrl)) : null;
         if (cachedResp) {
+          const contentType = (cachedResp.headers.get('Content-Type') || '').toLowerCase();
+          const defaultExt = contentType.includes('mp4') ? '.m4a' : '.mp3';
           const blob = await cachedResp.blob();
           const blobUrl = URL.createObjectURL(blob);
           const a = document.createElement('a');
           a.href = blobUrl;
-          a.download = filename || 'track.mp3';
+          a.download = resolvedFilename || `track${defaultExt}`;
           document.body.appendChild(a);
           a.click();
           setTimeout(() => {
@@ -1856,7 +1864,7 @@ export default function HomePage() {
     }
     const a = document.createElement('a');
     a.href = `${url}&download=1`;
-    a.download = filename || 'track.mp3';
+    a.download = resolvedFilename || 'track.m4a';
     document.body.appendChild(a);
     a.click();
     setTimeout(() => document.body.removeChild(a), 1000);

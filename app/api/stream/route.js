@@ -2,6 +2,19 @@ import fs from 'fs';
 import path from 'path';
 import { getDownloadsDir, getSessionUser, scheduleFileCleanup } from '../../../lib/store';
 
+const AUDIO_MIME_BY_EXT = {
+  '.mp3': 'audio/mpeg',
+  '.m4a': 'audio/mp4',
+  '.opus': 'audio/ogg',
+  '.wav': 'audio/wav',
+  '.flac': 'audio/flac'
+};
+
+function getAudioMimeType(filename) {
+  const ext = path.extname(String(filename || '')).toLowerCase();
+  return AUDIO_MIME_BY_EXT[ext] || 'audio/mpeg';
+}
+
 export async function GET(request) {
   const user = getSessionUser(request);
   if (!user) {
@@ -31,7 +44,7 @@ export async function GET(request) {
   const range = request.headers.get('range');
 
   const headers = {
-    'Content-Type': 'audio/mpeg',
+    'Content-Type': getAudioMimeType(cleanFile),
     'Accept-Ranges': 'bytes',
     'Content-Length': stat.size
   };
