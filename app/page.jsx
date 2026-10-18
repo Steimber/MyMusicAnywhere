@@ -6,7 +6,7 @@ import { NoSleepController } from '../lib/nosleep';
 import { buildSmartShuffleOrder, getShuffleTrackKey } from '../lib/shuffle';
 
 const AUDIO_CACHE_NAME = 'my-music-offline-audio-v1';
-const SHELL_CACHE_NAME = 'mymusic-shell-v21';
+const SHELL_CACHE_NAME = 'mymusic-shell-v22';
 const DEFAULT_TRACK_COVER = '/icon.svg?v=3';
 const USER_STORAGE_KEY = 'mma_cached_user_v1';
 const LIKES_STORAGE_KEY = 'mma_liked_tracks_v1';
@@ -1164,6 +1164,9 @@ export default function HomePage() {
           : track.streamUrl || null
       };
       persistLikes([entry, ...likedTracks]);
+      if (isPlaceholderCover(entry.artwork)) {
+        syncMissingCoversForList([entry], false);
+      }
     }
   }
 
@@ -1179,6 +1182,9 @@ export default function HomePage() {
       const updatedPl = { ...existingPl, tracks: mergedTracks };
       const next = customPlaylists.map(p => (p.id === existingPl.id ? updatedPl : p));
       persistCustomPlaylists(next);
+      if (dedupedInitial.some(t => isPlaceholderCover(t?.artwork))) {
+        syncMissingCoversForList(dedupedInitial, false);
+      }
       return updatedPl;
     }
     const newPl = {
@@ -1189,6 +1195,9 @@ export default function HomePage() {
     };
     const next = [...customPlaylists, newPl];
     persistCustomPlaylists(next);
+    if (dedupedInitial.some(t => isPlaceholderCover(t?.artwork))) {
+      syncMissingCoversForList(dedupedInitial, false);
+    }
     return newPl;
   }
 
@@ -1213,9 +1222,11 @@ export default function HomePage() {
         : track.streamUrl || null
     };
 
+    let addedNew = false;
     const next = customPlaylists.map(pl => {
       if (pl.id !== playlistId) return pl;
       const exists = pl.tracks.some(t => String(t.id) === String(track.id));
+      if (!exists) addedNew = true;
       return {
         ...pl,
         tracks: exists
@@ -1224,6 +1235,9 @@ export default function HomePage() {
       };
     });
     persistCustomPlaylists(next);
+    if (addedNew && isPlaceholderCover(preparedTrack.artwork)) {
+      syncMissingCoversForList([preparedTrack], false);
+    }
   }
 
   function removeTrackFromPlaylist(playlistId, trackId) {
@@ -1672,28 +1686,6 @@ export default function HomePage() {
       setCoverSync({ active: false, done: 0, total: 0 });
     }
   }
-
-  useEffect(() => {
-    if (!user || isOffline || enrichingBusyRef.current) return;
-    const activePl = customPlaylists.find(p => p.id === selectedLibrary);
-    const pool = [
-      ...(activePl ? activePl.tracks : []),
-      ...likedTracks,
-      ...offlineCatalog,
-      ...customPlaylists.flatMap(p => p.tracks || [])
-    ];
-    const missing = pool.filter(
-      t =>
-        t &&
-        t.id &&
-        t.title &&
-        isPlaceholderCover(t.artwork) &&
-        !enrichedArtworkRef.current.has(String(t.id))
-    );
-    if (missing.length > 0) {
-      syncMissingCoversForList(missing, false);
-    }
-  }, [user, isOffline, selectedLibrary, likedTracks.length, customPlaylists.length]);
 
   function getOpenAudioCache() {
     if (typeof window === 'undefined' || !('caches' in window)) return Promise.resolve(null);
@@ -2665,6 +2657,9 @@ export default function HomePage() {
         text: `Listo: se guardaron ${filtered.length} canciones nuevas en Favoritos (${freshTracks.length - filtered.length} duplicadas omitidas).`
       });
       closeSpotifyImportModal();
+      if (filtered.some(t => isPlaceholderCover(t?.artwork))) {
+        syncMissingCoversForList(filtered, false);
+      }
       return;
     }
 
@@ -2697,6 +2692,9 @@ export default function HomePage() {
         text: `Listo: se guardaron ${filtered.length} canciones nuevas en «${targetPl.name}» (${freshTracks.length - filtered.length} duplicadas omitidas).`
       });
       closeSpotifyImportModal();
+      if (filtered.some(t => isPlaceholderCover(t?.artwork))) {
+        syncMissingCoversForList(filtered, false);
+      }
     }
   }
 
