@@ -7,7 +7,8 @@
     "dev": "next dev -H 0.0.0.0 -p 3333",
     "build": "next build",
     "start": "next start -H 0.0.0.0 -p 3333",
-    "test": "node --test tests/*.test.mjs"
+    "test": "node --test tests/*.test.mjs",
+    "check:secrets": "bash scripts/check-secrets.sh"
   },
   "dependencies": {
     "lucide-react": "^0.453.0",
