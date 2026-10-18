@@ -4,13 +4,13 @@ import { useState, useEffect, useRef, useMemo } from 'react';
 import { NoSleepController } from '../lib/nosleep';
 
 const AUDIO_CACHE_NAME = 'my-music-offline-audio-v1';
-const SHELL_CACHE_NAME = 'mymusic-shell-v13';
+const SHELL_CACHE_NAME = 'mymusic-shell-v14';
 const DEFAULT_TRACK_COVER = '/icon.svg?v=3';
 const USER_STORAGE_KEY = 'mma_cached_user_v1';
 const LIKES_STORAGE_KEY = 'mma_liked_tracks_v1';
 const OFFLINE_CATALOG_KEY = 'mma_offline_catalog_v1';
 const PLAYLISTS_STORAGE_KEY = 'mma_custom_playlists_v1';
-const MAX_SIMULTANEOUS_DOWNLOADS = 2;
+const MAX_SIMULTANEOUS_DOWNLOADS = 4;
 
 function isPlaceholderCover(rawUrl) {
   if (!rawUrl || typeof rawUrl !== 'string') return true;

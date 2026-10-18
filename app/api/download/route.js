@@ -2072,6 +2072,32 @@ async function runExtractionPipeline(
     }
     cleanupRawStageFiles(downloadsDir, baseSlug);
     unregisterActiveRawJob(baseSlug);
+    scheduleActiveDownloadCleanup(downloadId);
+  }
+}
+
+const ACTIVE_DOWNLOAD_TTL_MS = 10 * 60 * 1000; // 10 minutes after finishing
+const MAX_ACTIVE_DOWNLOAD_ENTRIES = 1000;
+
+function scheduleActiveDownloadCleanup(downloadId, delayMs = ACTIVE_DOWNLOAD_TTL_MS) {
+  const timer = setTimeout(() => {
+    const entry = activeDownloads.get(downloadId);
+    if (entry && entry.status !== 'downloading') {
+      activeDownloads.delete(downloadId);
+    }
+  }, delayMs);
+  if (typeof timer?.unref === 'function') {
+    timer.unref();
+  }
+}
+
+function pruneFinishedActiveDownloadsIfNeeded() {
+  if (activeDownloads.size < MAX_ACTIVE_DOWNLOAD_ENTRIES) return;
+  for (const [key, val] of activeDownloads.entries()) {
+    if (val.status !== 'downloading') {
+      activeDownloads.delete(key);
+      if (activeDownloads.size < MAX_ACTIVE_DOWNLOAD_ENTRIES) break;
+    }
   }
 }
 
@@ -2107,6 +2133,7 @@ export async function POST(request) {
     const downloadId = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
     const baseSlug = `${sanitizeSlug(`${data.artist || ''} ${data.title || rawQuery}`)}_${downloadId}`;
 
+    pruneFinishedActiveDownloadsIfNeeded();
     activeDownloads.set(downloadId, {
       id: downloadId,
       userId: user.id,
@@ -2135,6 +2162,7 @@ export async function POST(request) {
         item.status = 'error';
         item.error = err.message;
       }
+      scheduleActiveDownloadCleanup(downloadId);
     });
 
     return NextResponse.json({
