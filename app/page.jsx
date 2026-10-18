@@ -6,7 +6,7 @@ import { NoSleepController } from '../lib/nosleep';
 import { buildSmartShuffleOrder, getShuffleTrackKey } from '../lib/shuffle';
 
 const AUDIO_CACHE_NAME = 'my-music-offline-audio-v1';
-const SHELL_CACHE_NAME = 'mymusic-shell-v20';
+const SHELL_CACHE_NAME = 'mymusic-shell-v21';
 const DEFAULT_TRACK_COVER = '/icon.svg?v=3';
 const USER_STORAGE_KEY = 'mma_cached_user_v1';
 const LIKES_STORAGE_KEY = 'mma_liked_tracks_v1';
@@ -3650,12 +3650,6 @@ export default function HomePage() {
         </nav>
 
         <div className="topbar-right">
-          {isOffline && (
-            <span className="badge lavender" title="Sin conexión a internet">
-              <Icon name="wifi-off" size={12} /> Offline
-            </span>
-          )}
-
           <div className="account" ref={accountRef}>
             <button
               type="button"
