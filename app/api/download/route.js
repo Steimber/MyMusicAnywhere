@@ -54,18 +54,24 @@ function getUserQueuedCount(userId) {
 
 function pumpNetQueue() {
   while (pools.netRunning < MAX_NET_DOWNLOADS && pools.netTurnOrder.length > 0) {
+    for (let i = pools.netTurnOrder.length - 1; i >= 0; i--) {
+      const uid = pools.netTurnOrder[i];
+      const q = pools.netQueuesByUser.get(uid);
+      if (!q || q.length === 0) {
+        pools.netQueuesByUser.delete(uid);
+        pools.netTurnOrder.splice(i, 1);
+      }
+    }
+    if (pools.netTurnOrder.length === 0) break;
+
+    const effectiveMaxPerUser =
+      pools.netTurnOrder.length === 1 ? MAX_NET_DOWNLOADS : MAX_PER_USER;
+
     let pickedIndex = -1;
     for (let i = 0; i < pools.netTurnOrder.length; i++) {
       const candidateUid = pools.netTurnOrder[i];
-      const q = pools.netQueuesByUser.get(candidateUid);
-      if (!q || q.length === 0) {
-        pools.netQueuesByUser.delete(candidateUid);
-        pools.netTurnOrder.splice(i, 1);
-        i -= 1;
-        continue;
-      }
       const userActive = pools.netActiveByUser.get(candidateUid) || 0;
-      if (userActive < MAX_PER_USER) {
+      if (userActive < effectiveMaxPerUser) {
         pickedIndex = i;
         break;
       }
@@ -807,17 +813,27 @@ const CORE_ALTERED_AUDIO_TERMS = [
   'tiktok'
 ];
 
-function scoreCandidate(cand, ctx) {
+function evaluateCandidate(cand, ctx) {
   const dur = Number(cand.duration);
-  if (!dur || isNaN(dur) || dur < 45 || dur > 900) {
-    return -1;
+  const extractorLower = String(cand.extractor || '').toLowerCase();
+  if (!dur || isNaN(dur)) {
+    return { score: -1, reason: 'no_duration' };
+  }
+  if (extractorLower.includes('soundcloud') && dur >= 28 && dur <= 32) {
+    return { score: -1, reason: `sc_drm_preview_30s(${Math.round(dur)}s)` };
+  }
+  if (dur < 45 || dur > 900) {
+    return { score: -1, reason: `duration_bounds(${Math.round(dur)}s)` };
   }
 
   let durDiff = 0;
   if (ctx.expectedDurationSec && ctx.expectedDurationSec >= 50) {
     durDiff = Math.abs(dur - ctx.expectedDurationSec);
     if (durDiff > 20) {
-      return -1;
+      return {
+        score: -1,
+        reason: `duration_diff(${Math.round(dur)}s vs ${ctx.expectedDurationSec}s)`
+      };
     }
   }
 
@@ -855,13 +871,13 @@ function scoreCandidate(cand, ctx) {
   for (const term of bannedTerms) {
     if (ctx.rawTitleLower.includes(term) || ctx.rawArtistLower.includes(term)) continue;
     if (combinedLower.includes(term)) {
-      return -1;
+      return { score: -1, reason: `banned_term(${term.trim()})` };
     }
   }
 
   // Reject cover bands that credit the original artist via "(by Beatles)"
   if (/\(\s*by\s+[^)]+\)/i.test(cand.title || '')) {
-    return -1;
+    return { score: -1, reason: 'by_credit_cover' };
   }
 
   const candTitleNorm = normalizeText(cand.title);
@@ -872,7 +888,7 @@ function scoreCandidate(cand, ctx) {
 
   // Verify title matches primary title OR any official parenthetical/catalog alternate title
   if (!candidateMatchesAnyTitleGroup(candTitleWordSet, candTitleNorm, ctx)) {
-    return -1;
+    return { score: -1, reason: 'title_mismatch' };
   }
 
   // Verify artist match with strict word boundary (so "thejukebox" doesn't count as "the")
@@ -890,7 +906,7 @@ function scoreCandidate(cand, ctx) {
     if (parenMatch) {
       const parenNorm = normalizeText(parenMatch[1]);
       if (ctx.artistTokens.some(t => parenNorm.includes(t))) {
-        return -1;
+        return { score: -1, reason: 'paren_artist_cover' };
       }
     }
   }
@@ -899,17 +915,22 @@ function scoreCandidate(cand, ctx) {
   const foreignTitleWords = candTitleWords.filter(
     w => w.length >= 3 && !/^\d+$/.test(w) && !ctx.allowedWords.has(w)
   );
-  const extractorLower = String(cand.extractor || '').toLowerCase();
 
   // On SoundCloud, when the official artist track is a 30s Go+ preview, random users often upload
   // unlabeled home covers (14-18s off studio duration) or festival bootlegs ("Glastonbury 2019", "Deichbrand 2019").
   // For non-artist SoundCloud uploaders, require studio duration within ±8s and 0 unknown foreign words.
   if (extractorLower.includes('soundcloud') && !uploaderMatchesArtist) {
     if (ctx.expectedDurationSec && durDiff > 8) {
-      return -1;
+      return {
+        score: -1,
+        reason: `sc_non_uploader_dur_diff(${Math.round(durDiff)}s>8s)`
+      };
     }
     if (foreignTitleWords.length > 0) {
-      return -1;
+      return {
+        score: -1,
+        reason: `sc_non_uploader_foreign_words(${foreignTitleWords.slice(0, 3).join(',')})`
+      };
     }
   }
 
@@ -918,13 +939,19 @@ function scoreCandidate(cand, ctx) {
   const maxForeignForNonUploader =
     artistMatched && ctx.expectedDurationSec && durDiff <= 10 ? 2 : 1;
   if (!uploaderMatchesArtist && foreignTitleWords.length > maxForeignForNonUploader) {
-    return -1;
+    return {
+      score: -1,
+      reason: `foreign_words(${foreignTitleWords.slice(0, 3).join(',')}>${maxForeignForNonUploader})`
+    };
   }
 
   // If neither uploader nor title mentions the artist, only allow when duration matches within ±4s with 0 foreign title words
   if (ctx.artistTokens.length > 0 && !artistMatched) {
     if (!ctx.expectedDurationSec || durDiff > 4 || foreignTitleWords.length > 0) {
-      return -1;
+      return {
+        score: -1,
+        reason: `artist_mismatch(durDiff=${Math.round(durDiff)}s,foreign=${foreignTitleWords.length})`
+      };
     }
   }
 
@@ -971,7 +998,11 @@ function scoreCandidate(cand, ctx) {
     score += 10;
   }
 
-  return score;
+  return { score, reason: 'ok' };
+}
+
+function scoreCandidate(cand, ctx) {
+  return evaluateCandidate(cand, ctx).score;
 }
 
 // Smart detector for anti-copyright looped uploads on SoundCloud (e.g. "Intruso - Enjambre" uploaded as 3x = 608.4s).
@@ -1046,6 +1077,44 @@ function scoreLoopCandidate(cand, ctx) {
     score: Math.round(90 - cycleDiff * 3 - repeatCount * 2 - foreignWords.length * 8),
     trimDurationSec
   };
+}
+
+function evaluateCandidatePool(rawCandidates, ctx, sourceLabel, queryLabel) {
+  const tier1 = [];
+  const loopTier2 = [];
+  const rejections = [];
+
+  for (const c of rawCandidates) {
+    const evalRes = evaluateCandidate(c, ctx);
+    if (evalRes.score >= 0) {
+      tier1.push({ ...c, score: evalRes.score });
+      continue;
+    }
+    const loopInfo = scoreLoopCandidate(c, ctx);
+    if (loopInfo) {
+      loopTier2.push({ ...c, ...loopInfo });
+      continue;
+    }
+    const shortTitle = String(c.title || '').slice(0, 38);
+    rejections.push(`${evalRes.reason}["${shortTitle}"]`);
+  }
+
+  tier1.sort((a, b) => b.score - a.score);
+  loopTier2.sort((a, b) => b.score - a.score);
+
+  if (rawCandidates.length === 0) {
+    console.log(`[search-filter] ${sourceLabel} "${queryLabel}": 0 raw results returned by yt-dlp`);
+  } else if (tier1.length === 0 && loopTier2.length === 0) {
+    console.warn(
+      `[search-filter] ${sourceLabel} "${queryLabel}": 0/${rawCandidates.length} accepted | rejected: ${rejections.slice(0, 6).join('; ')}`
+    );
+  } else if (rejections.length > 0) {
+    console.log(
+      `[search-filter] ${sourceLabel} "${queryLabel}": ${tier1.length}+${loopTier2.length}loop/${rawCandidates.length} accepted | rejected: ${rejections.slice(0, 4).join('; ')}`
+    );
+  }
+
+  return { tier1, loopTier2 };
 }
 
 function discoverCandidatesFromSearch(searchQueries, timeoutMs = 10000) {
@@ -1478,11 +1547,14 @@ function finalizeDownloadedMp3(downloadsDir, baseSlug, expectedAudioPath, expect
     ? Math.max(380 * 1024, Math.min(1050 * 1024, Math.round(expectedDurationSec * 6200)))
     : 380 * 1024;
 
+  let lastRejectReason = null;
+
   const validateExistingAudio = filePath => {
     try {
       if (!filePath || !fs.existsSync(filePath)) return null;
       const stat = fs.statSync(filePath);
       if (stat.size <= minValidBytes) {
+        lastRejectReason = `final_size_too_small(${stat.size}B<=${minValidBytes}B)`;
         try {
           fs.unlinkSync(filePath);
         } catch {}
@@ -1491,7 +1563,8 @@ function finalizeDownloadedMp3(downloadsDir, baseSlug, expectedAudioPath, expect
       return {
         valid: true,
         filename: path.basename(filePath),
-        filePath
+        filePath,
+        reason: null
       };
     } catch {
       return null;
@@ -1518,16 +1591,17 @@ function finalizeDownloadedMp3(downloadsDir, baseSlug, expectedAudioPath, expect
       if (checkedM4a) return checkedM4a;
       const checkedExpected = validateExistingAudio(expectedAudioPath);
       if (checkedExpected) return checkedExpected;
-      return { valid: false, filename: null, filePath: null };
+      return { valid: false, filename: null, filePath: null, reason: lastRejectReason };
     }
 
     const candidatePath = path.join(downloadsDir, candidateName);
     const stat = fs.statSync(candidatePath);
     if (stat.size <= minValidBytes) {
+      lastRejectReason = `final_size_too_small(${stat.size}B<=${minValidBytes}B)`;
       try {
         fs.unlinkSync(candidatePath);
       } catch {}
-      return { valid: false, filename: null, filePath: null };
+      return { valid: false, filename: null, filePath: null, reason: lastRejectReason };
     }
 
     const ext = path.extname(candidateName).toLowerCase() || '.m4a';
@@ -1540,13 +1614,13 @@ function finalizeDownloadedMp3(downloadsDir, baseSlug, expectedAudioPath, expect
       } catch {}
     }
     fs.renameSync(candidatePath, finalFilePath);
-    return { valid: true, filename: finalFilename, filePath: finalFilePath };
+    return { valid: true, filename: finalFilename, filePath: finalFilePath, reason: null };
   } catch {
     const checkedM4a = validateExistingAudio(path.join(downloadsDir, `${baseSlug}.m4a`));
     if (checkedM4a) return checkedM4a;
     const checkedExpected = validateExistingAudio(expectedAudioPath);
     if (checkedExpected) return checkedExpected;
-    return { valid: false, filename: null, filePath: null };
+    return { valid: false, filename: null, filePath: null, reason: lastRejectReason };
   }
 }
 
@@ -1592,6 +1666,48 @@ async function runExtractionPipeline(
     let metaTitle = cleanTitle;
     let metaArtist = primaryArtist || String(item.artist || '').trim();
     let metaAlbum = String(item.album || '').trim();
+    let discoveryCtx = null;
+    let maxAllowedDur = null;
+    const hasCookiesConfigured = Boolean(getYtCookiesFilePath());
+    let ytDiscoveryQueries = [];
+    let scDiscoveryQueries = [];
+    let queryLabel = '';
+
+    const buildScTargetsFromPool = scPool => {
+      const scDirectTargets = scPool.tier1.slice(0, 2).map(best => ({
+        url: best.webpageUrl,
+        isSearchPool: false,
+        trimDurationSec: maxAllowedDur,
+        useCookies: false
+      }));
+      const scLoopTargets = scPool.loopTier2.slice(0, 2).map(loopCand => ({
+        url: loopCand.webpageUrl,
+        isSearchPool: false,
+        trimDurationSec: loopCand.trimDurationSec,
+        useCookies: false
+      }));
+      return [...scDirectTargets, ...scLoopTargets];
+    };
+
+    const buildYtTargetsFromPool = ytPool => {
+      const ytCands = ytPool.tier1;
+      const bestYtNonTopic = ytCands.find(
+        c => !String(c.uploader || '').toLowerCase().endsWith('- topic')
+      );
+      const orderedYt = [];
+      if (bestYtNonTopic) orderedYt.push(bestYtNonTopic);
+      for (const c of ytCands) {
+        if (!orderedYt.some(existing => existing.webpageUrl === c.webpageUrl)) {
+          orderedYt.push(c);
+        }
+      }
+      return orderedYt.slice(0, 2).map(best => ({
+        url: best.webpageUrl,
+        isSearchPool: false,
+        trimDurationSec: maxAllowedDur,
+        useCookies: hasCookiesConfigured
+      }));
+    };
 
     if (/^https?:\/\//i.test(rawQuery)) {
       if (!isAllowedMediaUrl(rawQuery)) {
@@ -1616,28 +1732,35 @@ async function runExtractionPipeline(
         return;
       }
 
-      // Step 0 & Step 1 in parallel: Resolve canonical duration + official title/artist/album words from iTunes/Deezer
-      // while simultaneously running SoundCloud and YouTube candidate discovery in SEPARATE parallel processes
-      // so a slow/throttled YouTube search can never delay or starve SoundCloud discovery!
-      const ytDiscoveryQueries = [
-        `ytsearch6:${artistAndPrimaryTitle || artistAndCleanTitle} official audio`
-      ];
-      const scDiscoveryQueries = [
-        `scsearch15:${artistAndPrimaryTitle || artistAndCleanTitle}`
-      ];
+      queryLabel = artistAndPrimaryTitle || artistAndCleanTitle;
+      ytDiscoveryQueries = [`ytsearch6:${queryLabel} official audio`];
+      scDiscoveryQueries = [`scsearch15:${queryLabel}`];
       if (artistAndCleanTitle && artistAndCleanTitle !== artistAndPrimaryTitle) {
         scDiscoveryQueries.push(`scsearch10:${artistAndCleanTitle}`);
       } else if (primaryArtist && cleanTitleOnly && cleanTitleOnly.length >= 3) {
         scDiscoveryQueries.push(`scsearch10:${cleanTitleOnly}`);
       }
 
-      const [catalogMeta, scRawCandidates, ytRawCandidates] = await Promise.all([
-        resolveCatalogMetadata(item.duration, cleanTitle, primaryArtist),
-        discoverCandidatesFromSearch(scDiscoveryQueries, 10000),
-        discoverCandidatesFromSearch(ytDiscoveryQueries, 7500)
-      ]);
-      const rawCandidates = [...ytRawCandidates, ...scRawCandidates];
+      // Staggered discovery by cookie state: launch only the primary source alongside catalog metadata
+      // (1 yt-dlp search process instead of 2), and only query the secondary source on fallback.
+      let catalogMeta;
+      let ytRawCandidates = [];
+      let scRawCandidates = [];
+
+      if (hasCookiesConfigured) {
+        [catalogMeta, ytRawCandidates] = await Promise.all([
+          resolveCatalogMetadata(item.duration, cleanTitle, primaryArtist),
+          discoverCandidatesFromSearch(ytDiscoveryQueries, 7500)
+        ]);
+      } else {
+        [catalogMeta, scRawCandidates] = await Promise.all([
+          resolveCatalogMetadata(item.duration, cleanTitle, primaryArtist),
+          discoverCandidatesFromSearch(scDiscoveryQueries, 10000)
+        ]);
+      }
+
       expectedDurationSec = catalogMeta.durationSec;
+      maxAllowedDur = expectedDurationSec ? expectedDurationSec + 5 : null;
       const effectiveTitle =
         !primaryArtist && catalogMeta.canonicalTitle ? catalogMeta.canonicalTitle : cleanTitle;
       const effectiveArtist = primaryArtist || catalogMeta.canonicalArtist || item.artist || '';
@@ -1646,7 +1769,7 @@ async function runExtractionPipeline(
       metaAlbum = catalogMeta.canonicalAlbum || metaAlbum;
       updateProg(18);
 
-      const ctx = buildCandidateContext(
+      discoveryCtx = buildCandidateContext(
         rawTitle,
         effectiveTitle,
         effectiveArtist,
@@ -1654,63 +1777,44 @@ async function runExtractionPipeline(
         catalogMeta
       );
 
-      // Tier 1: Exact 1x studio recordings
-      const scoredTier1 = rawCandidates
-        .map(c => ({ ...c, score: scoreCandidate(c, ctx) }))
-        .filter(c => c.score >= 0)
-        .sort((a, b) => b.score - a.score);
+      let ytDirectTargets = [];
+      let scCombinedTargets = [];
 
-      // Tier 2: Anti-copyright N-x looped studio uploads (e.g. "Intruso - Enjambre" 3x = 608.4s or "The Ketchup Song" 4x = 867.5s on SoundCloud),
-      // automatically trimmed by ffmpeg to 1x single-play duration with stream copy (-t N)
-      const scoredLoopTier2 = rawCandidates
-        .map(c => {
-          const loopInfo = scoreLoopCandidate(c, ctx);
-          return loopInfo ? { ...c, ...loopInfo } : null;
-        })
-        .filter(Boolean)
-        .sort((a, b) => b.score - a.score);
+      if (hasCookiesConfigured) {
+        const ytPool = evaluateCandidatePool(ytRawCandidates, discoveryCtx, 'yt', queryLabel);
+        ytDirectTargets = buildYtTargetsFromPool(ytPool);
+        if (ytDirectTargets.length === 0) {
+          scRawCandidates = await discoverCandidatesFromSearch(scDiscoveryQueries, 10000);
+          const scPool = evaluateCandidatePool(
+            scRawCandidates,
+            discoveryCtx,
+            'sc-fallback',
+            queryLabel
+          );
+          scCombinedTargets = buildScTargetsFromPool(scPool);
+        } else {
+          // Defer SoundCloud search unless all direct YouTube URLs fail during download
+          scCombinedTargets = [{ lazyDiscovery: 'sc' }];
+        }
+      } else {
+        const scPool = evaluateCandidatePool(scRawCandidates, discoveryCtx, 'sc', queryLabel);
+        scCombinedTargets = buildScTargetsFromPool(scPool);
+        if (scCombinedTargets.length === 0) {
+          ytRawCandidates = await discoverCandidatesFromSearch(ytDiscoveryQueries, 7500);
+          const ytPool = evaluateCandidatePool(
+            ytRawCandidates,
+            discoveryCtx,
+            'yt-fallback',
+            queryLabel
+          );
+          ytDirectTargets = buildYtTargetsFromPool(ytPool);
+        } else {
+          // Defer YouTube search unless all direct SoundCloud URLs fail during download
+          ytDirectTargets = [{ lazyDiscovery: 'yt' }];
+        }
+      }
 
       updateProg(22);
-
-      const maxAllowedDur = expectedDurationSec ? expectedDurationSec + 5 : null;
-      const hasCookiesConfigured = Boolean(getYtCookiesFilePath());
-
-      const ytCands = scoredTier1.filter(c =>
-        String(c.extractor || '').toLowerCase().includes('youtube')
-      );
-      const scCands = scoredTier1.filter(c =>
-        !String(c.extractor || '').toLowerCase().includes('youtube')
-      );
-
-      const bestYtNonTopic = ytCands.find(
-        c => !String(c.uploader || '').toLowerCase().endsWith('- topic')
-      );
-      const bestYt = bestYtNonTopic || ytCands[0] || null;
-
-      const scDirectTargets = scCands.slice(0, 2).map(best => ({
-        url: best.webpageUrl,
-        isSearchPool: false,
-        trimDurationSec: maxAllowedDur,
-        useCookies: false
-      }));
-
-      const scLoopTargets = scoredLoopTier2.slice(0, 2).map(loopCand => ({
-        url: loopCand.webpageUrl,
-        isSearchPool: false,
-        trimDurationSec: loopCand.trimDurationSec,
-        useCookies: false
-      }));
-
-      const ytDirectTargets = bestYt
-        ? [
-            {
-              url: bestYt.webpageUrl,
-              isSearchPool: false,
-              trimDurationSec: maxAllowedDur,
-              useCookies: hasCookiesConfigured
-            }
-          ]
-        : [];
 
       const minDur = expectedDurationSec ? Math.max(45, expectedDurationSec - 8) : 55;
       const maxDur = expectedDurationSec ? expectedDurationSec + 8 : 540;
@@ -1741,11 +1845,9 @@ async function runExtractionPipeline(
       };
 
       if (hasCookiesConfigured) {
-        // With valid cookies, try YouTube #1 first, then SoundCloud 1x/loop, then Bilibili studio match
-        targets.push(...ytDirectTargets, ...scDirectTargets, ...scLoopTargets, biliTarget);
+        targets.push(...ytDirectTargets, ...scCombinedTargets, biliTarget);
       } else {
-        // Without cookies, prioritize SoundCloud 1x/loop and Bilibili studio match before YouTube
-        targets.push(...scDirectTargets, ...scLoopTargets, biliTarget, ...ytDirectTargets);
+        targets.push(...scCombinedTargets, biliTarget, ...ytDirectTargets);
       }
 
       targets.push({
@@ -1763,9 +1865,44 @@ async function runExtractionPipeline(
       ? Math.max(240 * 1024, Math.min(700 * 1024, Math.round(expectedDurationSec * 4000)))
       : 240 * 1024;
 
-    for (const t of targets) {
+    for (let idx = 0; idx < targets.length; idx++) {
+      const t = targets[idx];
+      if (t.lazyDiscovery) {
+        if (netSlotReleased) {
+          releaseNetSlot = await acquireContinuationNetSlot(userId);
+          netSlotReleased = false;
+        }
+        if (t.lazyDiscovery === 'sc' && discoveryCtx && scDiscoveryQueries.length > 0) {
+          const lazyScRaw = await discoverCandidatesFromSearch(scDiscoveryQueries, 10000);
+          const scPool = evaluateCandidatePool(
+            lazyScRaw,
+            discoveryCtx,
+            'sc-lazy-fallback',
+            queryLabel
+          );
+          const discoveredScTargets = buildScTargetsFromPool(scPool);
+          if (discoveredScTargets.length > 0) {
+            targets.splice(idx + 1, 0, ...discoveredScTargets);
+          }
+        } else if (t.lazyDiscovery === 'yt' && discoveryCtx && ytDiscoveryQueries.length > 0) {
+          const lazyYtRaw = await discoverCandidatesFromSearch(ytDiscoveryQueries, 7500);
+          const ytPool = evaluateCandidatePool(
+            lazyYtRaw,
+            discoveryCtx,
+            'yt-lazy-fallback',
+            queryLabel
+          );
+          const discoveredYtTargets = buildYtTargetsFromPool(ytPool);
+          if (discoveredYtTargets.length > 0) {
+            targets.splice(idx + 1, 0, ...discoveredYtTargets);
+          }
+        }
+        continue;
+      }
+
       let stepRes = null;
       let ffmpegErr = '';
+      let sizeSkipReason = '';
       try {
         if (netSlotReleased) {
           releaseNetSlot = await acquireContinuationNetSlot(userId);
@@ -1811,6 +1948,8 @@ async function runExtractionPipeline(
             if (!postRes.ok) {
               ffmpegErr = postRes.error || '';
             }
+          } else {
+            sizeSkipReason = `raw_size_too_small(${rawSize}B<=${minRawBytes}B)`;
           }
         }
       } finally {
@@ -1837,9 +1976,17 @@ async function runExtractionPipeline(
         .map(l => l.trim())
         .filter(Boolean)
         .pop();
-      console.warn(
-        `[download] skip ${t.url} (code=${stepRes?.code ?? 'err'}): ${lastErrLine || 'no valid audio'}`
-      );
+      const fallbackFilterInfo = t.isSearchPool
+        ? `filtered_all_search_results(dur=${t.minDuration}-${t.maxDuration}s${t.matchTitleRegex ? ',matchTitle' : ''}${t.rejectTitleRegex ? ',rejectTitle' : ''})`
+        : 'no valid audio';
+      const skipDetail =
+        sizeSkipReason ||
+        finalized.reason ||
+        (lastErrLine && /drm protected/i.test(lastErrLine)
+          ? `soundcloud_drm_protected (${lastErrLine})`
+          : lastErrLine) ||
+        fallbackFilterInfo;
+      console.warn(`[download] skip ${t.url} (code=${stepRes?.code ?? 'err'}): ${skipDetail}`);
     }
 
     enforceStorageQuota();
