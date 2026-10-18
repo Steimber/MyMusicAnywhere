@@ -1158,7 +1158,7 @@ function evaluateCandidatePool(rawCandidates, ctx, sourceLabel, queryLabel) {
   return { tier1, loopTier2 };
 }
 
-function discoverCandidatesFromSearch(searchQueries, timeoutMs = 10000) {
+function runFlatSearchOnce(searchQueries, timeoutMs = 10000) {
   return new Promise(resolve => {
     // Do NOT pass --cookies during --flat-playlist metadata search: public search metadata never
     // requires login and omitting cookies prevents Google session rotation / account flagging.
@@ -1181,21 +1181,21 @@ function discoverCandidatesFromSearch(searchQueries, timeoutMs = 10000) {
     try {
       child = spawn(cmd, args);
     } catch {
-      return resolve([]);
+      return resolve({ candidates: [], timedOut: false });
     }
 
-    const finish = list => {
+    const finish = (candidates, timedOut = false) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      resolve(list);
+      resolve({ candidates, timedOut });
     };
 
     const timer = setTimeout(() => {
       try {
         child.kill('SIGKILL');
       } catch {}
-      finish(parseCandidateLines(stdoutText));
+      finish(parseCandidateLines(stdoutText), true);
     }, timeoutMs);
 
     child.stdout.on('data', d => {
@@ -1203,13 +1203,34 @@ function discoverCandidatesFromSearch(searchQueries, timeoutMs = 10000) {
     });
 
     child.on('error', () => {
-      finish(parseCandidateLines(stdoutText));
+      finish(parseCandidateLines(stdoutText), false);
     });
 
     child.on('close', () => {
-      finish(parseCandidateLines(stdoutText));
+      finish(parseCandidateLines(stdoutText), false);
     });
   });
+}
+
+async function discoverCandidatesFromSearch(searchQueries, timeoutMs = 10000) {
+  const first = await runFlatSearchOnce(searchQueries, timeoutMs);
+  if (first.candidates.length > 0 || first.timedOut) {
+    return first.candidates;
+  }
+
+  const isYtSearch =
+    Array.isArray(searchQueries) &&
+    searchQueries.some(q => /^ytsearch/i.test(String(q || '')));
+  if (isYtSearch) {
+    await new Promise(r => setTimeout(r, 1500));
+    console.log(
+      `[search-filter] yt retry after 1.5s (0 raw results on first attempt): ${searchQueries[0]}`
+    );
+    const second = await runFlatSearchOnce(searchQueries, timeoutMs);
+    return second.candidates;
+  }
+
+  return first.candidates;
 }
 
 function parseCandidateLines(rawText) {
