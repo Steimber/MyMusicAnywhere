@@ -59,11 +59,11 @@ function createSafeFileStream(filePath, streamOpts, onStreamClosed) {
         } catch {}
       });
 
-      nodeStream.on('error', () => {
+      nodeStream.on('error', err => {
         if (closed) return;
         closed = true;
         try {
-          controller.close();
+          controller.error(err);
         } catch {}
       });
 
