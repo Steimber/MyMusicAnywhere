@@ -6,7 +6,7 @@ import { NoSleepController } from '../lib/nosleep';
 import { buildSmartShuffleOrder, getShuffleTrackKey } from '../lib/shuffle';
 
 const AUDIO_CACHE_NAME = 'my-music-offline-audio-v1';
-const SHELL_CACHE_NAME = 'mymusic-shell-v17';
+const SHELL_CACHE_NAME = 'mymusic-shell-v18';
 const DEFAULT_TRACK_COVER = '/icon.svg?v=3';
 const USER_STORAGE_KEY = 'mma_cached_user_v1';
 const LIKES_STORAGE_KEY = 'mma_liked_tracks_v1';
@@ -3303,10 +3303,8 @@ export default function HomePage() {
               <span className="track-sub-text">
                 {dl?.status === 'downloading'
                   ? isQueuedForSlot
-                    ? `En espera (${simultaneousActiveCount}/${MAX_SIMULTANEOUS_DOWNLOADS} simultáneas) · ${track.artist}`
-                    : `Descargando (${simultaneousActiveCount}/${MAX_SIMULTANEOUS_DOWNLOADS} simultáneas) · ${Math.round(
-                        dl.progress || 8
-                      )}% · ${track.artist}`
+                    ? `En cola · ${track.artist}`
+                    : `${Math.round(dl.progress || 8)}% · ${track.artist}`
                   : subtitleParts.join(' · ')}
               </span>
             </div>
@@ -3999,24 +3997,7 @@ export default function HomePage() {
                 <div className="playlist-header-info">
                   <h1 className="playlist-header-title">{activeLibraryTitle}</h1>
                   <div className="playlist-header-meta">
-                    {syncingAll && syncProgress.total > 0 ? (
-                      <>
-                        <Icon name="download" size={13} />
-                        <span>
-                          Descargando {syncProgress.done}/{syncProgress.total} ({simultaneousActiveCount}/{MAX_SIMULTANEOUS_DOWNLOADS} simultáneas)
-                          {syncProgress.currentTitle ? ` · ${syncProgress.currentTitle}` : ''}
-                        </span>
-                      </>
-                    ) : totalActiveDownloads > 0 ? (
-                      <>
-                        <Icon name="download" size={13} />
-                        <span>
-                          {simultaneousActiveCount}/{MAX_SIMULTANEOUS_DOWNLOADS} descargas simultáneas
-                          {queuedWaitingCount > 0 ? ` · +${queuedWaitingCount} en espera` : ''} · {activeLibraryTracks.length}{' '}
-                          {activeLibraryTracks.length === 1 ? 'canción' : 'canciones'}
-                        </span>
-                      </>
-                    ) : coverSync.active && coverSync.total > 0 ? (
+                    {coverSync.active && coverSync.total > 0 ? (
                       <>
                         <Icon name="image" size={13} />
                         <span>
@@ -4028,12 +4009,12 @@ export default function HomePage() {
                       <span>
                         {activeLibraryTracks.length}{' '}
                         {activeLibraryTracks.length === 1 ? 'canción' : 'canciones'}
-                        {missingCoversInActiveLibrary.length > 0 && !isOffline
-                          ? ` · ${missingCoversInActiveLibrary.length} sin portada`
-                          : selectedLibrary === 'offline' && deviceQuota
+                        {selectedLibrary === 'offline' && deviceQuota
                           ? ` · ${deviceQuota.usedMB} MB en dispositivo`
-                          : isOffline && playableActiveLibraryTracks.length < activeLibraryTracks.length
-                          ? ` · ${playableActiveLibraryTracks.length} disponibles sin red`
+                          : selectedLibrary !== 'offline' && playableActiveLibraryTracks.length > 0
+                          ? ` · ${playableActiveLibraryTracks.length} offline`
+                          : missingCoversInActiveLibrary.length > 0 && !isOffline
+                          ? ` · ${missingCoversInActiveLibrary.length} sin portada`
                           : ''}
                       </span>
                     )}
