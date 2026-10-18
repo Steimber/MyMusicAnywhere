@@ -1,10 +1,11 @@
 'use client';
 
 import { useState, useEffect, useRef, useMemo } from 'react';
+import { flushSync } from 'react-dom';
 import { NoSleepController } from '../lib/nosleep';
 
 const AUDIO_CACHE_NAME = 'my-music-offline-audio-v1';
-const SHELL_CACHE_NAME = 'mymusic-shell-v15';
+const SHELL_CACHE_NAME = 'mymusic-shell-v16';
 const DEFAULT_TRACK_COVER = '/icon.svg?v=3';
 const USER_STORAGE_KEY = 'mma_cached_user_v1';
 const LIKES_STORAGE_KEY = 'mma_liked_tracks_v1';
@@ -388,7 +389,9 @@ export default function HomePage() {
     ) {
       try {
         document.startViewTransition(() => {
-          rawSetActiveTab(nextTab);
+          flushSync(() => {
+            rawSetActiveTab(nextTab);
+          });
         });
         return;
       } catch {}
@@ -405,7 +408,9 @@ export default function HomePage() {
     ) {
       try {
         document.startViewTransition(() => {
-          rawSetSelectedLibrary(nextLib);
+          flushSync(() => {
+            rawSetSelectedLibrary(nextLib);
+          });
         });
         return;
       } catch {}
@@ -717,8 +722,8 @@ export default function HomePage() {
     setIsOffline(offlineNow);
     wasOfflineRef.current = offlineNow;
     if (offlineNow) {
-      setActiveTab('library');
-      setSelectedLibrary('offline');
+      rawSetActiveTab('library');
+      rawSetSelectedLibrary('offline');
       if (!cachedUser) {
         setUser({ username: 'Offline', is_admin: false, offline: true });
       }
