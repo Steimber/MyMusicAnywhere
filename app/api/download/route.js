@@ -185,41 +185,53 @@ async function resolveCatalogMetadata(rawDuration, cleanTitle, primaryArtist) {
     }
   };
 
-  const fetchItunes = async () => {
+  const fetchCatalogJson = async (url, timeoutMs = 2200) => {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
     try {
-      const itunesUrl = `https://itunes.apple.com/search?term=${encodeURIComponent(
-        query
-      )}&media=music&entity=song&limit=6`;
-      const res = await fetch(itunesUrl, { signal: AbortSignal.timeout(2200) });
-      if (!res.ok) return null;
-      const data = await res.json();
-      const hits = Array.isArray(data?.results) ? data.results : [];
-      for (const h of hits) {
-        const sec = h.trackTimeMillis ? Math.round(h.trackTimeMillis / 1000) : null;
-        if (matchCatalogTrack(h.trackName, h.artistName, sec)) {
-          harvestTrackMeta(h.trackName, h.artistName, h.collectionName);
-          return sec;
-        }
+      const res = await fetch(url, {
+        signal: ctrl.signal,
+        headers: { Accept: 'application/json' }
+      });
+      if (!res.ok) {
+        await res.body?.cancel().catch(() => {});
+        return null;
       }
-    } catch {}
+      return await res.json();
+    } catch {
+      return null;
+    } finally {
+      clearTimeout(timer);
+    }
+  };
+
+  const fetchItunes = async () => {
+    const itunesUrl = `https://itunes.apple.com/search?term=${encodeURIComponent(
+      query
+    )}&media=music&entity=song&limit=6`;
+    const data = await fetchCatalogJson(itunesUrl, 2200);
+    const hits = Array.isArray(data?.results) ? data.results : [];
+    for (const h of hits) {
+      const sec = h.trackTimeMillis ? Math.round(h.trackTimeMillis / 1000) : null;
+      if (matchCatalogTrack(h.trackName, h.artistName, sec)) {
+        harvestTrackMeta(h.trackName, h.artistName, h.collectionName);
+        return sec;
+      }
+    }
     return null;
   };
 
   const fetchDeezer = async () => {
-    try {
-      const dzUrl = `https://api.deezer.com/search?q=${encodeURIComponent(query)}&limit=6`;
-      const res = await fetch(dzUrl, { signal: AbortSignal.timeout(2200) });
-      if (!res.ok) return null;
-      const data = await res.json();
-      const hits = Array.isArray(data?.data) ? data.data : [];
-      for (const h of hits) {
-        const sec = Number(h.duration);
-        if (matchCatalogTrack(h.title, h.artist?.name, sec)) {
-          harvestTrackMeta(h.title, h.artist?.name, h.album?.title);
-          return sec;
-        }
+    const dzUrl = `https://api.deezer.com/search?q=${encodeURIComponent(query)}&limit=6`;
+    const data = await fetchCatalogJson(dzUrl, 2200);
+    const hits = Array.isArray(data?.data) ? data.data : [];
+    for (const h of hits) {
+      const sec = Number(h.duration);
+      if (matchCatalogTrack(h.title, h.artist?.name, sec)) {
+        harvestTrackMeta(h.title, h.artist?.name, h.album?.title);
+        return sec;
       }
-    } catch {}
+    }
     return null;
   };
 

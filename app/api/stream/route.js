@@ -15,6 +15,73 @@ function getAudioMimeType(filename) {
   return AUDIO_MIME_BY_EXT[ext] || 'audio/mpeg';
 }
 
+function createSafeFileStream(filePath, streamOpts, onStreamClosed) {
+  let nodeStream = null;
+  let closed = false;
+  let cleanupCalled = false;
+
+  const triggerCleanupOnce = () => {
+    if (cleanupCalled) return;
+    cleanupCalled = true;
+    if (typeof onStreamClosed === 'function') {
+      onStreamClosed();
+    }
+  };
+
+  return new ReadableStream({
+    start(controller) {
+      try {
+        nodeStream = fs.createReadStream(/*turbopackIgnore: true*/ filePath, streamOpts);
+      } catch (err) {
+        closed = true;
+        triggerCleanupOnce();
+        try {
+          controller.error(err);
+        } catch {}
+        return;
+      }
+
+      nodeStream.on('data', chunk => {
+        if (closed) return;
+        try {
+          controller.enqueue(chunk);
+        } catch {
+          closed = true;
+          nodeStream.destroy();
+        }
+      });
+
+      nodeStream.on('end', () => {
+        if (closed) return;
+        closed = true;
+        try {
+          controller.close();
+        } catch {}
+      });
+
+      nodeStream.on('error', () => {
+        if (closed) return;
+        closed = true;
+        try {
+          controller.close();
+        } catch {}
+      });
+
+      nodeStream.on('close', () => {
+        closed = true;
+        triggerCleanupOnce();
+      });
+    },
+    cancel() {
+      closed = true;
+      if (nodeStream) {
+        nodeStream.destroy();
+      }
+      triggerCleanupOnce();
+    }
+  });
+}
+
 export async function GET(request) {
   const user = getSessionUser(request);
   if (!user) {
@@ -62,12 +129,13 @@ export async function GET(request) {
     const end = parts[1] ? parseInt(parts[1], 10) : stat.size - 1;
     const chunksize = end - start + 1;
 
-    const stream = fs.createReadStream(safePath, { start, end });
-    if (end >= stat.size - 1) {
-      stream.on('close', () => scheduleFileCleanup(safePath, 5000));
-    }
+    const webStream = createSafeFileStream(
+      safePath,
+      { start, end },
+      end >= stat.size - 1 ? () => scheduleFileCleanup(safePath, 5000) : null
+    );
 
-    return new Response(stream, {
+    return new Response(webStream, {
       status: 206,
       headers: {
         ...headers,
@@ -77,7 +145,8 @@ export async function GET(request) {
     });
   }
 
-  const stream = fs.createReadStream(safePath);
-  stream.on('close', () => scheduleFileCleanup(safePath, 5000));
-  return new Response(stream, { headers });
+  const webStream = createSafeFileStream(safePath, undefined, () =>
+    scheduleFileCleanup(safePath, 5000)
+  );
+  return new Response(webStream, { headers });
 }
