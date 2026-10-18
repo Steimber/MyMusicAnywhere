@@ -3,9 +3,10 @@
 import { useState, useEffect, useRef, useMemo } from 'react';
 import { flushSync } from 'react-dom';
 import { NoSleepController } from '../lib/nosleep';
+import { buildSmartShuffleOrder, getShuffleTrackKey } from '../lib/shuffle';
 
 const AUDIO_CACHE_NAME = 'my-music-offline-audio-v1';
-const SHELL_CACHE_NAME = 'mymusic-shell-v16';
+const SHELL_CACHE_NAME = 'mymusic-shell-v17';
 const DEFAULT_TRACK_COVER = '/icon.svg?v=3';
 const USER_STORAGE_KEY = 'mma_cached_user_v1';
 const LIKES_STORAGE_KEY = 'mma_liked_tracks_v1';
@@ -492,6 +493,7 @@ export default function HomePage() {
   const audioRef = useRef(null);
   const accountRef = useRef(null);
   const shuffleStateRef = useRef({ order: [], pos: -1, queueLen: 0 });
+  const recentPlayedKeysRef = useRef([]);
   const queueRef = useRef([]);
   const currentIndexRef = useRef(-1);
   const isPlayingRef = useRef(false);
@@ -2784,6 +2786,16 @@ export default function HomePage() {
       return;
     }
 
+    const trackHistoryKey = getShuffleTrackKey(nextTrack);
+    if (trackHistoryKey) {
+      const filteredHistory = recentPlayedKeysRef.current.filter(k => k !== trackHistoryKey);
+      filteredHistory.push(trackHistoryKey);
+      if (filteredHistory.length > 15) {
+        filteredHistory.splice(0, filteredHistory.length - 15);
+      }
+      recentPlayedKeysRef.current = filteredHistory;
+    }
+
     currentIndexRef.current = nextIdx;
     setCurrentIndex(nextIdx);
     setProgress(0);
@@ -2877,7 +2889,10 @@ export default function HomePage() {
       const activeQueue = queueRef.current;
       const curIdx = currentIndexRef.current;
       if (next && Array.isArray(activeQueue) && activeQueue.length > 0) {
-        const order = buildSmartShuffleOrder(activeQueue, curIdx >= 0 ? curIdx : -1);
+        const order = buildSmartShuffleOrder(activeQueue, {
+          startIdx: curIdx >= 0 ? curIdx : -1,
+          recentKeys: recentPlayedKeysRef.current
+        });
         shuffleStateRef.current = { order, pos: 0, queueLen: activeQueue.length };
         preloadUpcomingQueueBlobs(activeQueue, curIdx);
       } else {
@@ -2889,51 +2904,6 @@ export default function HomePage() {
       }
       return next;
     });
-  }
-
-  function buildSmartShuffleOrder(list, startIdx = -1, minArtistDistance = 2) {
-    const n = Array.isArray(list) ? list.length : 0;
-    if (n <= 1) return n === 1 ? [0] : [];
-
-    const pool = [];
-    for (let i = 0; i < n; i++) {
-      if (i !== startIdx) pool.push(i);
-    }
-
-    for (let i = pool.length - 1; i > 0; i--) {
-      const j = Math.floor(Math.random() * (i + 1));
-      [pool[i], pool[j]] = [pool[j], pool[i]];
-    }
-
-    const normArtist = idx =>
-      String(list[idx]?.artist || '')
-        .trim()
-        .toLowerCase();
-
-    const order = startIdx >= 0 && startIdx < n ? [startIdx] : [];
-    const recentArtists =
-      startIdx >= 0 && startIdx < n && normArtist(startIdx) ? [normArtist(startIdx)] : [];
-
-    while (pool.length > 0) {
-      let pickPos = pool.findIndex(idx => {
-        const a = normArtist(idx);
-        return !a || !recentArtists.includes(a);
-      });
-      if (pickPos === -1) pickPos = 0;
-
-      const [chosenIdx] = pool.splice(pickPos, 1);
-      order.push(chosenIdx);
-
-      const chosenArtist = normArtist(chosenIdx);
-      if (chosenArtist) {
-        recentArtists.push(chosenArtist);
-        if (recentArtists.length > minArtistDistance) {
-          recentArtists.shift();
-        }
-      }
-    }
-
-    return order;
   }
 
   function playFromList(list, index, startRandom = false, options = {}) {
@@ -2971,7 +2941,10 @@ export default function HomePage() {
       shuffleRef.current = true;
       setShuffle(true);
     }
-    const order = buildSmartShuffleOrder(playableList, startRandom ? -1 : mappedIdx);
+    const order = buildSmartShuffleOrder(playableList, {
+      startIdx: startRandom ? -1 : mappedIdx,
+      recentKeys: recentPlayedKeysRef.current
+    });
     shuffleStateRef.current = { order, pos: 0, queueLen: playableList.length };
     const firstIdx = order[0] ?? mappedIdx;
     startTrackAtIndexImmediate(firstIdx, playableList);
@@ -3008,9 +2981,10 @@ export default function HomePage() {
         ? order.filter(idx => idx >= 0 && idx < activeQueue.length && isTrackAvailableOffline(activeQueue[idx]))
         : [];
       if (filteredOrder.length !== validIndices.length || queueLen !== activeQueue.length) {
-        order = buildSmartShuffleOrder(activeQueue, curIdx).filter(idx =>
-          isTrackAvailableOffline(activeQueue[idx])
-        );
+        order = buildSmartShuffleOrder(activeQueue, {
+          startIdx: curIdx,
+          recentKeys: recentPlayedKeysRef.current
+        }).filter(idx => isTrackAvailableOffline(activeQueue[idx]));
         pos = Math.max(0, order.indexOf(curIdx));
       } else {
         order = filteredOrder;
@@ -3022,9 +2996,10 @@ export default function HomePage() {
         shuffleStateRef.current = { order, pos: nextPos, queueLen: activeQueue.length };
         startTrackAtIndexImmediate(order[nextPos], activeQueue);
       } else {
-        const freshOrder = buildSmartShuffleOrder(activeQueue, -1).filter(idx =>
-          isTrackAvailableOffline(activeQueue[idx])
-        );
+        const freshOrder = buildSmartShuffleOrder(activeQueue, {
+          startIdx: -1,
+          recentKeys: recentPlayedKeysRef.current
+        }).filter(idx => isTrackAvailableOffline(activeQueue[idx]));
         if (freshOrder.length > 1 && freshOrder[0] === curIdx) {
           [freshOrder[0], freshOrder[1]] = [freshOrder[1], freshOrder[0]];
         }
