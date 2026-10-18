@@ -24,10 +24,45 @@ function parsePositiveIntEnv(name, fallback, min = 1, max = 500) {
   return Math.min(max, parsed);
 }
 
+function parseBooleanEnv(name, fallback = false) {
+  const raw = String(process.env[name] ?? '').trim().toLowerCase();
+  if (!raw) return fallback;
+  if (['true', '1', 'yes', 'on'].includes(raw)) return true;
+  if (['false', '0', 'no', 'off'].includes(raw)) return false;
+  return fallback;
+}
+
 const MAX_NET_DOWNLOADS = parsePositiveIntEnv('MAX_NET_DOWNLOADS', 4, 1, 16);
 const MAX_CPU_JOBS = parsePositiveIntEnv('MAX_CPU_JOBS', 2, 1, 8);
 const MAX_PER_USER = parsePositiveIntEnv('MAX_PER_USER', 2, 1, 8);
 const MAX_QUEUED_PER_USER = parsePositiveIntEnv('MAX_QUEUED_PER_USER', 50, 1, 500);
+const ENABLE_BILIBILI = parseBooleanEnv('ENABLE_BILIBILI', true);
+
+const DRM_CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+if (!global.__drmBlockedUrls) {
+  global.__drmBlockedUrls = new Map();
+}
+const drmBlockedUrls = global.__drmBlockedUrls;
+
+function isUrlDrmBlocked(url) {
+  if (!url) return false;
+  const ts = drmBlockedUrls.get(url);
+  if (!ts) return false;
+  if (Date.now() - ts > DRM_CACHE_TTL_MS) {
+    drmBlockedUrls.delete(url);
+    return false;
+  }
+  return true;
+}
+
+function markUrlDrmBlocked(url) {
+  if (!url || !/^https?:\/\//i.test(url)) return;
+  if (drmBlockedUrls.size >= 2000) {
+    const oldestKey = drmBlockedUrls.keys().next().value;
+    if (oldestKey) drmBlockedUrls.delete(oldestKey);
+  }
+  drmBlockedUrls.set(url, Date.now());
+}
 
 if (!global.__extractionPools) {
   global.__extractionPools = {
@@ -814,6 +849,9 @@ const CORE_ALTERED_AUDIO_TERMS = [
 ];
 
 function evaluateCandidate(cand, ctx) {
+  if (cand.webpageUrl && isUrlDrmBlocked(cand.webpageUrl)) {
+    return { score: -1, reason: 'drm_cached_24h' };
+  }
   const dur = Number(cand.duration);
   const extractorLower = String(cand.extractor || '').toLowerCase();
   if (!dur || isNaN(dur)) {
@@ -1008,6 +1046,9 @@ function scoreCandidate(cand, ctx) {
 // Smart detector for anti-copyright looped uploads on SoundCloud (e.g. "Intruso - Enjambre" uploaded as 3x = 608.4s).
 // When matched, returns the exact single-play duration (dur / repeatCount) so ffmpeg trims it to 1x studio length!
 function scoreLoopCandidate(cand, ctx) {
+  if (cand.webpageUrl && isUrlDrmBlocked(cand.webpageUrl)) {
+    return null;
+  }
   const dur = Number(cand.duration);
   const exp = Number(ctx.expectedDurationSec);
   if (!dur || isNaN(dur) || !exp || exp < 60 || dur < exp * 1.8 || dur > exp * 7.5) {
@@ -1359,13 +1400,17 @@ function runYtDlpAttempt(target, outputTemplate, options, onProgress) {
       resolve(result);
     };
 
-    // 60s timeout for Paso A (Network download)
+    // 15s timeout for Bilibili, 60s timeout for standard Paso A (Network download)
+    const attemptTimeoutMs = isBilibiliTarget ? 15000 : 60000;
     const killTimer = setTimeout(() => {
       try {
         child.kill('SIGKILL');
       } catch {}
-      finish({ ok: false, error: 'Tiempo de espera agotado en descarga (Paso A)' });
-    }, 60000);
+      finish({
+        ok: false,
+        error: `Tiempo de espera agotado en descarga (${Math.round(attemptTimeoutMs / 1000)}s)`
+      });
+    }, attemptTimeoutMs);
 
     const handleProgressText = text => {
       if (!onProgress) return;
@@ -1834,7 +1879,7 @@ async function runExtractionPipeline(
           : null;
 
       const biliTarget = {
-        url: `bilisearch5:${searchQueryBase || artistAndPrimaryTitle || artistAndCleanTitle}`,
+        url: `bilisearch1:${searchQueryBase || artistAndPrimaryTitle || artistAndCleanTitle}`,
         isSearchPool: true,
         minDuration: minDur,
         maxDuration: maxDur,
@@ -1845,9 +1890,9 @@ async function runExtractionPipeline(
       };
 
       if (hasCookiesConfigured) {
-        targets.push(...ytDirectTargets, ...scCombinedTargets, biliTarget);
+        targets.push(...ytDirectTargets, ...scCombinedTargets);
       } else {
-        targets.push(...scCombinedTargets, biliTarget, ...ytDirectTargets);
+        targets.push(...scCombinedTargets, ...ytDirectTargets);
       }
 
       targets.push({
@@ -1859,6 +1904,10 @@ async function runExtractionPipeline(
         trimDurationSec: maxAllowedDur,
         useCookies: hasCookiesConfigured
       });
+
+      if (ENABLE_BILIBILI) {
+        targets.push(biliTarget);
+      }
     }
 
     const minRawBytes = expectedDurationSec
@@ -1976,6 +2025,9 @@ async function runExtractionPipeline(
         .map(l => l.trim())
         .filter(Boolean)
         .pop();
+      if (lastErrLine && /drm protected/i.test(lastErrLine)) {
+        markUrlDrmBlocked(t.url);
+      }
       const fallbackFilterInfo = t.isSearchPool
         ? `filtered_all_search_results(dur=${t.minDuration}-${t.maxDuration}s${t.matchTitleRegex ? ',matchTitle' : ''}${t.rejectTitleRegex ? ',rejectTitle' : ''})`
         : 'no valid audio';
