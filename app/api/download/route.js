@@ -263,7 +263,7 @@ function runFlatSearchOnce(searchQueries, timeoutMs = 10000) {
 
     let child;
     try {
-      child = spawn(cmd, args);
+      child = spawn(/*turbopackIgnore: true*/ cmd, args);
     } catch {
       return resolve({ candidates: [], timedOut: false });
     }
@@ -412,7 +412,7 @@ function runYtDlpAttempt(target, outputTemplate, options, onProgress) {
 
     let child;
     try {
-      child = spawn(cmd, args);
+      child = spawn(/*turbopackIgnore: true*/ cmd, args);
     } catch (err) {
       cleanupTempCookies();
       return resolve({ ok: false, error: err.message });
@@ -494,11 +494,11 @@ function runYtDlpAttempt(target, outputTemplate, options, onProgress) {
 function findRawStageFile(downloadsDir, baseSlug, reportedPath = null) {
   if (reportedPath) {
     try {
-      const resolved = path.resolve(reportedPath);
+      const resolved = path.resolve(/*turbopackIgnore: true*/ reportedPath);
       if (
         resolved.startsWith(path.resolve(downloadsDir) + path.sep) &&
-        fs.existsSync(resolved) &&
-        fs.statSync(resolved).size > 0
+        fs.existsSync(/*turbopackIgnore: true*/ resolved) &&
+        fs.statSync(/*turbopackIgnore: true*/ resolved).size > 0
       ) {
         return resolved;
       }
@@ -511,7 +511,7 @@ function findRawStageFile(downloadsDir, baseSlug, reportedPath = null) {
         f.startsWith(`${baseSlug}.raw.`) &&
         !/\.(part|ytdl|temp)$/i.test(f)
     );
-    return match ? path.join(downloadsDir, match) : null;
+    return match ? path.join(/*turbopackIgnore: true*/ downloadsDir, match) : null;
   } catch {
     return null;
   }
@@ -523,7 +523,7 @@ function cleanupRawStageFiles(downloadsDir, baseSlug) {
     for (const f of files) {
       if (f.startsWith(`${baseSlug}.raw.`) || f.startsWith(`${baseSlug}__`)) {
         try {
-          fs.unlinkSync(path.join(downloadsDir, f));
+          fs.unlinkSync(path.join(/*turbopackIgnore: true*/ downloadsDir, f));
         } catch {}
       }
     }
@@ -536,7 +536,7 @@ function spawnFfmpegOnce(ffmpegBin, ffmpegArgs, timeoutMs = 30000) {
     let settled = false;
     let child;
     try {
-      child = spawn(ffmpegBin, ffmpegArgs);
+      child = spawn(/*turbopackIgnore: true*/ ffmpegBin, ffmpegArgs);
     } catch (err) {
       return resolve({ ok: false, error: err.message });
     }
@@ -677,14 +677,14 @@ function finalizeDownloadedMp3(downloadsDir, baseSlug, expectedAudioPath, expect
 
     const ext = path.extname(candidateName).toLowerCase() || '.m4a';
     const finalFilename = `${baseSlug}${ext}`;
-    const finalFilePath = path.join(downloadsDir, finalFilename);
+    const finalFilePath = path.join(/*turbopackIgnore: true*/ downloadsDir, finalFilename);
 
-    if (fs.existsSync(finalFilePath)) {
+    if (fs.existsSync(/*turbopackIgnore: true*/ finalFilePath)) {
       try {
-        fs.unlinkSync(finalFilePath);
+        fs.unlinkSync(/*turbopackIgnore: true*/ finalFilePath);
       } catch {}
     }
-    fs.renameSync(candidatePath, finalFilePath);
+    fs.renameSync(/*turbopackIgnore: true*/ candidatePath, finalFilePath);
     return { valid: true, filename: finalFilename, filePath: finalFilePath, reason: null };
   } catch {
     const checkedM4a = validateExistingAudio(path.join(downloadsDir, `${baseSlug}.m4a`));
@@ -996,7 +996,7 @@ async function runExtractionPipeline(
         if (rawFilePath) {
           let rawSize = 0;
           try {
-            rawSize = fs.statSync(rawFilePath).size;
+            rawSize = fs.statSync(/*turbopackIgnore: true*/ rawFilePath).size;
           } catch {}
 
           if (rawSize > minRawBytes) {
