@@ -6,7 +6,7 @@ import { NoSleepController } from '../lib/nosleep';
 import { buildSmartShuffleOrder, getShuffleTrackKey } from '../lib/shuffle';
 
 const AUDIO_CACHE_NAME = 'my-music-offline-audio-v1';
-const SHELL_CACHE_NAME = 'mymusic-shell-v22';
+const SHELL_CACHE_NAME = 'mymusic-shell-v23';
 const DEFAULT_TRACK_COVER = '/icon.svg?v=3';
 const USER_STORAGE_KEY = 'mma_cached_user_v1';
 const LIKES_STORAGE_KEY = 'mma_liked_tracks_v1';
@@ -501,7 +501,11 @@ export default function HomePage() {
   const repeatModeRef = useRef('off');
   const blobUrlCacheRef = useRef(new Map());
   const inflightBlobPromisesRef = useRef(new Map());
+  const cachedStreamKeysRef = useRef(new Map());
   const audioCachePromiseRef = useRef(null);
+  const warmingInProgressRef = useRef(false);
+  const playInFlightRef = useRef(false);
+  const consecutivePlayFailuresRef = useRef(0);
   const lastWarmedKeyRef = useRef('');
   const lastDirectPlayRef = useRef({ index: -1, id: '', src: '' });
   const wasOfflineRef = useRef(false);
@@ -839,38 +843,47 @@ export default function HomePage() {
     let cancelled = false;
     setOptimisticTrack(null);
 
-    // Pre-warm current + upcoming tracks in microtask (never throttled when screen is locked)
-    Promise.resolve().then(() => {
-      if (!cancelled) preloadUpcomingQueueBlobs(queue, currentIndex);
-    });
-
-    const alreadyStartedSync =
+    const alreadyHandledByDirectStart =
       lastDirectPlayRef.current.index === currentIndex &&
-      String(lastDirectPlayRef.current.id) === String(currentTrack.id) &&
-      Boolean(audioRef.current.src);
+      String(lastDirectPlayRef.current.id) === String(currentTrack.id);
 
-    if (!alreadyStartedSync) {
+    if (!alreadyHandledByDirectStart) {
       const playTrack = async () => {
         const src = await resolvePlayableSource(currentTrack);
         if (!src || cancelled || !audioRef.current) return;
         if (
           lastDirectPlayRef.current.index === currentIndex &&
           String(lastDirectPlayRef.current.id) === String(currentTrack.id) &&
-          Boolean(audioRef.current.src)
+          Boolean(audioRef.current.src) &&
+          !audioRef.current.paused
         ) {
           return;
         }
-        audioRef.current.src = src;
+        if (audioRef.current.src !== src) {
+          audioRef.current.src = src;
+        }
         lastDirectPlayRef.current = {
           index: currentIndex,
           id: String(currentTrack.id),
           src
         };
+        playInFlightRef.current = true;
         try {
           await audioRef.current.play();
-          if (!cancelled) setIsPlaying(true);
+          playInFlightRef.current = false;
+          consecutivePlayFailuresRef.current = 0;
+          if (!cancelled) {
+            isPlayingRef.current = true;
+            setIsPlaying(true);
+          }
+          preloadUpcomingQueueBlobs(queueRef.current, currentIndexRef.current);
         } catch {
-          if (!cancelled) setIsPlaying(false);
+          playInFlightRef.current = false;
+          if (!cancelled) {
+            const stillPlaying = Boolean(audioRef.current && !audioRef.current.paused);
+            isPlayingRef.current = stillPlaying;
+            setIsPlaying(stillPlaying);
+          }
         }
       };
       playTrack();
@@ -881,13 +894,18 @@ export default function HomePage() {
     };
   }, [currentIndex, queue]);
 
-  // Keep upcoming shuffle/linear tracks pre-warmed whenever shuffle or offlineCatalog changes
+  // Keep initial offline tracks pre-warmed calmly without flooding CacheStorage during active track startup
   useEffect(() => {
-    if (queue.length > 0 && currentIndex >= 0) {
-      preloadUpcomingQueueBlobs(queue, currentIndex);
-    } else if (offlineCatalog.length > 0) {
-      preloadUpcomingQueueBlobs(offlineCatalog, 0);
-    }
+    if (playInFlightRef.current) return;
+    const timer = setTimeout(() => {
+      if (playInFlightRef.current) return;
+      if (queueRef.current.length > 0 && currentIndexRef.current >= 0) {
+        preloadUpcomingQueueBlobs(queueRef.current, currentIndexRef.current);
+      } else if (offlineCatalog.length > 0) {
+        preloadUpcomingQueueBlobs(offlineCatalog, 0);
+      }
+    }, 120);
+    return () => clearTimeout(timer);
   }, [shuffle, offlineCatalog]);
 
   // Reset rendered library DOM window to 10 tracks when switching library or searching
@@ -1698,19 +1716,35 @@ export default function HomePage() {
     return audioCachePromiseRef.current;
   }
 
-  function registerBlobUrlForKeys(blobUrl, streamUrl, filename = null) {
+  function registerBlobUrlForKeys(blobUrl, streamUrl, filename = null, track = null) {
     if (!blobUrl) return;
     if (streamUrl) {
       blobUrlCacheRef.current.set(streamUrl, blobUrl);
       try {
-        const fullUrl = new URL(streamUrl, window.location.origin).href;
-        blobUrlCacheRef.current.set(fullUrl, blobUrl);
+        const parsed = new URL(streamUrl, window.location.origin);
+        blobUrlCacheRef.current.set(parsed.href, blobUrl);
+        blobUrlCacheRef.current.set(parsed.pathname + parsed.search, blobUrl);
+        const fnFromUrl = parsed.searchParams.get('file');
+        if (fnFromUrl && !filename) filename = fnFromUrl;
       } catch {}
     }
     if (filename) {
       blobUrlCacheRef.current.set(`file:${filename}`, blobUrl);
       const encodedRel = `/api/stream?file=${encodeURIComponent(filename)}`;
       blobUrlCacheRef.current.set(encodedRel, blobUrl);
+      try {
+        const fullEncoded = new URL(encodedRel, window.location.origin).href;
+        blobUrlCacheRef.current.set(fullEncoded, blobUrl);
+      } catch {}
+      const matchedOff = offlineLookup.byFile.get(filename);
+      if (matchedOff) {
+        const dk = getTrackDedupKey(matchedOff);
+        if (dk) blobUrlCacheRef.current.set(`dedup:${dk}`, blobUrl);
+      }
+    }
+    if (track) {
+      const dk = getTrackDedupKey(track);
+      if (dk) blobUrlCacheRef.current.set(`dedup:${dk}`, blobUrl);
     }
   }
 
@@ -1723,47 +1757,31 @@ export default function HomePage() {
         const keys = await cache.keys();
         const map = {};
         const cachedFilenames = [];
-        const entriesToWarm = [];
         for (const req of keys) {
           const url = new URL(req.url);
           const rel = url.pathname + url.search;
           map[rel] = true;
+          cachedStreamKeysRef.current.set(rel, req.url);
+          cachedStreamKeysRef.current.set(req.url, req.url);
           const fileParam = url.searchParams.get('file');
           if (fileParam) {
             cachedFilenames.push({ filename: fileParam, streamUrl: rel });
-          }
-          if (!blobUrlCacheRef.current.has(rel)) {
-            entriesToWarm.push({ req, rel, fileParam });
+            cachedStreamKeysRef.current.set(`file:${fileParam}`, req.url);
+            const encodedRel = `/api/stream?file=${encodeURIComponent(fileParam)}`;
+            map[encodedRel] = true;
+            cachedStreamKeysRef.current.set(encodedRel, req.url);
           }
         }
         setOfflineUrls(map);
 
-        // Warm 100% of cached audio tracks into blobUrlCacheRef while the screen is awake
-        if (entriesToWarm.length > 0) {
-          (async () => {
-            for (let i = 0; i < entriesToWarm.length; i += 24) {
-              const chunk = entriesToWarm.slice(i, i + 24);
-              await Promise.all(
-                chunk.map(async ({ req, rel, fileParam }) => {
-                  if (blobUrlCacheRef.current.has(rel)) return;
-                  try {
-                    const resp = await cache.match(req);
-                    if (!resp) return;
-                    const blob = await resp.blob();
-                    if (blob && blob.size > 0 && !blobUrlCacheRef.current.has(rel)) {
-                      const blobUrl = URL.createObjectURL(blob);
-                      registerBlobUrlForKeys(blobUrl, rel, fileParam);
-                    }
-                  } catch {}
-                })
-              );
-            }
-          })();
-        }
-
         setOfflineCatalog(prev => {
           const validSet = new Set(cachedFilenames.map(c => c.streamUrl));
-          const filtered = prev.filter(item => item.streamUrl && validSet.has(item.streamUrl));
+          const validFileSet = new Set(cachedFilenames.map(c => c.filename));
+          const filtered = prev.filter(
+            item =>
+              (item.streamUrl && validSet.has(item.streamUrl)) ||
+              (item.filename && validFileSet.has(item.filename))
+          );
           let changed = filtered.length !== prev.length;
           const next = [...filtered];
 
@@ -1966,27 +1984,82 @@ export default function HomePage() {
     const likedItem =
       likedLookup.byId.get(String(track.id)) ||
       (dedupKey ? likedLookup.byDedup.get(dedupKey) : null);
-    const filename =
-      track.filename || dl?.filename || offItem?.filename || likedItem?.filename;
-    return (
-      track.streamUrl ||
-      offItem?.streamUrl ||
-      likedItem?.streamUrl ||
-      (filename ? `/api/stream?file=${encodeURIComponent(filename)}` : null)
-    );
+
+    const candidateFilenames = [
+      offItem?.filename,
+      track.filename,
+      dl?.filename,
+      likedItem?.filename
+    ].filter(Boolean);
+
+    const candidateUrls = [
+      offItem?.streamUrl,
+      track.streamUrl,
+      likedItem?.streamUrl,
+      ...candidateFilenames.map(fn => `/api/stream?file=${encodeURIComponent(fn)}`)
+    ].filter(Boolean);
+
+    // Prefer a candidate URL that is verified to exist in RAM blob cache or CacheStorage
+    for (const u of candidateUrls) {
+      if (
+        blobUrlCacheRef.current.has(u) ||
+        offlineUrls[u] ||
+        cachedStreamKeysRef.current.has(u)
+      ) {
+        return u;
+      }
+    }
+    for (const fn of candidateFilenames) {
+      if (
+        blobUrlCacheRef.current.has(`file:${fn}`) ||
+        cachedStreamKeysRef.current.has(`file:${fn}`)
+      ) {
+        return `/api/stream?file=${encodeURIComponent(fn)}`;
+      }
+    }
+
+    return candidateUrls[0] || null;
   }
 
   function getCachedBlobUrlForTrack(track) {
     if (!track) return null;
-    const streamUrl = getTrackStreamUrl(track);
-    if (streamUrl && blobUrlCacheRef.current.has(streamUrl)) {
-      return blobUrlCacheRef.current.get(streamUrl);
-    }
     const offItem = findOfflineItem(track);
-    const filename = track.filename || offItem?.filename || downloads[track.id]?.filename;
-    if (filename && blobUrlCacheRef.current.has(`file:${filename}`)) {
-      return blobUrlCacheRef.current.get(`file:${filename}`);
+    const dedupKey = getTrackDedupKey(track);
+    const likedItem =
+      likedLookup.byId.get(String(track.id)) ||
+      (dedupKey ? likedLookup.byDedup.get(dedupKey) : null);
+    const dl = downloads[track.id];
+
+    const candidateUrls = [
+      getTrackStreamUrl(track),
+      offItem?.streamUrl,
+      track.streamUrl,
+      likedItem?.streamUrl
+    ].filter(Boolean);
+
+    for (const u of candidateUrls) {
+      if (blobUrlCacheRef.current.has(u)) {
+        return blobUrlCacheRef.current.get(u);
+      }
     }
+
+    const candidateFilenames = [
+      offItem?.filename,
+      track.filename,
+      dl?.filename,
+      likedItem?.filename
+    ].filter(Boolean);
+
+    for (const fn of candidateFilenames) {
+      if (blobUrlCacheRef.current.has(`file:${fn}`)) {
+        return blobUrlCacheRef.current.get(`file:${fn}`);
+      }
+    }
+
+    if (dedupKey && blobUrlCacheRef.current.has(`dedup:${dedupKey}`)) {
+      return blobUrlCacheRef.current.get(`dedup:${dedupKey}`);
+    }
+
     return null;
   }
 
@@ -2017,20 +2090,34 @@ export default function HomePage() {
           if (already) return already;
           const cache = await getOpenAudioCache();
           if (!cache) return streamUrl;
+          const offItem = findOfflineItem(track);
           const fullUrl = new URL(streamUrl, window.location.origin).href;
-          const cachedResp = (await cache.match(streamUrl)) || (await cache.match(fullUrl));
+          const filename =
+            offItem?.filename ||
+            track.filename ||
+            downloads[track.id]?.filename ||
+            new URL(fullUrl).searchParams.get('file');
+          const exactCachedKey =
+            cachedStreamKeysRef.current.get(streamUrl) ||
+            (filename ? cachedStreamKeysRef.current.get(`file:${filename}`) : null) ||
+            null;
+
+          const cachedResp =
+            (exactCachedKey ? await cache.match(exactCachedKey) : null) ||
+            (await cache.match(streamUrl)) ||
+            (await cache.match(fullUrl)) ||
+            (offItem?.streamUrl ? await cache.match(offItem.streamUrl) : null);
+
           if (cachedResp) {
             const blob = await cachedResp.blob();
             if (blob && blob.size > 0) {
               const recheck = getCachedBlobUrlForTrack(track);
               if (recheck) return recheck;
               const blobUrl = URL.createObjectURL(blob);
-              const offItem = findOfflineItem(track);
-              const filename =
-                track.filename ||
-                offItem?.filename ||
-                new URL(fullUrl).searchParams.get('file');
-              registerBlobUrlForKeys(blobUrl, streamUrl, filename);
+              registerBlobUrlForKeys(blobUrl, streamUrl, filename, track);
+              if (offItem?.streamUrl && offItem.streamUrl !== streamUrl) {
+                registerBlobUrlForKeys(blobUrl, offItem.streamUrl, offItem.filename, offItem);
+              }
               return blobUrl;
             }
           }
@@ -2713,73 +2800,98 @@ export default function HomePage() {
 
   function preloadUpcomingQueueBlobs(list = queueRef.current, fromIdx = currentIndexRef.current) {
     if (!Array.isArray(list) || list.length === 0) return;
-    const orderedIndices = [];
-    const seen = new Set();
-    const pushIdx = idx => {
-      if (idx >= 0 && idx < list.length && !seen.has(idx)) {
-        seen.add(idx);
-        orderedIndices.push(idx);
-      }
-    };
+    if (warmingInProgressRef.current) return;
 
-    if (fromIdx >= 0 && fromIdx < list.length) {
-      pushIdx(fromIdx);
-      pushIdx(fromIdx + 1);
-      pushIdx(fromIdx + 2);
-      pushIdx(fromIdx - 1);
-    }
+    const buildUncachedOrderedList = () => {
+      const activeList = queueRef.current.length > 0 ? queueRef.current : list;
+      const activeFrom = currentIndexRef.current >= 0 ? currentIndexRef.current : fromIdx;
+      const orderedIndices = [];
+      const seen = new Set();
+      const pushIdx = idx => {
+        if (idx >= 0 && idx < activeList.length && !seen.has(idx)) {
+          seen.add(idx);
+          orderedIndices.push(idx);
+        }
+      };
 
-    const { order, pos } = shuffleStateRef.current;
-    if (Array.isArray(order) && order.length > 0) {
-      const startPos = Math.max(0, pos);
-      for (let offset = 0; offset < order.length; offset++) {
-        pushIdx(order[(startPos + offset) % order.length]);
-      }
-    }
-
-    for (let offset = 0; offset < list.length; offset++) {
-      const base = fromIdx >= 0 ? fromIdx : 0;
-      pushIdx((base + offset) % list.length);
-    }
-
-    // Filter to tracks whose blob URL is not yet in memory and not already in-flight
-    const uncachedTracks = [];
-    for (const idx of orderedIndices) {
-      const t = list[idx];
-      if (!t || getCachedBlobUrlForTrack(t)) continue;
-      const streamUrl = getTrackStreamUrl(t);
-      if (streamUrl && !inflightBlobPromisesRef.current.has(streamUrl)) {
-        uncachedTracks.push(t);
-      }
-    }
-    if (uncachedTracks.length === 0) return;
-
-    // Warm the entire queue without ever cancelling batches; in-flight deduplication prevents duplicate work
-    const immediateBatch = uncachedTracks.slice(0, 32);
-    const remainingBatch = uncachedTracks.slice(32);
-
-    Promise.all(immediateBatch.map(t => resolvePlayableSource(t).catch(() => {}))).then(
-      async () => {
-        for (let i = 0; i < remainingBatch.length; i += 32) {
-          const chunk = remainingBatch
-            .slice(i, i + 32)
-            .filter(t => !getCachedBlobUrlForTrack(t));
-          if (chunk.length > 0) {
-            await Promise.all(chunk.map(t => resolvePlayableSource(t).catch(() => {})));
-          }
+      const { order, pos } = shuffleStateRef.current;
+      if (Array.isArray(order) && order.length > 0) {
+        const startPos = Math.max(0, pos);
+        for (let offset = 0; offset < order.length; offset++) {
+          pushIdx(order[(startPos + offset) % order.length]);
         }
       }
-    );
+
+      if (activeFrom >= 0 && activeFrom < activeList.length) {
+        pushIdx(activeFrom);
+        pushIdx(activeFrom + 1);
+        pushIdx(activeFrom + 2);
+        pushIdx(activeFrom - 1);
+      }
+
+      for (let offset = 0; offset < activeList.length; offset++) {
+        const base = activeFrom >= 0 ? activeFrom : 0;
+        pushIdx((base + offset) % activeList.length);
+      }
+
+      const uncached = [];
+      for (const idx of orderedIndices) {
+        const t = activeList[idx];
+        if (!t || getCachedBlobUrlForTrack(t)) continue;
+        const streamUrl = getTrackStreamUrl(t);
+        if (streamUrl && !inflightBlobPromisesRef.current.has(streamUrl)) {
+          uncached.push(t);
+        }
+      }
+      return uncached;
+    };
+
+    const initialCheck = buildUncachedOrderedList();
+    if (initialCheck.length === 0) return;
+
+    warmingInProgressRef.current = true;
+    (async () => {
+      try {
+        while (true) {
+          // Always re-evaluate priority order so newly selected tracks/queues are warmed first
+          const pending = buildUncachedOrderedList();
+          if (pending.length === 0) break;
+          const batch = pending.slice(0, 6);
+          await Promise.all(batch.map(t => resolvePlayableSource(t).catch(() => {})));
+        }
+      } finally {
+        warmingInProgressRef.current = false;
+      }
+    })();
+  }
+
+  function handleTrackPlaybackFailure(failedIdx, activeQueue) {
+    if (currentIndexRef.current !== failedIdx) return;
+    const isHidden = typeof document !== 'undefined' && document.visibilityState === 'hidden';
+    if (
+      isHidden &&
+      Array.isArray(activeQueue) &&
+      activeQueue.length > 1 &&
+      consecutivePlayFailuresRef.current < Math.min(activeQueue.length, 8)
+    ) {
+      consecutivePlayFailuresRef.current += 1;
+      playNext();
+      return;
+    }
+    isPlayingRef.current = false;
+    setIsPlaying(false);
   }
 
   function startTrackAtIndexImmediate(nextIdx, listOverride = null) {
     const activeQueue = listOverride || queueRef.current;
     if (!Array.isArray(activeQueue) || nextIdx < 0 || nextIdx >= activeQueue.length) {
+      isPlayingRef.current = false;
       setIsPlaying(false);
       return;
     }
     const nextTrack = activeQueue[nextIdx];
     if (!nextTrack) {
+      isPlayingRef.current = false;
       setIsPlaying(false);
       return;
     }
@@ -2800,28 +2912,37 @@ export default function HomePage() {
     isPlayingRef.current = true;
     setIsPlaying(true);
 
-    // Pre-warm upcoming tracks via microtask (never frozen by screen-off timer throttling)
-    Promise.resolve().then(() => {
-      preloadUpcomingQueueBlobs(activeQueue, nextIdx);
-    });
+    const cachedBlobUrl = getCachedBlobUrlForTrack(nextTrack);
+    const directOnlinePreview = !isTrackAvailableOffline(nextTrack) ? nextTrack.previewUrl : null;
+    const isHiddenScreen =
+      typeof document !== 'undefined' && document.visibilityState === 'hidden';
 
-    // CRITICAL for iOS WebKit screen-off playback:
-    // Always assign audio.src and call audio.play() SYNCHRONOUSLY inside the onEnded / action handler turn.
-    // Waiting for an async Promise before calling .play() loses WebKit's background media gesture token.
-    const syncSrc = getSyncPlayableSource(nextTrack);
+    // 1. Fast synchronous path: when the track's Blob URL is already in RAM (or screen is locked on iOS),
+    // assign audio.src and call audio.play() synchronously in the same turn.
+    const syncSrc =
+      cachedBlobUrl ||
+      directOnlinePreview ||
+      (isHiddenScreen ? getSyncPlayableSource(nextTrack) : null);
+
     if (syncSrc && audioRef.current) {
       lastDirectPlayRef.current = {
         index: nextIdx,
         id: String(nextTrack.id),
         src: syncSrc
       };
-      audioRef.current.src = syncSrc;
+      if (audioRef.current.src !== syncSrc) {
+        audioRef.current.src = syncSrc;
+      }
+      playInFlightRef.current = true;
       const playPromise = audioRef.current.play();
       if (playPromise && typeof playPromise.then === 'function') {
         playPromise
           .then(() => {
+            playInFlightRef.current = false;
+            consecutivePlayFailuresRef.current = 0;
             isPlayingRef.current = true;
             setIsPlaying(true);
+            preloadUpcomingQueueBlobs(activeQueue, nextIdx);
           })
           .catch(() => {
             resolvePlayableSource(nextTrack).then(resolvedSrc => {
@@ -2841,43 +2962,73 @@ export default function HomePage() {
                 audioRef.current
                   .play()
                   .then(() => {
+                    playInFlightRef.current = false;
+                    consecutivePlayFailuresRef.current = 0;
                     isPlayingRef.current = true;
                     setIsPlaying(true);
+                    preloadUpcomingQueueBlobs(activeQueue, nextIdx);
                   })
                   .catch(() => {
-                    isPlayingRef.current = false;
-                    setIsPlaying(false);
+                    playInFlightRef.current = false;
+                    handleTrackPlaybackFailure(nextIdx, activeQueue);
                   });
+              } else {
+                playInFlightRef.current = false;
+                handleTrackPlaybackFailure(nextIdx, activeQueue);
               }
             });
           });
       } else {
+        playInFlightRef.current = false;
+        consecutivePlayFailuresRef.current = 0;
         isPlayingRef.current = true;
         setIsPlaying(true);
+        preloadUpcomingQueueBlobs(activeQueue, nextIdx);
       }
       return;
     }
 
-    resolvePlayableSource(nextTrack).then(resolvedSrc => {
-      if (resolvedSrc && audioRef.current && currentIndexRef.current === nextIdx) {
-        audioRef.current.src = resolvedSrc;
+    // 2. Priority Blob resolution path (when user clicks a track or Play button before its Blob URL is in RAM):
+    // Resolve the clicked track's Blob URL from CacheStorage FIRST (~5ms, without assigning a deleted /api/stream URL)
+    // and then call audio.play() once inside the active user gesture window.
+    lastDirectPlayRef.current = {
+      index: nextIdx,
+      id: String(nextTrack.id),
+      src: 'pending'
+    };
+    playInFlightRef.current = true;
+    resolvePlayableSource(nextTrack)
+      .then(resolvedSrc => {
+        if (!resolvedSrc || !audioRef.current || currentIndexRef.current !== nextIdx) {
+          playInFlightRef.current = false;
+          return;
+        }
+        if (audioRef.current.src !== resolvedSrc) {
+          audioRef.current.src = resolvedSrc;
+        }
         lastDirectPlayRef.current = {
           index: nextIdx,
           id: String(nextTrack.id),
           src: resolvedSrc
         };
-        audioRef.current
+        return audioRef.current
           .play()
           .then(() => {
+            playInFlightRef.current = false;
+            consecutivePlayFailuresRef.current = 0;
             isPlayingRef.current = true;
             setIsPlaying(true);
+            preloadUpcomingQueueBlobs(activeQueue, nextIdx);
           })
           .catch(() => {
-            isPlayingRef.current = false;
-            setIsPlaying(false);
+            playInFlightRef.current = false;
+            handleTrackPlaybackFailure(nextIdx, activeQueue);
           });
-      }
-    });
+      })
+      .catch(() => {
+        playInFlightRef.current = false;
+        handleTrackPlaybackFailure(nextIdx, activeQueue);
+      });
   }
 
   function toggleShuffle() {
@@ -2943,6 +3094,17 @@ export default function HomePage() {
       startIdx: startRandom ? -1 : mappedIdx,
       recentKeys: recentPlayedKeysRef.current
     });
+
+    // When starting random playback (top orange-black Play button), if order[0]'s Blob URL is not yet in RAM
+    // but another candidate in the shuffle order already has its Blob URL ready in RAM, promote it to order[0]
+    // so playback begins in 0ms synchronously on the very first tap.
+    if (startRandom && order.length > 1 && !getCachedBlobUrlForTrack(playableList[order[0]])) {
+      const readyPos = order.findIndex(idx => Boolean(getCachedBlobUrlForTrack(playableList[idx])));
+      if (readyPos > 0) {
+        [order[0], order[readyPos]] = [order[readyPos], order[0]];
+      }
+    }
+
     shuffleStateRef.current = { order, pos: 0, queueLen: playableList.length };
     const firstIdx = order[0] ?? mappedIdx;
     startTrackAtIndexImmediate(firstIdx, playableList);
@@ -2950,11 +3112,30 @@ export default function HomePage() {
 
   function togglePlayPause() {
     if (!audioRef.current || !currentTrack) return;
-    if (isPlaying) {
-      audioRef.current.pause();
+    const audioEl = audioRef.current;
+    const actuallyPlaying = !audioEl.paused && !audioEl.ended && audioEl.readyState > 0;
+    if (actuallyPlaying) {
+      audioEl.pause();
+      isPlayingRef.current = false;
       setIsPlaying(false);
     } else {
-      audioRef.current.play().then(() => setIsPlaying(true)).catch(() => {});
+      if (!audioEl.src) {
+        startTrackAtIndexImmediate(currentIndexRef.current, queueRef.current);
+        return;
+      }
+      playInFlightRef.current = true;
+      audioEl
+        .play()
+        .then(() => {
+          playInFlightRef.current = false;
+          isPlayingRef.current = true;
+          setIsPlaying(true);
+          preloadUpcomingQueueBlobs(queueRef.current, currentIndexRef.current);
+        })
+        .catch(() => {
+          playInFlightRef.current = false;
+          startTrackAtIndexImmediate(currentIndexRef.current, queueRef.current);
+        });
     }
   }
 
@@ -3246,7 +3427,6 @@ export default function HomePage() {
             if (isActualCurrent) {
               if (wasSearching && isOfflineReady) {
                 playFromList(targetList, 0);
-                if (!isPlaying) togglePlayPause();
               } else {
                 togglePlayPause();
               }
@@ -4082,6 +4262,12 @@ export default function HomePage() {
                     type="button"
                     className="icon-btn play-circle"
                     disabled={playableActiveLibraryTracks.length === 0}
+                    onPointerDown={() => {
+                      if (playableActiveLibraryTracks.length > 0) {
+                        const sample = playableActiveLibraryTracks.slice(0, 4);
+                        sample.forEach(t => resolvePlayableSource(t).catch(() => {}));
+                      }
+                    }}
                     onClick={() => playFromList(activeLibraryTracks, 0, true)}
                     title="Reproducir librería en aleatorio"
                   >
@@ -5127,15 +5313,23 @@ export default function HomePage() {
           const audioEl = e.currentTarget;
           const dur = audioEl.duration;
           setDuration(dur);
-          preloadUpcomingQueueBlobs(queueRef.current, currentIndexRef.current);
-          if (isPlayingRef.current && audioEl.paused) {
+          if (isPlayingRef.current && audioEl.paused && !playInFlightRef.current) {
+            playInFlightRef.current = true;
             audioEl
               .play()
               .then(() => {
+                playInFlightRef.current = false;
+                consecutivePlayFailuresRef.current = 0;
                 isPlayingRef.current = true;
                 setIsPlaying(true);
+                preloadUpcomingQueueBlobs(queueRef.current, currentIndexRef.current);
               })
-              .catch(() => {});
+              .catch(() => {
+                playInFlightRef.current = false;
+                const stillPlaying = !audioEl.paused;
+                isPlayingRef.current = stillPlaying;
+                setIsPlaying(stillPlaying);
+              });
           }
           if (
             typeof navigator !== 'undefined' &&
@@ -5155,7 +5349,12 @@ export default function HomePage() {
         }}
         onEnded={handleTrackEnded}
         onError={() => {
-          if (queueRef.current.length > 1) {
+          playInFlightRef.current = false;
+          if (
+            queueRef.current.length > 1 &&
+            consecutivePlayFailuresRef.current < Math.min(queueRef.current.length, 8)
+          ) {
+            consecutivePlayFailuresRef.current += 1;
             playNext();
           } else {
             isPlayingRef.current = false;
@@ -5164,6 +5363,8 @@ export default function HomePage() {
         }}
         onPlay={e => {
           const audioEl = e.currentTarget;
+          playInFlightRef.current = false;
+          consecutivePlayFailuresRef.current = 0;
           isPlayingRef.current = true;
           setIsPlaying(true);
           preloadUpcomingQueueBlobs(queueRef.current, currentIndexRef.current);
@@ -5187,7 +5388,7 @@ export default function HomePage() {
         }}
         onPause={e => {
           const audioEl = e.currentTarget;
-          if (audioEl.ended) return;
+          if (audioEl.ended || playInFlightRef.current) return;
           isPlayingRef.current = false;
           setIsPlaying(false);
           if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
