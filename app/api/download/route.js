@@ -77,6 +77,80 @@ export function isAllowedMediaUrl(rawUrl) {
   }
 }
 
+export function normalizeDirectMediaUrl(rawUrl) {
+  try {
+    const parsed = new URL(String(rawUrl || '').trim());
+    if (parsed.protocol !== 'https:' || parsed.port !== '' || parsed.username || parsed.password) {
+      return String(rawUrl || '').trim();
+    }
+    const host = parsed.hostname.toLowerCase();
+    if (host === 'youtu.be') {
+      const id = parsed.pathname.split('/').filter(Boolean)[0];
+      if (id && /^[\w-]{11}$/.test(id)) {
+        return `https://www.youtube.com/watch?v=${id}`;
+      }
+    }
+    if (
+      host === 'youtube.com' ||
+      host === 'www.youtube.com' ||
+      host === 'm.youtube.com' ||
+      host === 'music.youtube.com'
+    ) {
+      const v = parsed.searchParams.get('v');
+      if (v && /^[\w-]{11}$/.test(v)) {
+        return `https://www.youtube.com/watch?v=${v}`;
+      }
+      const parts = parsed.pathname.split('/').filter(Boolean);
+      if ((parts[0] === 'shorts' || parts[0] === 'embed' || parts[0] === 'live') && parts[1]) {
+        if (/^[\w-]{11}$/.test(parts[1])) {
+          return `https://www.youtube.com/watch?v=${parts[1]}`;
+        }
+      }
+    }
+    return parsed.href;
+  } catch {
+    return String(rawUrl || '').trim();
+  }
+}
+
+async function resolveDirectUrlOembedMeta(directUrl) {
+  try {
+    const oembedUrl = `https://www.youtube.com/oembed?url=${encodeURIComponent(
+      directUrl
+    )}&format=json`;
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 3500);
+    const res = await fetch(oembedUrl, { signal: ctrl.signal });
+    clearTimeout(timer);
+    if (!res.ok) return null;
+    const data = await res.json();
+    const rawTitle = String(data.title || '').trim();
+    let author = String(data.author_name || '')
+      .replace(/\s*-\s*Topic$/i, '')
+      .trim();
+    let cleanTitle = rawTitle
+      .replace(
+        /\s*[\(\[](official\s*(music\s*)?video|video\s*oficial|audio\s*oficial|official\s*audio|lyric\s*video|lyrics?|letra|hd|4k|hq)[\)\]]/gi,
+        ''
+      )
+      .trim();
+    if (/\s+[-–—]\s+/.test(cleanTitle)) {
+      const parts = cleanTitle.split(/\s+[-–—]\s+/);
+      if (parts.length >= 2 && parts[0].trim().length >= 2 && parts[1].trim().length >= 2) {
+        author = parts[0].trim();
+        cleanTitle = parts.slice(1).join(' - ').trim();
+      }
+    }
+    return {
+      title: cleanTitle || rawTitle || null,
+      artist: author || 'YouTube',
+      artwork: data.thumbnail_url || null
+    };
+  } catch {
+    return null;
+  }
+}
+
 function sanitizeSearchQuery(raw) {
   return String(raw || '')
     .replace(/https?:\/\/\S+/gi, '')
@@ -793,12 +867,39 @@ async function runExtractionPipeline(
     };
 
     if (/^https?:\/\//i.test(rawQuery)) {
-      if (!isAllowedMediaUrl(rawQuery)) {
+      const directUrl = normalizeDirectMediaUrl(rawQuery);
+      if (!isAllowedMediaUrl(directUrl)) {
         item.status = 'error';
         item.error = 'Dominio de URL no permitido.';
         return;
       }
-      targets = [{ url: rawQuery, isSearchPool: false }];
+      const isPlaceholderYtTitle =
+        !metaTitle ||
+        /^https?:\/\//i.test(metaTitle) ||
+        /^youtube\s*\(/i.test(metaTitle);
+      const isPlaceholderYtArtist =
+        !metaArtist || metaArtist.toLowerCase() === 'youtube';
+      if (isPlaceholderYtTitle || isPlaceholderYtArtist) {
+        const oembed = await resolveDirectUrlOembedMeta(directUrl);
+        if (oembed) {
+          if (oembed.title && isPlaceholderYtTitle) {
+            metaTitle = oembed.title;
+            item.title = oembed.title;
+          }
+          if (oembed.artist && isPlaceholderYtArtist) {
+            metaArtist = oembed.artist;
+            item.artist = oembed.artist;
+          }
+          if (oembed.artwork && !item.artwork) {
+            item.artwork = oembed.artwork;
+          }
+        }
+      }
+      if (!metaAlbum) metaAlbum = 'YouTube';
+      targets = [{ url: directUrl, isSearchPool: false, useCookies: hasCookiesConfigured }];
+      if (hasCookiesConfigured) {
+        targets.push({ url: directUrl, isSearchPool: false, useCookies: false });
+      }
     } else {
       const primaryTitle = stripParentheticalSubtitles(cleanTitle);
       const artistAndCleanTitle = sanitizeSearchQuery(
@@ -1126,7 +1227,14 @@ export async function POST(request) {
     }
 
     const data = await request.json();
-    const rawQuery = (data.query || `${data.title || ''} ${data.artist || ''}`).trim();
+    const rawCandidate = (
+      data.sourceUrl ||
+      data.query ||
+      `${data.title || ''} ${data.artist || ''}`
+    ).trim();
+    const rawQuery = /^https?:\/\//i.test(rawCandidate)
+      ? normalizeDirectMediaUrl(rawCandidate)
+      : rawCandidate;
 
     if (!rawQuery) {
       return NextResponse.json({ error: 'Nombre o búsqueda requerida' }, { status: 400 });

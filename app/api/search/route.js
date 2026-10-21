@@ -8,6 +8,87 @@ function formatMillis(ms) {
   return `${m}:${s}`;
 }
 
+export function extractYouTubeVideoId(rawInput) {
+  const str = String(rawInput || '').trim();
+  if (!str) return null;
+  try {
+    const parsed = new URL(str);
+    const host = parsed.hostname.toLowerCase();
+    if (host === 'youtu.be') {
+      const id = parsed.pathname.split('/').filter(Boolean)[0];
+      return id && /^[\w-]{11}$/.test(id) ? id : null;
+    }
+    if (
+      host === 'youtube.com' ||
+      host === 'www.youtube.com' ||
+      host === 'm.youtube.com' ||
+      host === 'music.youtube.com'
+    ) {
+      const v = parsed.searchParams.get('v');
+      if (v && /^[\w-]{11}$/.test(v)) return v;
+      const parts = parsed.pathname.split('/').filter(Boolean);
+      if ((parts[0] === 'shorts' || parts[0] === 'embed' || parts[0] === 'live') && parts[1]) {
+        return /^[\w-]{11}$/.test(parts[1]) ? parts[1] : null;
+      }
+    }
+  } catch {}
+  const match = str.match(
+    /(?:youtube\.com\/(?:watch\?.*v=|shorts\/|embed\/|live\/)|youtu\.be\/)([\w-]{11})/i
+  );
+  return match ? match[1] : null;
+}
+
+async function resolveYouTubeLinkTrack(videoId) {
+  const canonicalUrl = `https://www.youtube.com/watch?v=${videoId}`;
+  const defaultArtwork = `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`;
+  let rawTitle = `YouTube (${videoId})`;
+  let authorName = 'YouTube';
+  let artwork = defaultArtwork;
+
+  try {
+    const oembedUrl = `https://www.youtube.com/oembed?url=${encodeURIComponent(
+      canonicalUrl
+    )}&format=json`;
+    const res = await fetch(oembedUrl, { next: { revalidate: 3600 } });
+    if (res.ok) {
+      const data = await res.json();
+      if (data.title) rawTitle = String(data.title).trim();
+      if (data.author_name) {
+        authorName = String(data.author_name)
+          .replace(/\s*-\s*Topic$/i, '')
+          .trim();
+      }
+      if (data.thumbnail_url) artwork = data.thumbnail_url;
+    }
+  } catch {}
+
+  let cleanTitle = rawTitle
+    .replace(/\s*[\(\[](official\s*(music\s*)?video|video\s*oficial|audio\s*oficial|official\s*audio|lyric\s*video|lyrics?|letra|hd|4k|hq)[\)\]]/gi, '')
+    .trim();
+  let artist = authorName || 'YouTube';
+
+  if (/\s+[-–—]\s+/.test(cleanTitle)) {
+    const parts = cleanTitle.split(/\s+[-–—]\s+/);
+    if (parts.length >= 2 && parts[0].trim().length >= 2 && parts[1].trim().length >= 2) {
+      artist = parts[0].trim();
+      cleanTitle = parts.slice(1).join(' - ').trim();
+    }
+  }
+
+  return {
+    id: `yt_${videoId}`,
+    title: cleanTitle || rawTitle,
+    artist: artist || 'YouTube',
+    album: 'YouTube',
+    genre: 'YouTube',
+    artwork,
+    previewUrl: null,
+    duration: '—',
+    durationSec: 0,
+    sourceUrl: canonicalUrl
+  };
+}
+
 async function searchDeezerFallback(q) {
   try {
     const deezerUrl = `https://api.deezer.com/search?q=${encodeURIComponent(q)}&limit=15`;
@@ -43,6 +124,12 @@ export async function GET(request) {
 
   if (!q) {
     return NextResponse.json({ error: 'Falta término de búsqueda' }, { status: 400 });
+  }
+
+  const ytVideoId = extractYouTubeVideoId(q);
+  if (ytVideoId) {
+    const ytTrack = await resolveYouTubeLinkTrack(ytVideoId);
+    return NextResponse.json({ results: [ytTrack], tracks: [ytTrack] });
   }
 
   let results = [];
