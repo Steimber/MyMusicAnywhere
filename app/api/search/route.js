@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server';
+import { cleanYouTubeOembedMetadata } from '../../../lib/download/candidates';
 
 function formatMillis(ms) {
   if (!ms || isNaN(ms)) return '—';
@@ -54,31 +55,18 @@ async function resolveYouTubeLinkTrack(videoId) {
       const data = await res.json();
       if (data.title) rawTitle = String(data.title).trim();
       if (data.author_name) {
-        authorName = String(data.author_name)
-          .replace(/\s*-\s*Topic$/i, '')
-          .trim();
+        authorName = String(data.author_name).trim();
       }
       if (data.thumbnail_url) artwork = data.thumbnail_url;
     }
   } catch {}
 
-  let cleanTitle = rawTitle
-    .replace(/\s*[\(\[](official\s*(music\s*)?video|video\s*oficial|audio\s*oficial|official\s*audio|lyric\s*video|lyrics?|letra|hd|4k|hq)[\)\]]/gi, '')
-    .trim();
-  let artist = authorName || 'YouTube';
-
-  if (/\s+[-–—]\s+/.test(cleanTitle)) {
-    const parts = cleanTitle.split(/\s+[-–—]\s+/);
-    if (parts.length >= 2 && parts[0].trim().length >= 2 && parts[1].trim().length >= 2) {
-      artist = parts[0].trim();
-      cleanTitle = parts.slice(1).join(' - ').trim();
-    }
-  }
+  const cleanedMeta = cleanYouTubeOembedMetadata(rawTitle, authorName);
 
   return {
     id: `yt_${videoId}`,
-    title: cleanTitle || rawTitle,
-    artist: artist || 'YouTube',
+    title: cleanedMeta.title || rawTitle,
+    artist: cleanedMeta.artist || 'YouTube',
     album: 'YouTube',
     genre: 'YouTube',
     artwork,

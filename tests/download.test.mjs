@@ -11,8 +11,10 @@ import {
 } from '../lib/download/queue.js';
 
 import {
+  cleanYouTubeOembedMetadata,
   buildCandidateContext,
   evaluateCandidate,
+  evaluateCandidatePool,
   scoreLoopCandidate,
   buildRejectTitleRegex,
   isUrlDrmBlocked,
@@ -384,4 +386,100 @@ test('candidates: DRM cache blocks marked HTTP(S) URLs for 24h and ignores searc
   // Expires after 24 hours
   const after25Hours = 1000 + 25 * 60 * 60 * 1000;
   assert.equal(isUrlDrmBlocked(url, cache, after25Hours), false);
+});
+
+test('candidates: cleanYouTubeOembedMetadata strips warning/lyric tags and preserves Unicode artist + Demo number', () => {
+  const cleaned = cleanYouTubeOembedMetadata(
+    '*flash warning* ミラクルミュージカル – The Mind Electric (Demo 4) Fanmade Lyric Video',
+    'weirdredstone42'
+  );
+  assert.equal(cleaned.artist, 'ミラクルミュージカル');
+  assert.equal(cleaned.title, 'The Mind Electric (Demo 4)');
+
+  // Hyphenated titles must not split into Artist/Title
+  const hyphenated = cleanYouTubeOembedMetadata(
+    'Anti-Hero (Official Music Video)',
+    'Taylor Swift'
+  );
+  assert.equal(hyphenated.artist, 'Taylor Swift');
+  assert.equal(hyphenated.title, 'Anti-Hero');
+
+  // Official - Topic channels must not split "Song - Interlude" into artist="Song"
+  const topicTrack = cleanYouTubeOembedMetadata(
+    "Don't Go Breaking My Heart - Interlude",
+    'Taron Egerton - Topic'
+  );
+  assert.equal(topicTrack.artist, 'Taron Egerton');
+  assert.equal(topicTrack.title, "Don't Go Breaking My Heart - Interlude");
+
+  const ctx = buildCandidateContext(
+    cleaned.title,
+    cleaned.title,
+    cleaned.artist,
+    null
+  );
+
+  const pool = evaluateCandidatePool(
+    [
+      {
+        extractor: 'soundcloud',
+        webpageUrl: 'https://soundcloud.com/user-721711351/the-mind-electric-demo-3',
+        title: 'ミラクルミュージカル - The Mind Electric (Demo 3)',
+        uploader: 'ミラクルミュージカル archive',
+        duration: 145.7
+      },
+      {
+        extractor: 'soundcloud',
+        webpageUrl: 'https://soundcloud.com/user-721711351/other-song-demo-4',
+        title: 'ミラクルミュージカル - Labyrinth (Demo 4)',
+        uploader: 'ミラクルミュージカル archive',
+        duration: 94.6
+      },
+      {
+        extractor: 'soundcloud',
+        webpageUrl: 'https://soundcloud.com/miracle-musical/the-mind-electric-demo-4',
+        title: 'The Mind Electric (Demo 4)',
+        uploader: 'Miracle Musical |ミラクルミュージカル',
+        duration: 94.6
+      }
+    ],
+    ctx,
+    'sc-test',
+    'ミラクルミュージカル - The Mind Electric (Demo 4)'
+  );
+
+  assert.equal(pool.tier1.length, 1);
+  assert.equal(
+    pool.tier1[0].webpageUrl,
+    'https://soundcloud.com/miracle-musical/the-mind-electric-demo-4'
+  );
+});
+
+test('candidates: evaluateCandidatePool falls back to relaxedDuration when only extended version exists and still rejects slowed/reverb', () => {
+  const ctx = buildCandidateContext('Hero', 'Hero', 'Miss Papaya', 215);
+  const pool = evaluateCandidatePool(
+    [
+      {
+        extractor: 'soundcloud',
+        webpageUrl: 'https://soundcloud.com/youth-is-arcadia/hero-papaya-mp3',
+        title: 'Hero - Papaya.mp3',
+        uploader: 'Arcadia',
+        duration: 264.87
+      },
+      {
+        extractor: 'soundcloud',
+        webpageUrl: 'https://soundcloud.com/nashirangels/miss-papaya-hero-slowed-reverb',
+        title: 'Miss Papaya - Hero (Slowed + Reverb)',
+        uploader: 'Nashirabutterfly',
+        duration: 361.46
+      }
+    ],
+    ctx,
+    'sc-test',
+    'Miss Papaya - Hero'
+  );
+
+  assert.equal(pool.tier1.length, 1);
+  assert.equal(pool.tier1[0].webpageUrl, 'https://soundcloud.com/youth-is-arcadia/hero-papaya-mp3');
+  assert.equal(pool.tier1[0].relaxedDuration, true);
 });

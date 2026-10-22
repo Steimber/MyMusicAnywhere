@@ -24,6 +24,8 @@ import {
   markUrlDrmBlocked,
   sanitizeSlug,
   normalizeText,
+  stripYouTubeTitleNoise,
+  cleanYouTubeOembedMetadata,
   stripRemasterNoise,
   stripParentheticalSubtitles,
   cleanArtistName,
@@ -124,26 +126,10 @@ async function resolveDirectUrlOembedMeta(directUrl) {
     clearTimeout(timer);
     if (!res.ok) return null;
     const data = await res.json();
-    const rawTitle = String(data.title || '').trim();
-    let author = String(data.author_name || '')
-      .replace(/\s*-\s*Topic$/i, '')
-      .trim();
-    let cleanTitle = rawTitle
-      .replace(
-        /\s*[\(\[](official\s*(music\s*)?video|video\s*oficial|audio\s*oficial|official\s*audio|lyric\s*video|lyrics?|letra|hd|4k|hq)[\)\]]/gi,
-        ''
-      )
-      .trim();
-    if (/\s+[-–—]\s+/.test(cleanTitle)) {
-      const parts = cleanTitle.split(/\s+[-–—]\s+/);
-      if (parts.length >= 2 && parts[0].trim().length >= 2 && parts[1].trim().length >= 2) {
-        author = parts[0].trim();
-        cleanTitle = parts.slice(1).join(' - ').trim();
-      }
-    }
+    const cleaned = cleanYouTubeOembedMetadata(data.title, data.author_name);
     return {
-      title: cleanTitle || rawTitle || null,
-      artist: author || 'YouTube',
+      title: cleaned.title,
+      artist: cleaned.artist,
       artwork: data.thumbnail_url || null
     };
   } catch {
@@ -216,12 +202,16 @@ async function resolveCatalogMetadata(rawDuration, cleanTitle, primaryArtist) {
   const titleTokens = getTitleCoreTokens(cleanTitle);
   const artistTokens = getArtistTokens(primaryArtist);
   const wantLive = /\b(live|vivo)\b/i.test(cleanTitle);
+  const wantDemo = /\bdemo\b/i.test(cleanTitle);
+  const wantExtended = /\bextended\b/i.test(cleanTitle);
 
   const matchCatalogTrack = (trackTitle, trackArtist, sec) => {
     if (!sec || sec < 45 || sec > 1200) return false;
     const hTitle = normalizeText(trackTitle);
     const hArtist = normalizeText(trackArtist);
     if (!wantLive && /\b(live|vivo)\b/i.test(hTitle)) return false;
+    if (wantDemo !== /\bdemo\b/i.test(hTitle)) return false;
+    if (wantExtended && !/\bextended\b/i.test(hTitle)) return false;
 
     if (artistTokens.length > 0) {
       const tOk = titleTokens.every(t => hTitle.includes(t));
@@ -809,7 +799,7 @@ async function runExtractionPipeline(
     const rawTitle = String(item.title || rawQuery || '').trim();
     let cleanTitle = stripRemasterNoise(rawTitle) || rawTitle;
     let primaryArtist = cleanArtistName(item.artist);
-    if (!primaryArtist && /\s+[-–—]\s+/.test(cleanTitle)) {
+    if (!/^https?:\/\//i.test(rawQuery) && !primaryArtist && /\s+[-–—]\s+/.test(cleanTitle)) {
       const parts = cleanTitle.split(/\s+[-–—]\s+/);
       if (parts.length >= 2 && parts[0].trim().length >= 2) {
         primaryArtist = cleanArtistName(parts[0]);
@@ -834,7 +824,7 @@ async function runExtractionPipeline(
       const scDirectTargets = scPool.tier1.slice(0, 2).map(best => ({
         url: best.webpageUrl,
         isSearchPool: false,
-        trimDurationSec: maxAllowedDur,
+        trimDurationSec: best.relaxedDuration ? null : maxAllowedDur,
         useCookies: false
       }));
       const scLoopTargets = scPool.loopTier2.slice(0, 2).map(loopCand => ({
@@ -861,7 +851,7 @@ async function runExtractionPipeline(
       return orderedYt.slice(0, 2).map(best => ({
         url: best.webpageUrl,
         isSearchPool: false,
-        trimDurationSec: maxAllowedDur,
+        trimDurationSec: best.relaxedDuration ? null : maxAllowedDur,
         useCookies: hasCookiesConfigured
       }));
     };
@@ -894,11 +884,28 @@ async function runExtractionPipeline(
             item.artwork = oembed.artwork;
           }
         }
+      } else {
+        const strippedTitle = stripYouTubeTitleNoise(metaTitle);
+        if (strippedTitle && !/^https?:\/\//i.test(strippedTitle)) {
+          metaTitle = strippedTitle;
+          item.title = strippedTitle;
+        }
+        const strippedArtist = String(metaArtist || '')
+          .replace(/\*[^*]{1,40}\*/g, ' ')
+          .replace(/\s+/g, ' ')
+          .trim();
+        if (strippedArtist) {
+          metaArtist = strippedArtist;
+          item.artist = strippedArtist;
+        }
       }
       if (!metaAlbum) metaAlbum = 'YouTube';
       targets = [{ url: directUrl, isSearchPool: false, useCookies: hasCookiesConfigured }];
       if (hasCookiesConfigured) {
         targets.push({ url: directUrl, isSearchPool: false, useCookies: false });
+      }
+      if (/youtube\.com|youtu\.be/i.test(directUrl)) {
+        targets.push({ lazyDiscovery: 'sc-direct-fallback', directUrl });
       }
     } else {
       const primaryTitle = stripParentheticalSubtitles(cleanTitle);
@@ -1011,10 +1018,13 @@ async function runExtractionPipeline(
         .replace(/\s+/g, ' ')
         .trim();
 
-      const titleCoreWords = getTitleCoreTokens(effectiveTitle).slice(0, 4);
+      const titleCoreWords = getTitleCoreTokens(effectiveTitle)
+        .map(w => w.replace(/[^\p{L}\p{N}]/gu, ''))
+        .filter(Boolean)
+        .slice(0, 4);
       const biliMatchTitleRegex =
         titleCoreWords.length > 0
-          ? `(?i)${titleCoreWords.map(w => `(?=.*${w.replace(/[^a-z0-9]/gi, '')})`).join('')}`
+          ? `(?i)${titleCoreWords.map(w => `(?=.*${w})`).join('')}`
           : null;
 
       const biliTarget = {
@@ -1083,6 +1093,63 @@ async function runExtractionPipeline(
           const discoveredYtTargets = buildYtTargetsFromPool(ytPool);
           if (discoveredYtTargets.length > 0) {
             targets.splice(idx + 1, 0, ...discoveredYtTargets);
+          }
+        } else if (t.lazyDiscovery === 'sc-direct-fallback') {
+          let fallbackTitle = stripRemasterNoise(metaTitle) || metaTitle;
+          let fallbackArtist = cleanArtistName(metaArtist);
+          if (
+            !fallbackTitle ||
+            /^https?:\/\//i.test(fallbackTitle) ||
+            /^youtube\s*\(/i.test(fallbackTitle)
+          ) {
+            const oembed = await resolveDirectUrlOembedMeta(t.directUrl);
+            if (oembed?.title) {
+              fallbackTitle = stripRemasterNoise(oembed.title) || oembed.title;
+              metaTitle = oembed.title;
+              item.title = oembed.title;
+            }
+            if (oembed?.artist && (!fallbackArtist || fallbackArtist.toLowerCase() === 'youtube')) {
+              fallbackArtist = cleanArtistName(oembed.artist);
+              metaArtist = oembed.artist;
+              item.artist = oembed.artist;
+            }
+          }
+          const primaryFallbackTitle = stripParentheticalSubtitles(fallbackTitle);
+          const hasRealArtist =
+            fallbackArtist && fallbackArtist.toLowerCase() !== 'youtube';
+          const artistAndTitleQuery = sanitizeSearchQuery(
+            hasRealArtist ? `${fallbackArtist} - ${primaryFallbackTitle}` : primaryFallbackTitle
+          );
+          const titleOnlyQuery = sanitizeSearchQuery(primaryFallbackTitle);
+          const fallbackQueries = [];
+          if (artistAndTitleQuery) fallbackQueries.push(`scsearch15:${artistAndTitleQuery}`);
+          if (titleOnlyQuery && titleOnlyQuery !== artistAndTitleQuery && titleOnlyQuery.length >= 3) {
+            fallbackQueries.push(`scsearch10:${titleOnlyQuery}`);
+          }
+          if (fallbackQueries.length > 0) {
+            const [catalogMeta, lazyScRaw] = await Promise.all([
+              resolveCatalogMetadata(item.duration, fallbackTitle, hasRealArtist ? fallbackArtist : ''),
+              discoverCandidatesFromSearch(fallbackQueries, 10000)
+            ]);
+            expectedDurationSec = catalogMeta.durationSec;
+            maxAllowedDur = expectedDurationSec ? expectedDurationSec + 5 : null;
+            const fallbackCtx = buildCandidateContext(
+              fallbackTitle,
+              fallbackTitle,
+              hasRealArtist ? fallbackArtist : '',
+              expectedDurationSec,
+              catalogMeta
+            );
+            const scPool = evaluateCandidatePool(
+              lazyScRaw,
+              fallbackCtx,
+              'sc-yt-url-fallback',
+              artistAndTitleQuery || titleOnlyQuery
+            );
+            const discoveredScTargets = buildScTargetsFromPool(scPool);
+            if (discoveredScTargets.length > 0) {
+              targets.splice(idx + 1, 0, ...discoveredScTargets);
+            }
           }
         }
         continue;
