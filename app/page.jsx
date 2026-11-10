@@ -4,15 +4,20 @@ import { useState, useEffect, useRef, useMemo } from 'react';
 import { flushSync } from 'react-dom';
 import { NoSleepController } from '../lib/nosleep';
 import { buildSmartShuffleOrder, getShuffleTrackKey } from '../lib/shuffle';
+import PlayerScrubber from './components/PlayerScrubber';
+import SettingsPanel from './components/SettingsPanel';
+import AdminPanel from './components/AdminPanel';
 
 const AUDIO_CACHE_NAME = 'my-music-offline-audio-v1';
-const SHELL_CACHE_NAME = 'mymusic-shell-v25';
+const SHELL_CACHE_NAME = 'mymusic-shell-v26';
 const DEFAULT_TRACK_COVER = '/icon.svg?v=3';
 const USER_STORAGE_KEY = 'mma_cached_user_v1';
 const LIKES_STORAGE_KEY = 'mma_liked_tracks_v1';
 const OFFLINE_CATALOG_KEY = 'mma_offline_catalog_v1';
 const PLAYLISTS_STORAGE_KEY = 'mma_custom_playlists_v1';
 const UNLIKED_OWN_STORAGE_KEY = 'mma_unliked_own_v1';
+const SYNCED_UID_STORAGE_KEY = 'mma_synced_uid_v1';
+const COLLECTIONS_DIRTY_KEY = 'mma_collections_dirty_v1';
 const MAX_SIMULTANEOUS_DOWNLOADS = 4;
 const MAX_OWN_UPLOAD_BYTES = 50 * 1024 * 1024;
 const OWN_UPLOAD_CHUNK_BYTES = Math.floor(3.5 * 1024 * 1024);
@@ -22,6 +27,7 @@ const OWN_AUDIO_ACCEPT =
 function isPlaceholderCover(rawUrl) {
   if (!rawUrl || typeof rawUrl !== 'string') return true;
   const u = rawUrl.trim().toLowerCase();
+  if (u.startsWith('data:image/')) return false;
   return (
     !u.startsWith('http') ||
     u.includes('/icon.svg') ||
@@ -31,6 +37,9 @@ function isPlaceholderCover(rawUrl) {
 
 function compressArtworkUrl(rawUrl) {
   if (isPlaceholderCover(rawUrl)) return DEFAULT_TRACK_COVER;
+  if (rawUrl.trim().toLowerCase().startsWith('data:image/')) {
+    return rawUrl.trim();
+  }
   // Spotify CDN: replace 640x640 (ab67616d0000b273) with compact 300x300 (ab67616d00001e02)
   if (rawUrl.includes('i.scdn.co/image/')) {
     return rawUrl.replace('ab67616d0000b273', 'ab67616d00001e02');
@@ -386,6 +395,13 @@ function Icon({ name, size = 16, className = '' }) {
           <polygon points="10 9 15 12 10 15 10 9" fill="currentColor" stroke="none" />
         </svg>
       );
+    case 'edit':
+      return (
+        <svg {...props}>
+          <path d="M12 20h9" />
+          <path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z" />
+        </svg>
+      );
     default:
       return null;
   }
@@ -468,10 +484,17 @@ export default function HomePage() {
   const enrichingBusyRef = useRef(false);
   const cancelCoverSyncRef = useRef(false);
 
-  // Dialogs: Track options menu ('⋯'), Save-to-Library, Spotify Import Destination, Download Prompt, YouTube Link
+  // Dialogs: Track options menu ('⋯'), Save-to-Library, Spotify Import Destination, Download Prompt, YouTube Link, Metadata Edit
   const [menuTrack, setMenuTrack] = useState(null); // { track, contextLibrary }
   const [trackToSave, setTrackToSave] = useState(null);
   const [downloadPrompt, setDownloadPrompt] = useState(null); // { track, list, idx }
+  const [editingTrack, setEditingTrack] = useState(null);
+  const [editForm, setEditForm] = useState({
+    title: '',
+    artist: '',
+    album: '',
+    refreshCover: false
+  });
   const [modalNewPlaylistName, setModalNewPlaylistName] = useState('');
   const [ytModalOpen, setYtModalOpen] = useState(false);
   const [ytLinkUrl, setYtLinkUrl] = useState('');
@@ -484,13 +507,18 @@ export default function HomePage() {
   const spotifyDialogRef = useRef(null);
   const downloadDialogRef = useRef(null);
   const ytDialogRef = useRef(null);
+  const editDialogRef = useRef(null);
   const ytPreviewReqIdRef = useRef(0);
 
-  // Downloads & Server Files
+  // Downloads, Persistent Storage & Cloud Sync
   const [downloads, setDownloads] = useState({});
   const [libraryFiles, setLibraryFiles] = useState([]);
   const [offlineUrls, setOfflineUrls] = useState({});
   const [deviceQuota, setDeviceQuota] = useState(null);
+  const [storagePersisted, setStoragePersisted] = useState('prompt');
+  const [storagePersistMsg, setStoragePersistMsg] = useState('');
+  const [syncState, setSyncState] = useState({ status: 'idle', updatedAt: null });
+  const [backupMsg, setBackupMsg] = useState({ type: '', text: '' });
   const [syncingAll, setSyncingAll] = useState(false);
   const [syncProgress, setSyncProgress] = useState({ done: 0, total: 0 });
   const [ownUploadState, setOwnUploadState] = useState({ busy: false, type: '', text: '' });
@@ -519,15 +547,13 @@ export default function HomePage() {
   // PWA Install Prompt
   const [deferredPrompt, setDeferredPrompt] = useState(null);
 
-  // Audio Player State
+  // Audio Player State (high-frequency timeupdate progress lives in <PlayerScrubber /> to avoid page re-renders)
   const [queue, setQueue] = useState([]);
   const [currentIndex, setCurrentIndex] = useState(-1);
   const [isPlaying, setIsPlaying] = useState(false);
   const [optimisticTrack, setOptimisticTrack] = useState(null);
   const [shuffle, setShuffle] = useState(true);
   const [repeatMode, setRepeatMode] = useState('off');
-  const [progress, setProgress] = useState(0);
-  const [duration, setDuration] = useState(0);
 
   const audioRef = useRef(null);
   const accountRef = useRef(null);
@@ -538,6 +564,12 @@ export default function HomePage() {
   const isPlayingRef = useRef(false);
   const shuffleRef = useRef(true);
   const repeatModeRef = useRef('off');
+  const likedTracksRef = useRef([]);
+  const customPlaylistsRef = useRef([]);
+  const userRef = useRef(null);
+  const isOfflineRef = useRef(false);
+  const collectionsHydratedForUserRef = useRef('');
+  const syncDebounceTimerRef = useRef(null);
   const blobUrlCacheRef = useRef(new Map());
   const inflightBlobPromisesRef = useRef(new Map());
   const cachedStreamKeysRef = useRef(new Map());
@@ -555,6 +587,10 @@ export default function HomePage() {
   isPlayingRef.current = isPlaying;
   shuffleRef.current = shuffle;
   repeatModeRef.current = repeatMode;
+  likedTracksRef.current = likedTracks;
+  customPlaylistsRef.current = customPlaylists;
+  userRef.current = user;
+  isOfflineRef.current = isOffline;
 
   const currentTrack = currentIndex >= 0 && currentIndex < queue.length ? queue[currentIndex] : null;
 
@@ -685,7 +721,8 @@ export default function HomePage() {
       saveDialogRef.current,
       spotifyDialogRef.current,
       downloadDialogRef.current,
-      ytDialogRef.current
+      ytDialogRef.current,
+      editDialogRef.current
     ].filter(Boolean);
     const handlers = dialogs.map(dialog => {
       const fn = event => {
@@ -705,7 +742,7 @@ export default function HomePage() {
     return () => {
       handlers.forEach(({ dialog, fn }) => dialog.removeEventListener('click', fn));
     };
-  }, [user, menuTrack, trackToSave, pendingSpotifyImport, downloadPrompt, ytModalOpen]);
+  }, [user, menuTrack, trackToSave, pendingSpotifyImport, downloadPrompt, ytModalOpen, editingTrack]);
 
   // Open Spotify import modal safely after React state renders (and after mobile file picker closes)
   useEffect(() => {
@@ -849,13 +886,21 @@ export default function HomePage() {
 
   // Load initial catalog & server files once logged in, or restore automatically when internet returns
   useEffect(() => {
+    ensurePersistentStorage(false);
     if (!user) return;
     if (isOffline) {
       wasOfflineRef.current = true;
       return;
     }
     fetchLibraryFiles();
-    syncOwnUploadedTracks();
+    if (!user.offline && user.id) {
+      (async () => {
+        await syncCollectionsWithServer(user.id);
+        await syncOwnUploadedTracks();
+      })();
+    } else {
+      syncOwnUploadedTracks();
+    }
     let initialLikes = likedTracks;
     try {
       const raw = localStorage.getItem(LIKES_STORAGE_KEY);
@@ -986,11 +1031,14 @@ export default function HomePage() {
         const artUrl = isPlaceholderCover(currentTrack.artwork)
           ? new URL(DEFAULT_TRACK_COVER, window.location.origin).href
           : currentTrack.artwork;
+        const artMime = String(artUrl || '').startsWith('data:image/png')
+          ? 'image/png'
+          : 'image/jpeg';
         navigator.mediaSession.metadata = new window.MediaMetadata({
           title: currentTrack.title || 'MyMusicAnywhere',
           artist: currentTrack.artist || 'Artista',
           album: currentTrack.album || 'MyMusicAnywhere',
-          artwork: artUrl ? [{ src: artUrl, sizes: '300x300', type: 'image/jpeg' }] : []
+          artwork: artUrl ? [{ src: artUrl, sizes: '300x300', type: artMime }] : []
         });
       }
       navigator.mediaSession.playbackState = isPlaying ? 'playing' : 'paused';
@@ -1013,7 +1061,6 @@ export default function HomePage() {
       ['seekto', details => {
         if (audioRef.current && details && typeof details.seekTime === 'number') {
           audioRef.current.currentTime = details.seekTime;
-          setProgress(details.seekTime);
         }
       }]
     ];
@@ -1061,6 +1108,11 @@ export default function HomePage() {
   }
 
   async function handleLogout() {
+    if (syncDebounceTimerRef.current) {
+      clearTimeout(syncDebounceTimerRef.current);
+      syncDebounceTimerRef.current = null;
+    }
+    collectionsHydratedForUserRef.current = '';
     try {
       await fetch('/api/auth', {
         method: 'POST',
@@ -1075,6 +1127,378 @@ export default function HomePage() {
     setUser(null);
     setAccountOpen(false);
     setActiveTab('explore');
+  }
+
+  // ==================== PERSISTENT STORAGE, CLOUD SYNC & JSON BACKUP ====================
+  async function ensurePersistentStorage(manualClick = false) {
+    if (typeof navigator === 'undefined' || !navigator.storage) {
+      setStoragePersisted('unsupported');
+      return;
+    }
+    try {
+      if (typeof navigator.storage.persisted === 'function') {
+        const already = await navigator.storage.persisted();
+        if (already) {
+          setStoragePersisted('granted');
+          if (manualClick) {
+            setStoragePersistMsg(
+              'El navegador protege las canciones guardadas frente a limpiezas automáticas de espacio.'
+            );
+          }
+          return;
+        }
+      }
+      if (typeof navigator.storage.persist === 'function') {
+        const granted = await navigator.storage.persist();
+        setStoragePersisted(granted ? 'granted' : 'prompt');
+        if (manualClick) {
+          setStoragePersistMsg(
+            granted
+              ? 'Protección activada: tus canciones Offline no se borrarán automáticamente.'
+              : 'El navegador aún no concedió almacenamiento persistente. Instalar la app en la pantalla de inicio suele habilitarlo automáticamente.'
+          );
+        }
+      } else {
+        setStoragePersisted('unsupported');
+      }
+    } catch {
+      setStoragePersisted('prompt');
+    }
+  }
+
+  function resolveOwnUploadId(track) {
+    if (!track) return null;
+    const direct = String(track.uploadId || '').trim();
+    if (/^upl_[a-f0-9]{32}$/.test(direct)) return direct;
+    const byId = String(track.id || '').trim();
+    if (/^upl_[a-f0-9]{32}$/.test(byId)) return byId;
+    const byFile = String(track.filename || '')
+      .trim()
+      .replace(/\.(m4a|mp3|wav|flac|opus)$/i, '');
+    if (/^upl_[a-f0-9]{32}$/.test(byFile)) return byFile;
+    return null;
+  }
+
+  async function persistOwnUploadMetadataToServer(trackOrId, patch) {
+    if (!patch || typeof patch !== 'object') return;
+    const activeUser = userRef.current;
+    if (!activeUser || activeUser.offline || isOfflineRef.current) return;
+    const uploadId =
+      typeof trackOrId === 'string' && /^upl_[a-f0-9]{32}$/.test(trackOrId)
+        ? trackOrId
+        : resolveOwnUploadId(trackOrId);
+    if (!uploadId) return;
+    const body = {};
+    if (typeof patch.title === 'string' && patch.title.trim()) body.title = patch.title.trim();
+    if (typeof patch.artist === 'string' && patch.artist.trim()) body.artist = patch.artist.trim();
+    if (typeof patch.album === 'string' && patch.album.trim()) body.album = patch.album.trim();
+    if (typeof patch.artwork === 'string' && patch.artwork.trim()) body.artwork = patch.artwork.trim();
+    if (Object.keys(body).length === 0) return;
+    try {
+      await fetch(`/api/upload/${encodeURIComponent(uploadId)}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      });
+    } catch {}
+  }
+
+  function markCollectionsDirtyOffline() {
+    try {
+      localStorage.setItem(COLLECTIONS_DIRTY_KEY, '1');
+    } catch {}
+  }
+
+  async function pushCollectionsToServerNow(likesOverride = null, playlistsOverride = null) {
+    const activeUser = userRef.current;
+    if (!activeUser || activeUser.offline || !activeUser.id || isOfflineRef.current) {
+      markCollectionsDirtyOffline();
+      return false;
+    }
+    const likesToPush = sanitizeLikedTracksList(likesOverride ?? likedTracksRef.current);
+    const playlistsToPush = Array.isArray(playlistsOverride ?? customPlaylistsRef.current)
+      ? (playlistsOverride ?? customPlaylistsRef.current).map(pl => ({
+          ...pl,
+          tracks: sanitizeLikedTracksList(deduplicateTracksList(pl.tracks || []))
+        }))
+      : [];
+
+    setSyncState(prev => ({ ...prev, status: 'syncing' }));
+    try {
+      const res = await fetch('/api/collections', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          likedTracks: likesToPush,
+          customPlaylists: playlistsToPush
+        })
+      });
+      if (!res.ok) {
+        setSyncState(prev => ({ ...prev, status: 'error' }));
+        return false;
+      }
+      const data = await res.json().catch(() => ({}));
+      try {
+        localStorage.setItem(SYNCED_UID_STORAGE_KEY, String(activeUser.id));
+        localStorage.removeItem(COLLECTIONS_DIRTY_KEY);
+      } catch {}
+      setSyncState({ status: 'synced', updatedAt: data.updatedAt || Date.now() });
+      return true;
+    } catch {
+      markCollectionsDirtyOffline();
+      setSyncState(prev => ({ ...prev, status: 'error' }));
+      return false;
+    }
+  }
+
+  function scheduleCollectionsSync(immediate = false, likesOverride = null, playlistsOverride = null) {
+    const activeUser = userRef.current;
+    if (!activeUser || activeUser.offline || !activeUser.id) return;
+    if (isOfflineRef.current || collectionsHydratedForUserRef.current !== String(activeUser.id)) {
+      markCollectionsDirtyOffline();
+      return;
+    }
+    if (syncDebounceTimerRef.current) {
+      clearTimeout(syncDebounceTimerRef.current);
+      syncDebounceTimerRef.current = null;
+    }
+    if (immediate) {
+      pushCollectionsToServerNow(likesOverride, playlistsOverride);
+      return;
+    }
+    syncDebounceTimerRef.current = setTimeout(() => {
+      syncDebounceTimerRef.current = null;
+      pushCollectionsToServerNow();
+    }, 650);
+  }
+
+  function mergePlaylistsByIdOrName(primaryList, secondaryList) {
+    const out = [];
+    const byId = new Map();
+    const byName = new Map();
+
+    for (const pl of [...(primaryList || []), ...(secondaryList || [])]) {
+      if (!pl || !pl.name) continue;
+      const normName = String(pl.name).trim().toLowerCase();
+      const existing = byId.get(String(pl.id)) || byName.get(normName);
+      if (!existing) {
+        const copy = {
+          id: pl.id || `pl_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+          name: String(pl.name).trim(),
+          createdAt: Number(pl.createdAt) || Date.now(),
+          tracks: deduplicateTracksList(pl.tracks || [])
+        };
+        byId.set(String(copy.id), copy);
+        byName.set(normName, copy);
+        out.push(copy);
+      } else {
+        existing.tracks = deduplicateTracksList([...(existing.tracks || []), ...(pl.tracks || [])]);
+      }
+    }
+    return out;
+  }
+
+  async function syncCollectionsWithServer(userId) {
+    if (!userId || isOfflineRef.current) return;
+    setSyncState(prev => ({ ...prev, status: 'syncing' }));
+    try {
+      const res = await fetch('/api/collections', { cache: 'no-store' });
+      if (!res.ok) {
+        setSyncState(prev => ({ ...prev, status: 'idle' }));
+        return;
+      }
+      const data = await res.json();
+      let localLikes = likedTracksRef.current;
+      let localPlaylists = customPlaylistsRef.current;
+      try {
+        const rawL = localStorage.getItem(LIKES_STORAGE_KEY);
+        if (rawL) localLikes = deduplicateTracksList(sanitizeLikedTracksList(JSON.parse(rawL)));
+      } catch {}
+      try {
+        const rawP = localStorage.getItem(PLAYLISTS_STORAGE_KEY);
+        if (rawP) {
+          const parsedP = JSON.parse(rawP);
+          if (Array.isArray(parsedP)) {
+            localPlaylists = parsedP.map(pl => ({
+              ...pl,
+              tracks: deduplicateTracksList(pl.tracks || [])
+            }));
+          }
+        }
+      } catch {}
+
+      let syncedUid = '';
+      let wasDirtyOffline = false;
+      try {
+        syncedUid = localStorage.getItem(SYNCED_UID_STORAGE_KEY) || '';
+        wasDirtyOffline = localStorage.getItem(COLLECTIONS_DIRTY_KEY) === '1';
+      } catch {}
+
+      const reattachOfflinePointers = list =>
+        deduplicateTracksList(list).map(tr => {
+          const off = findOfflineItem(tr);
+          if (!off) return tr;
+          return {
+            ...tr,
+            filename: off.filename || tr.filename || null,
+            streamUrl: off.streamUrl || tr.streamUrl || null,
+            artwork: !isPlaceholderCover(tr.artwork) ? tr.artwork : off.artwork || tr.artwork
+          };
+        });
+
+      collectionsHydratedForUserRef.current = String(userId);
+
+      if (!data.hasSnapshot) {
+        try {
+          localStorage.setItem(SYNCED_UID_STORAGE_KEY, String(userId));
+          localStorage.removeItem(COLLECTIONS_DIRTY_KEY);
+        } catch {}
+        if (localLikes.length > 0 || localPlaylists.length > 0) {
+          await pushCollectionsToServerNow(localLikes, localPlaylists);
+        } else {
+          setSyncState({ status: 'synced', updatedAt: Date.now() });
+        }
+        return;
+      }
+
+      const serverLikes = Array.isArray(data.likedTracks) ? data.likedTracks : [];
+      const serverPlaylists = Array.isArray(data.customPlaylists) ? data.customPlaylists : [];
+      const shouldUnionMerge = syncedUid !== String(userId) || wasDirtyOffline;
+
+      const resolvedLikes = reattachOfflinePointers(
+        shouldUnionMerge ? [...localLikes, ...serverLikes] : serverLikes
+      );
+      const rawResolvedPlaylists = shouldUnionMerge
+        ? mergePlaylistsByIdOrName(serverPlaylists, localPlaylists)
+        : serverPlaylists;
+      const resolvedPlaylists = rawResolvedPlaylists.map(pl => ({
+        ...pl,
+        tracks: reattachOfflinePointers(pl.tracks || [])
+      }));
+
+      setLikedTracks(resolvedLikes);
+      likedTracksRef.current = resolvedLikes;
+      setCustomPlaylists(resolvedPlaylists);
+      customPlaylistsRef.current = resolvedPlaylists;
+
+      try {
+        localStorage.setItem(LIKES_STORAGE_KEY, JSON.stringify(resolvedLikes));
+        localStorage.setItem(PLAYLISTS_STORAGE_KEY, JSON.stringify(resolvedPlaylists));
+        localStorage.setItem(SYNCED_UID_STORAGE_KEY, String(userId));
+        localStorage.removeItem(COLLECTIONS_DIRTY_KEY);
+      } catch {}
+
+      if (shouldUnionMerge && (localLikes.length > 0 || localPlaylists.length > 0)) {
+        await pushCollectionsToServerNow(resolvedLikes, resolvedPlaylists);
+      } else {
+        setSyncState({ status: 'synced', updatedAt: data.updatedAt || Date.now() });
+      }
+    } catch {
+      setSyncState(prev => ({ ...prev, status: 'error' }));
+    }
+  }
+
+  function handleExportBackupJson() {
+    setBackupMsg({ type: '', text: '' });
+    try {
+      const payload = {
+        app: 'MyMusicAnywhere',
+        version: 1,
+        exportedAt: new Date().toISOString(),
+        likedTracks: sanitizeLikedTracksList(likedTracksRef.current),
+        customPlaylists: (customPlaylistsRef.current || []).map(pl => ({
+          id: pl.id,
+          name: pl.name,
+          createdAt: pl.createdAt || Date.now(),
+          tracks: sanitizeLikedTracksList(deduplicateTracksList(pl.tracks || []))
+        }))
+      };
+      const blob = new Blob([JSON.stringify(payload, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const stamp = new Date().toISOString().slice(0, 10);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `mineral-music-respaldo-${stamp}.json`;
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(() => {
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      }, 1200);
+      setBackupMsg({
+        type: 'ok',
+        text: `Respaldo exportado (${payload.likedTracks.length} en Favoritos y ${payload.customPlaylists.length} librerías).`
+      });
+    } catch {
+      setBackupMsg({ type: 'err', text: 'No se pudo generar el archivo de respaldo.' });
+    }
+  }
+
+  async function handleImportBackupJson(file) {
+    if (!file) return;
+    setBackupMsg({ type: '', text: '' });
+    if (file.size > 5 * 1024 * 1024) {
+      setBackupMsg({ type: 'err', text: 'El archivo JSON supera el límite permitido de 5 MB.' });
+      return;
+    }
+    try {
+      const rawText = await file.text();
+      const parsed = JSON.parse(rawText);
+      const incomingLikes = Array.isArray(parsed?.likedTracks)
+        ? sanitizeLikedTracksList(parsed.likedTracks)
+        : Array.isArray(parsed)
+        ? sanitizeLikedTracksList(parsed)
+        : null;
+      const incomingPlaylists = Array.isArray(parsed?.customPlaylists)
+        ? parsed.customPlaylists
+        : [];
+
+      if (!incomingLikes && incomingPlaylists.length === 0) {
+        setBackupMsg({
+          type: 'err',
+          text: 'El archivo JSON no contiene librerías válidas (likedTracks o customPlaylists).'
+        });
+        return;
+      }
+
+      const mergedLikes = deduplicateTracksList([
+        ...(incomingLikes || []),
+        ...likedTracksRef.current
+      ]);
+      const mergedPlaylists = mergePlaylistsByIdOrName(
+        customPlaylistsRef.current,
+        incomingPlaylists
+      );
+
+      setLikedTracks(mergedLikes);
+      likedTracksRef.current = mergedLikes;
+      setCustomPlaylists(mergedPlaylists);
+      customPlaylistsRef.current = mergedPlaylists;
+
+      try {
+        localStorage.setItem(LIKES_STORAGE_KEY, JSON.stringify(mergedLikes));
+        localStorage.setItem(PLAYLISTS_STORAGE_KEY, JSON.stringify(mergedPlaylists));
+      } catch {}
+
+      scheduleCollectionsSync(true, mergedLikes, mergedPlaylists);
+      setBackupMsg({
+        type: 'ok',
+        text: `Respaldo restaurado: ${mergedLikes.length} canciones en Favoritos y ${mergedPlaylists.length} librerías.`
+      });
+
+      const allImported = [
+        ...(incomingLikes || []),
+        ...incomingPlaylists.flatMap(p => p?.tracks || [])
+      ];
+      if (allImported.some(t => isPlaceholderCover(t?.artwork))) {
+        syncMissingCoversForList(allImported, false);
+      }
+    } catch {
+      setBackupMsg({
+        type: 'err',
+        text: 'No se pudo leer el respaldo. Verifica que sea un archivo JSON válido.'
+      });
+    }
   }
 
   // Admin handlers
@@ -1176,9 +1600,11 @@ export default function HomePage() {
   function persistLikes(nextLikes) {
     const clean = deduplicateTracksList(nextLikes);
     setLikedTracks(clean);
+    likedTracksRef.current = clean;
     try {
       localStorage.setItem(LIKES_STORAGE_KEY, JSON.stringify(clean));
     } catch {}
+    scheduleCollectionsSync();
   }
 
   function persistOfflineCatalog(nextOffline) {
@@ -1197,9 +1623,11 @@ export default function HomePage() {
         }))
       : [];
     setCustomPlaylists(cleanPls);
+    customPlaylistsRef.current = cleanPls;
     try {
       localStorage.setItem(PLAYLISTS_STORAGE_KEY, JSON.stringify(cleanPls));
     } catch {}
+    scheduleCollectionsSync();
   }
 
   function isLiked(trackId) {
@@ -1411,6 +1839,83 @@ export default function HomePage() {
     setYtLinkError('');
   }
 
+  function openEditTrackModal(track) {
+    if (!track) return;
+    closeTrackMenu();
+    const genericArtists = new Set([
+      'archivo propio',
+      'audio subido',
+      'guardado en dispositivo',
+      'artista',
+      'audio mp3',
+      'youtube'
+    ]);
+    const genericAlbums = new Set([
+      'mi música',
+      'mi musica',
+      'offline pwa',
+      'guardado en dispositivo',
+      'spotify csv',
+      'youtube'
+    ]);
+    const rawArtist = String(track.artist || '').trim();
+    const rawAlbum = String(track.album || '').trim();
+    setEditingTrack(track);
+    setEditForm({
+      title: String(track.title || ''),
+      artist: genericArtists.has(rawArtist.toLowerCase()) ? '' : rawArtist,
+      album: genericAlbums.has(rawAlbum.toLowerCase()) ? '' : rawAlbum,
+      refreshCover: isPlaceholderCover(track.artwork)
+    });
+    setTimeout(() => {
+      if (
+        editDialogRef.current &&
+        !editDialogRef.current.open &&
+        typeof editDialogRef.current.showModal === 'function'
+      ) {
+        editDialogRef.current.showModal();
+      }
+    }, 20);
+  }
+
+  function closeEditTrackModal() {
+    if (editDialogRef.current && editDialogRef.current.open) {
+      editDialogRef.current.close();
+    }
+    setEditingTrack(null);
+  }
+
+  function handleEditTrackSubmit(e) {
+    e.preventDefault();
+    if (!editingTrack) return;
+    const nextTitle = editForm.title.trim() || editingTrack.title || 'Canción';
+    const nextArtist = editForm.artist.trim() || editingTrack.artist || 'Artista';
+    const nextAlbum = editForm.album.trim() || editingTrack.album || '';
+    const shouldRefreshCover = Boolean(editForm.refreshCover) && !isOffline;
+
+    const patch = {
+      title: nextTitle,
+      artist: nextArtist,
+      ...(nextAlbum ? { album: nextAlbum } : {})
+    };
+
+    if (shouldRefreshCover) {
+      enrichedArtworkRef.current.delete(String(editingTrack.id));
+      const upId = resolveOwnUploadId(editingTrack);
+      if (upId) enrichedArtworkRef.current.delete(upId);
+      patch.artwork = DEFAULT_TRACK_COVER;
+    }
+
+    updateTrackMetadataAcrossLibraries(editingTrack.id, patch, editingTrack.filename);
+    persistOwnUploadMetadataToServer(editingTrack, patch);
+    const updatedCandidate = { ...editingTrack, ...patch };
+    closeEditTrackModal();
+
+    if (shouldRefreshCover) {
+      syncMissingCoversForList([updatedCandidate], false);
+    }
+  }
+
   async function resolveYtLinkPreview(rawUrl) {
     const reqId = ++ytPreviewReqIdRef.current;
     const clean = String(rawUrl || '').trim();
@@ -1513,11 +2018,14 @@ export default function HomePage() {
   }
 
   function updateTrackFileAcrossLibraries(trackId, filename, streamUrl) {
+    let collectionsChanged = false;
     setLikedTracks(prev => {
       if (!prev.some(t => String(t.id) === String(trackId))) return prev;
+      collectionsChanged = true;
       const updated = prev.map(t =>
         String(t.id) === String(trackId) ? { ...t, filename, streamUrl } : t
       );
+      likedTracksRef.current = updated;
       try {
         localStorage.setItem(LIKES_STORAGE_KEY, JSON.stringify(updated));
       } catch {}
@@ -1537,6 +2045,8 @@ export default function HomePage() {
         };
       });
       if (changed) {
+        collectionsChanged = true;
+        customPlaylistsRef.current = updated;
         try {
           localStorage.setItem(PLAYLISTS_STORAGE_KEY, JSON.stringify(updated));
         } catch {}
@@ -1544,14 +2054,35 @@ export default function HomePage() {
       }
       return prev;
     });
+
+    if (collectionsChanged) {
+      scheduleCollectionsSync();
+    }
   }
 
-  function updateTrackMetadataAcrossLibraries(trackId, patch) {
+  function updateTrackMetadataAcrossLibraries(trackId, patch, targetFilename = null) {
+    const resolvedTargetUploadId = resolveOwnUploadId({
+      id: trackId,
+      uploadId: trackId,
+      filename: targetFilename
+    });
+
+    const matchesTarget = t => {
+      if (!t) return false;
+      if (String(t.id) === String(trackId)) return true;
+      if (t.uploadId && String(t.uploadId) === String(trackId)) return true;
+      if (resolvedTargetUploadId && resolveOwnUploadId(t) === resolvedTargetUploadId) return true;
+      if (targetFilename && t.filename && t.filename === targetFilename) return true;
+      return false;
+    };
+
+    let collectionsChanged = false;
+
     setLikedTracks(prev => {
-      if (!prev.some(t => String(t.id) === String(trackId))) return prev;
-      const updated = prev.map(t =>
-        String(t.id) === String(trackId) ? { ...t, ...patch } : t
-      );
+      if (!prev.some(matchesTarget)) return prev;
+      collectionsChanged = true;
+      const updated = prev.map(t => (matchesTarget(t) ? { ...t, ...patch } : t));
+      likedTracksRef.current = updated;
       try {
         localStorage.setItem(LIKES_STORAGE_KEY, JSON.stringify(updated));
       } catch {}
@@ -1559,10 +2090,8 @@ export default function HomePage() {
     });
 
     setOfflineCatalog(prev => {
-      if (!prev.some(t => String(t.id) === String(trackId))) return prev;
-      const updated = prev.map(t =>
-        String(t.id) === String(trackId) ? { ...t, ...patch } : t
-      );
+      if (!prev.some(matchesTarget)) return prev;
+      const updated = prev.map(t => (matchesTarget(t) ? { ...t, ...patch } : t));
       try {
         localStorage.setItem(OFFLINE_CATALOG_KEY, JSON.stringify(updated));
       } catch {}
@@ -1572,16 +2101,16 @@ export default function HomePage() {
     setCustomPlaylists(prev => {
       let changed = false;
       const updated = prev.map(pl => {
-        if (!pl.tracks.some(t => String(t.id) === String(trackId))) return pl;
+        if (!pl.tracks.some(matchesTarget)) return pl;
         changed = true;
         return {
           ...pl,
-          tracks: pl.tracks.map(t =>
-            String(t.id) === String(trackId) ? { ...t, ...patch } : t
-          )
+          tracks: pl.tracks.map(t => (matchesTarget(t) ? { ...t, ...patch } : t))
         };
       });
       if (changed) {
+        collectionsChanged = true;
+        customPlaylistsRef.current = updated;
         try {
           localStorage.setItem(PLAYLISTS_STORAGE_KEY, JSON.stringify(updated));
         } catch {}
@@ -1589,6 +2118,17 @@ export default function HomePage() {
       }
       return prev;
     });
+
+    setQueue(prev => {
+      if (!prev.some(matchesTarget)) return prev;
+      const updatedQueue = prev.map(t => (matchesTarget(t) ? { ...t, ...patch } : t));
+      queueRef.current = updatedQueue;
+      return updatedQueue;
+    });
+
+    if (collectionsChanged) {
+      scheduleCollectionsSync();
+    }
   }
 
   // Moves the chosen track to position #1 (index 0) of the specified library and returns the reordered full list
@@ -1640,14 +2180,37 @@ export default function HomePage() {
       enrichedArtworkRef.current.clear();
     }
 
-    const missing = (targetTracks || []).filter(
-      t =>
-        t &&
-        t.id &&
-        t.title &&
-        isPlaceholderCover(t.artwork) &&
-        (manualClick || !enrichedArtworkRef.current.has(String(t.id)))
-    );
+    // When manually triggered from Biblioteca, also include ALL previously uploaded user songs
+    // across Favoritos, Offline, and custom playlists that still lack cover art.
+    const combinedInput = [...(targetTracks || [])];
+    if (manualClick) {
+      const extraPools = [
+        ...(likedTracksRef.current || []),
+        ...(offlineCatalog || []),
+        ...(customPlaylistsRef.current || []).flatMap(pl => pl?.tracks || [])
+      ];
+      for (const tr of extraPools) {
+        if (!tr || !isPlaceholderCover(tr.artwork)) continue;
+        const isOwn =
+          tr.source === 'own' ||
+          Boolean(resolveOwnUploadId(tr)) ||
+          String(tr.artist || '').trim().toLowerCase() === 'archivo propio';
+        if (isOwn) {
+          combinedInput.push(tr);
+        }
+      }
+    }
+
+    const seenMissingKeys = new Set();
+    const missing = [];
+    for (const t of combinedInput) {
+      if (!t || !t.id || !t.title || !isPlaceholderCover(t.artwork)) continue;
+      const dedupId = resolveOwnUploadId(t) || String(t.id);
+      if (seenMissingKeys.has(dedupId)) continue;
+      if (!manualClick && enrichedArtworkRef.current.has(dedupId)) continue;
+      seenMissingKeys.add(dedupId);
+      missing.push(t);
+    }
     if (missing.length === 0) return;
 
     enrichingBusyRef.current = true;
@@ -1655,10 +2218,42 @@ export default function HomePage() {
     setCoverSync({ active: true, done: 0, total: missing.length });
 
     const resolvedIdsInRun = new Set();
+    const ignoredAlbums = new Set([
+      'spotify csv',
+      'offline pwa',
+      'guardado en dispositivo',
+      'mi música',
+      'mi musica',
+      'archivo propio',
+      'audio subido',
+      'youtube'
+    ]);
+
+    const isGenericTrackArtist = raw => {
+      const low = String(raw || '').trim().toLowerCase();
+      if (!low) return true;
+      if (
+        low === 'artista' ||
+        low === 'guardado en dispositivo' ||
+        low === 'archivo propio' ||
+        low === 'audio subido' ||
+        low === 'audio mp3' ||
+        low === 'youtube' ||
+        low === 'desconocido' ||
+        low === 'unknown' ||
+        low === 'unknown artist'
+      ) {
+        return true;
+      }
+      return /\b(y2mate|y2meta|ytmp3|yt1s|spotifydown|spotidown|savetube|savefrom|ssyoutube|loader|cnvmp3|snapinsta|snaptik|cobalt|mp3juices|flvto|2conv|notube)\b/i.test(
+        low
+      );
+    };
+
     const getAlbumKey = tr => {
       const alb = String(tr.album || '').trim().toLowerCase();
       const art = String(tr.artist || '').split(',')[0].trim().toLowerCase();
-      if (!alb || alb === 'spotify csv' || alb === 'offline pwa' || alb === 'guardado en dispositivo') {
+      if (!alb || ignoredAlbums.has(alb) || isGenericTrackArtist(art)) {
         return null;
       }
       return `${alb}|${art}`;
@@ -1666,12 +2261,21 @@ export default function HomePage() {
 
     const stripTitleNoise = raw =>
       String(raw || '')
+        .replace(/_/g, ' ')
         .replace(
-          /\s*[-–—]\s*(remaster(ed)?(\s+\d{4})?|\d{4}\s+remaster(ed)?|radio\s+edit|album\s+version|single\s+version|solo|demo|live|acoustic|bonus\s+track|\d+\/\d+.*).*/i,
+          /^(?:www\.)?(?:y2mate|y2meta|ytmp3|yt1s|savefrom|savetube|ssyoutube|spotifydown|spotidown|loader|cnvmp3|snapinsta|snaptik|cobalt|mp3juices|flvto|2conv|notube)(?:\.[a-z]{2,6})?\s*[-–—:|]+\s*/i,
+          ''
+        )
+        .replace(/^\d{1,3}\s*[-._)]\s*/, '')
+        .replace(/\.(mp3|m4a|wav|flac|ogg|opus|aac|mp4|webm|mkv|avi)$/i, '')
+        .replace(/(?<=[a-zA-ZáéíóúñÁÉÍÓÚÑ]{3})(avi|mp4|mkv|webm|mov|flv|wmv|m4a|mp3|wav|flac)\b/gi, '')
+        .replace(/\b\d{2,4}\s*kbps\b/gi, '')
+        .replace(
+          /\s*[-–—]\s*(remaster(ed)?(\s+\d{4})?|\d{4}\s+remaster(ed)?|radio\s+edit|album\s+version|single\s+version|official\s*(music\s*)?video|video\s*oficial|lyric\s*video|lyrics?|letra|audio\s*oficial|hq|hd|4k|solo|demo|live|acoustic|bonus\s+track|\d+\/\d+.*).*/i,
           ''
         )
         .replace(
-          /\s*\((remaster(ed)?(\s+\d{4})?|\d{4}\s+remaster(ed)?|feat\.?[^)]+|ft\.?[^)]+|solo|live|demo)\)/gi,
+          /\s*\((remaster(ed)?(\s+\d{4})?|\d{4}\s+remaster(ed)?|feat\.?[^)]+|ft\.?[^)]+|official[^)]*|video\s*oficial|lyrics?|letra|audio[^)]*|hq|hd|4k|\d{2,4}\s*kbps|solo|live|demo)\)/gi,
           ''
         )
         .replace(/\s*\[[^\]]+\]/g, '')
@@ -1680,14 +2284,117 @@ export default function HomePage() {
 
     const cleanArtistPart = raw =>
       String(raw || '')
-        .replace(/\b(archive|archives|vault|topic|reupload|official)\b/gi, '')
+        .replace(/\b(archive|archives|vault|topic|reupload|official|vevo|canal)\b/gi, '')
         .replace(/\s+/g, ' ')
         .trim();
+
+    const isUnsearchableGenericTitle = cleaned => {
+      const low = String(cleaned || '').trim().toLowerCase();
+      if (!low || low.length < 2) return true;
+      return /^(whatsapp\s+audio|aud[-_\s]?\d{4}|ptt[-_\s]?\d{4}|grabaci[oó]n|nota\s+de\s+voz|voice\s+memo|recording|track\s*\d+|pista\s*\d+|audio\s*\d+|cancion|canci[oó]n|sin\s+t[ií]tulo|untitled)\b/i.test(
+        low
+      );
+    };
+
+    const normAscii = str =>
+      String(str || '')
+        .toLowerCase()
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .replace(/[^\p{L}\p{N}]+/gu, ' ')
+        .trim();
+
+    const stopWords = new Set(['de', 'la', 'el', 'los', 'las', 'del', 'the', 'and', 'con', 'por', 'para', 'feat', 'ft']);
+
+    const extractSigTokens = str => {
+      const all = normAscii(str).split(/\s+/).filter(w => w.length >= 2);
+      const filtered = all.filter(w => w.length >= 3 && !stopWords.has(w));
+      return filtered.length > 0 ? filtered : all;
+    };
+
+    const pickBestCatalogCoverHit = (candidates, targetTitle, targetArtist) => {
+      if (!Array.isArray(candidates) || candidates.length === 0) return null;
+      const queryTokens = extractSigTokens(targetTitle);
+      const artistTokens = targetArtist ? extractSigTokens(targetArtist) : [];
+      const compactQuery = normAscii(targetTitle).replace(/\s+/g, '');
+      if (queryTokens.length === 0 && !compactQuery) return null;
+
+      let best = null;
+      let bestScore = -1;
+
+      for (const cand of candidates) {
+        const artUrl = cand?.artwork || cand?.artworkUrl100;
+        if (!artUrl || isPlaceholderCover(artUrl)) continue;
+        const candTitle = cand.title || cand.trackName || '';
+        const candArtist = cand.artist || cand.artistName || '';
+        const normCandTitle = normAscii(candTitle);
+        const normCandFull = normAscii(`${candTitle} ${candArtist}`);
+        const compactCandTitle = normCandTitle.replace(/\s+/g, '');
+        const compactCandFull = normCandFull.replace(/\s+/g, '');
+        if (!compactCandTitle) continue;
+
+        let matchedTitleTokens = 0;
+        let matchedInTitleOnly = 0;
+        for (const tok of queryTokens) {
+          if (normCandTitle.split(/\s+/).includes(tok) || compactCandTitle.includes(tok)) {
+            matchedTitleTokens += 1;
+            matchedInTitleOnly += 1;
+          } else if (normCandFull.split(/\s+/).includes(tok) || compactCandFull.includes(tok)) {
+            matchedTitleTokens += 1;
+          }
+        }
+
+        let matchedArtistTokens = 0;
+        for (const aTok of artistTokens) {
+          if (normAscii(candArtist).includes(aTok) || compactCandFull.includes(aTok)) {
+            matchedArtistTokens += 1;
+          }
+        }
+
+        const overlapRatio = queryTokens.length > 0 ? matchedTitleTokens / queryTokens.length : 0;
+        const exactCompactTitle = compactQuery.length >= 4 && compactCandTitle === compactQuery;
+
+        // Require genuine title/artist correspondence so unrelated tracks never receive random covers
+        const accepted =
+          (matchedArtistTokens > 0 && (matchedInTitleOnly >= 1 || exactCompactTitle)) ||
+          (matchedTitleTokens >= 2 && overlapRatio >= 0.6) ||
+          (exactCompactTitle && compactQuery.length >= 5);
+
+        if (!accepted) continue;
+
+        const score =
+          matchedTitleTokens * 3 +
+          matchedInTitleOnly * 2 +
+          matchedArtistTokens * 4 +
+          (exactCompactTitle ? 5 : 0) +
+          overlapRatio * 2;
+
+        if (score > bestScore) {
+          bestScore = score;
+          let resolvedDuration = cand.duration && cand.duration !== '—' ? cand.duration : null;
+          if (!resolvedDuration && cand.trackTimeMillis && cand.trackTimeMillis >= 45000) {
+            const totalSec = Math.round(cand.trackTimeMillis / 1000);
+            resolvedDuration = `${Math.floor(totalSec / 60)}:${String(totalSec % 60).padStart(2, '0')}`;
+          }
+          best = {
+            artwork: artUrl,
+            previewUrl: cand.previewUrl || null,
+            title: candTitle || null,
+            artist: candArtist || null,
+            album: cand.album || cand.collectionName || null,
+            duration: resolvedDuration,
+            matchedArtistTokens
+          };
+        }
+      }
+      return best;
+    };
 
     try {
       let done = 0;
       for (let i = 0; i < missing.length; i++) {
         const item = missing[i];
+        const itemDedupId = resolveOwnUploadId(item) || String(item.id);
         if (cancelCoverSyncRef.current || (typeof navigator !== 'undefined' && navigator.onLine === false)) {
           break;
         }
@@ -1702,7 +2409,7 @@ export default function HomePage() {
         }
         if (cancelCoverSyncRef.current) break;
 
-        if (resolvedIdsInRun.has(String(item.id))) {
+        if (resolvedIdsInRun.has(itemDedupId)) {
           done += 1;
           setCoverSync({ active: true, done, total: missing.length });
           continue;
@@ -1712,64 +2419,75 @@ export default function HomePage() {
         let networkAborted = false;
         try {
           const rawArtists =
-            item.artist && item.artist !== 'Artista' && item.artist !== 'Guardado en dispositivo'
+            item.artist && !isGenericTrackArtist(item.artist)
               ? String(item.artist)
                   .split(/[,;&]/)
                   .map(a => a.trim())
-                  .filter(Boolean)
+                  .filter(a => a && !isGenericTrackArtist(a))
               : [];
           const cleanTitle = stripTitleNoise(item.title) || String(item.title || '').trim();
-          const primaryArtist = cleanArtistPart(rawArtists[0] || '');
+          if (isUnsearchableGenericTitle(cleanTitle)) {
+            enrichedArtworkRef.current.add(itemDedupId);
+            done += 1;
+            setCoverSync({ active: true, done, total: missing.length });
+            continue;
+          }
+
+          let embeddedArtist = '';
+          let embeddedSongTitle = cleanTitle;
+          const dashIdx = cleanTitle.indexOf(' - ');
+          if (dashIdx > 1 && dashIdx < cleanTitle.length - 3) {
+            embeddedArtist = cleanArtistPart(cleanTitle.slice(0, dashIdx));
+            embeddedSongTitle = stripTitleNoise(cleanTitle.slice(dashIdx + 3)) || cleanTitle;
+          }
+
+          const primaryArtist = cleanArtistPart(rawArtists[0] || embeddedArtist || '');
           const secondaryArtist = cleanArtistPart(rawArtists[1] || '');
           const candidateQueries = Array.from(
             new Set(
               [
-                `${cleanTitle} ${primaryArtist}`.trim(),
-                secondaryArtist ? `${cleanTitle} ${secondaryArtist}`.trim() : '',
-                cleanTitle.trim()
+                primaryArtist ? `${embeddedSongTitle} ${primaryArtist}`.trim() : '',
+                primaryArtist && embeddedSongTitle !== cleanTitle
+                  ? `${cleanTitle} ${primaryArtist}`.trim()
+                  : '',
+                secondaryArtist ? `${embeddedSongTitle} ${secondaryArtist}`.trim() : '',
+                embeddedArtist ? `${embeddedSongTitle} ${embeddedArtist}`.trim() : '',
+                cleanTitle.trim(),
+                embeddedSongTitle.trim()
               ].filter(Boolean)
             )
           );
           const q = candidateQueries[0] || cleanTitle;
-          let smallCover = null;
-          let previewUrl = null;
-          let resolvedDuration = null;
-          let resolvedTitle = null;
-          let resolvedArtist = null;
-          let resolvedAlbum = null;
+          let bestHit = null;
           let directRespondedOk = false;
           let fallbackRespondedOk = false;
 
           try {
             const res = await fetch(
-              `https://itunes.apple.com/search?term=${encodeURIComponent(q)}&media=music&entity=song&limit=1`
+              `https://itunes.apple.com/search?term=${encodeURIComponent(q)}&media=music&entity=song&limit=5`
             );
             if (res.status === 429 || res.status === 403) {
               rateLimited = true;
             } else if (res.ok) {
               directRespondedOk = true;
               const data = await res.json();
-              const hit = data?.results?.[0];
-              if (hit?.artworkUrl100) {
-                smallCover = compressArtworkUrl(hit.artworkUrl100);
-                previewUrl = hit.previewUrl || null;
-                resolvedTitle = hit.trackName || null;
-                resolvedArtist = hit.artistName || null;
-                resolvedAlbum = hit.collectionName || null;
-                if (hit.trackTimeMillis && hit.trackTimeMillis >= 45000) {
-                  const totalSec = Math.round(hit.trackTimeMillis / 1000);
-                  resolvedDuration = `${Math.floor(totalSec / 60)}:${String(totalSec % 60).padStart(2, '0')}`;
-                }
+              bestHit = pickBestCatalogCoverHit(
+                data?.results || [],
+                embeddedSongTitle || cleanTitle,
+                primaryArtist
+              );
+              if (!bestHit && embeddedSongTitle !== cleanTitle) {
+                bestHit = pickBestCatalogCoverHit(data?.results || [], cleanTitle, primaryArtist);
               }
             }
           } catch {
             networkAborted = true;
           }
 
-          // If iTunes direct didn't find a cover (e.g. archive/reupload track or network/CORS block),
+          // If iTunes direct didn't find a verified cover (e.g. YouTube uploader channel in artist, SoundCloud/Deezer exclusive, or CORS block),
           // query /api/search (which checks both iTunes and Deezer API) across our cleaned candidate queries
-          if (!smallCover && !rateLimited) {
-            for (const cand of candidateQueries.slice(0, 3)) {
+          if (!bestHit && !rateLimited) {
+            for (const cand of candidateQueries.slice(0, 4)) {
               try {
                 const fallbackRes = await fetch(`/api/search?q=${encodeURIComponent(cand)}`);
                 if (fallbackRes.status === 429 || fallbackRes.status === 403) {
@@ -1779,16 +2497,14 @@ export default function HomePage() {
                   fallbackRespondedOk = true;
                   networkAborted = false;
                   const fbData = await fallbackRes.json();
-                  const fbHit = fbData?.results?.[0];
-                  if (fbHit?.artwork && !isPlaceholderCover(fbHit.artwork)) {
-                    smallCover = compressArtworkUrl(fbHit.artwork);
-                    previewUrl = fbHit.previewUrl || null;
-                    resolvedTitle = fbHit.title || null;
-                    resolvedArtist = fbHit.artist || null;
-                    resolvedAlbum = fbHit.album || null;
-                    resolvedDuration = fbHit.duration && fbHit.duration !== '—' ? fbHit.duration : null;
-                    break;
-                  }
+                  const fbCandidates = (fbData?.results || []).slice(0, 8);
+                  bestHit =
+                    pickBestCatalogCoverHit(
+                      fbCandidates,
+                      embeddedSongTitle || cleanTitle,
+                      primaryArtist
+                    ) || pickBestCatalogCoverHit(fbCandidates, cleanTitle, primaryArtist);
+                  if (bestHit) break;
                 }
               } catch {
                 networkAborted = true;
@@ -1796,6 +2512,8 @@ export default function HomePage() {
               }
             }
           }
+
+          const smallCover = bestHit?.artwork ? compressArtworkUrl(bestHit.artwork) : null;
 
           // If the user switched apps mid-request and the fetch aborted, wait until visible and retry this exact song
           if (
@@ -1811,50 +2529,55 @@ export default function HomePage() {
 
           // Only mark as checked if we actually got a cover OR the API genuinely returned 200 OK with 0 results
           if (smallCover || directRespondedOk || fallbackRespondedOk) {
+            enrichedArtworkRef.current.add(itemDedupId);
             enrichedArtworkRef.current.add(String(item.id));
           }
 
           if (smallCover && !isPlaceholderCover(smallCover)) {
             const patch = { artwork: smallCover };
-            if (!item.previewUrl && previewUrl) {
-              patch.previewUrl = previewUrl;
+            if (!item.previewUrl && bestHit.previewUrl) {
+              patch.previewUrl = bestHit.previewUrl;
             }
-            if ((!item.duration || item.duration === '—') && resolvedDuration) {
-              patch.duration = resolvedDuration;
+            if ((!item.duration || item.duration === '—') && bestHit.duration) {
+              patch.duration = bestHit.duration;
             }
-            if (
-              (!item.artist ||
-                item.artist === 'Guardado en dispositivo' ||
-                item.artist === 'Artista') &&
-              resolvedArtist
-            ) {
-              patch.artist = resolvedArtist;
-              if (resolvedTitle) patch.title = resolvedTitle;
+            if (isGenericTrackArtist(item.artist) && bestHit.artist) {
+              patch.artist = bestHit.artist;
+              if (bestHit.title) patch.title = bestHit.title;
             }
             if (
-              (!item.album ||
-                item.album === 'Offline PWA' ||
-                item.album === 'Spotify CSV' ||
-                item.album === 'Guardado en dispositivo') &&
-              resolvedAlbum
+              (!item.album || ignoredAlbums.has(String(item.album).trim().toLowerCase())) &&
+              bestHit.album
             ) {
-              patch.album = resolvedAlbum;
+              patch.album = bestHit.album;
             }
-            updateTrackMetadataAcrossLibraries(item.id, patch);
+            updateTrackMetadataAcrossLibraries(item.id, patch, item.filename);
+            if (resolveOwnUploadId(item)) {
+              persistOwnUploadMetadataToServer(item, patch);
+            }
+            resolvedIdsInRun.add(itemDedupId);
             resolvedIdsInRun.add(String(item.id));
 
-            // Reuse the same compressed cover for other tracks in this library from the exact same album + artist (saves API calls!)
+            // Reuse the same compressed cover for other tracks in this library from the exact same real album + artist (saves API calls!)
             const itemAlbKey = getAlbumKey(item);
             if (itemAlbKey) {
               for (const sibling of missing) {
+                const sibDedupId = resolveOwnUploadId(sibling) || String(sibling.id);
                 if (
-                  String(sibling.id) !== String(item.id) &&
-                  !resolvedIdsInRun.has(String(sibling.id)) &&
+                  sibDedupId !== itemDedupId &&
+                  !resolvedIdsInRun.has(sibDedupId) &&
                   getAlbumKey(sibling) === itemAlbKey
                 ) {
-                  updateTrackMetadataAcrossLibraries(sibling.id, { artwork: smallCover });
-                  enrichedArtworkRef.current.add(String(sibling.id));
-                  resolvedIdsInRun.add(String(sibling.id));
+                  updateTrackMetadataAcrossLibraries(
+                    sibling.id,
+                    { artwork: smallCover },
+                    sibling.filename
+                  );
+                  if (resolveOwnUploadId(sibling)) {
+                    persistOwnUploadMetadataToServer(sibling, { artwork: smallCover });
+                  }
+                  enrichedArtworkRef.current.add(sibDedupId);
+                  resolvedIdsInRun.add(sibDedupId);
                 }
               }
             }
@@ -2525,6 +3248,7 @@ export default function HomePage() {
         }
       } catch {}
 
+      let playlistsChanged = false;
       setCustomPlaylists(prev => {
         let changed = false;
         const next = prev.map(pl => {
@@ -2535,6 +3259,14 @@ export default function HomePage() {
             return {
               ...t,
               id: match.id,
+              title: t.title || match.title,
+              artist: t.artist || match.artist,
+              album: t.album || match.album,
+              artwork: !isPlaceholderCover(t.artwork)
+                ? t.artwork
+                : !isPlaceholderCover(match.artwork)
+                ? match.artwork
+                : t.artwork,
               source: 'own',
               uploadId: match.id,
               fileDeleted: Boolean(match.fileDeleted),
@@ -2545,6 +3277,8 @@ export default function HomePage() {
           return { ...pl, tracks: updatedTracks };
         });
         if (changed) {
+          playlistsChanged = true;
+          customPlaylistsRef.current = next;
           try {
             localStorage.setItem(PLAYLISTS_STORAGE_KEY, JSON.stringify(next));
           } catch {}
@@ -2566,6 +3300,11 @@ export default function HomePage() {
             artist: match.artist || t.artist,
             album: match.album || t.album,
             duration: match.duration || t.duration,
+            artwork: !isPlaceholderCover(t.artwork)
+              ? t.artwork
+              : !isPlaceholderCover(match.artwork)
+              ? match.artwork
+              : t.artwork,
             source: 'own',
             uploadId: match.id,
             fileDeleted: Boolean(match.fileDeleted),
@@ -2582,6 +3321,7 @@ export default function HomePage() {
         return prev;
       });
 
+      let likesAdded = false;
       setLikedTracks(prev => {
         let changed = false;
         const seenIds = new Set(prev.map(t => String(t.id)));
@@ -2593,6 +3333,11 @@ export default function HomePage() {
           return {
             ...t,
             id: match.id,
+            artwork: !isPlaceholderCover(t.artwork)
+              ? t.artwork
+              : !isPlaceholderCover(match.artwork)
+              ? match.artwork
+              : t.artwork,
             source: 'own',
             uploadId: match.id,
             fileDeleted: Boolean(match.fileDeleted),
@@ -2617,15 +3362,28 @@ export default function HomePage() {
 
         if (missingFromLocal.length > 0) {
           changed = true;
+          likesAdded = true;
         }
 
         if (!changed) return prev;
         const merged = deduplicateTracksList([...missingFromLocal, ...updated]);
+        likedTracksRef.current = merged;
         try {
           localStorage.setItem(LIKES_STORAGE_KEY, JSON.stringify(merged));
         } catch {}
         return merged;
       });
+
+      if (playlistsChanged || likesAdded) {
+        scheduleCollectionsSync();
+      }
+
+      const ownTracksMissingCovers = serverTracks
+        .filter(st => !unlikedSet.has(String(st.id)) && isPlaceholderCover(st.artwork))
+        .map(st => ({ ...st, source: 'own', uploadId: st.id }));
+      if (ownTracksMissingCovers.length > 0) {
+        syncMissingCoversForList(ownTracksMissingCovers, false);
+      }
     } catch {}
   }
 
@@ -2662,6 +3420,7 @@ export default function HomePage() {
     setOwnUploadState({ busy: true, type: 'info', text: 'Preparando subida…' });
     let uploadedCount = 0;
     let lastError = '';
+    const uploadedMissingCover = [];
 
     try {
       for (let fIdx = 0; fIdx < files.length; fIdx++) {
@@ -2746,6 +3505,7 @@ export default function HomePage() {
         // Add to user's library marked as source: "own"
         setLikedTracks(prev => {
           const next = deduplicateTracksList([ownTrack, ...prev]);
+          likedTracksRef.current = next;
           try {
             localStorage.setItem(LIKES_STORAGE_KEY, JSON.stringify(next));
           } catch {}
@@ -2763,11 +3523,18 @@ export default function HomePage() {
                 ? { ...pl, tracks: deduplicateTracksList([ownTrack, ...(pl.tracks || [])]) }
                 : pl
             );
+            customPlaylistsRef.current = next;
             try {
               localStorage.setItem(PLAYLISTS_STORAGE_KEY, JSON.stringify(next));
             } catch {}
             return next;
           });
+        }
+
+        scheduleCollectionsSync();
+
+        if (isPlaceholderCover(ownTrack.artwork)) {
+          uploadedMissingCover.push(ownTrack);
         }
 
         setOwnUploadState({
@@ -2787,6 +3554,10 @@ export default function HomePage() {
           }
         }));
         uploadedCount += 1;
+      }
+
+      if (uploadedMissingCover.length > 0) {
+        syncMissingCoversForList(uploadedMissingCover, false);
       }
 
       if (uploadedCount > 0 && !lastError) {
@@ -3469,7 +4240,6 @@ export default function HomePage() {
 
     currentIndexRef.current = nextIdx;
     setCurrentIndex(nextIdx);
-    setProgress(0);
     isPlayingRef.current = true;
     setIsPlaying(true);
 
@@ -3809,11 +4579,35 @@ export default function HomePage() {
     setRepeatMode(prev => (prev === 'off' ? 'all' : prev === 'all' ? 'one' : 'off'));
   }
 
-  function formatSec(sec) {
-    if (!sec || isNaN(sec)) return '0:00';
-    const m = Math.floor(sec / 60);
-    const s = Math.floor(sec % 60).toString().padStart(2, '0');
-    return `${m}:${s}`;
+  async function handleSpotifyUrlSubmit(e) {
+    e.preventDefault();
+    if (!spotifyUrl.trim() || spotifyBusy || isOffline) return;
+    setSpotifyBusy(true);
+    setSpotifyMsg({ type: '', text: '' });
+    try {
+      const res = await fetch('/api/spotify', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: spotifyUrl.trim() })
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        setSpotifyMsg({
+          type: 'err',
+          text: data.error || 'No se pudo importar desde Spotify.'
+        });
+      } else {
+        setSpotifyUrl('');
+        openSpotifyImportModal(
+          data.tracks || [],
+          data.playlistName || 'Playlist Spotify'
+        );
+      }
+    } catch {
+      setSpotifyMsg({ type: 'err', text: 'Error de red al importar playlist.' });
+    } finally {
+      setSpotifyBusy(false);
+    }
   }
 
   async function handleInstallPwa() {
@@ -4383,6 +5177,29 @@ export default function HomePage() {
     t => t && isPlaceholderCover(t.artwork)
   );
 
+  const totalMissingCoversForButton = (() => {
+    const seen = new Set();
+    for (const t of missingCoversInActiveLibrary) {
+      seen.add(resolveOwnUploadId(t) || String(t.id));
+    }
+    const ownPools = [
+      ...likedTracks,
+      ...offlineCatalog,
+      ...customPlaylists.flatMap(pl => pl?.tracks || [])
+    ];
+    for (const t of ownPools) {
+      if (!t || !isPlaceholderCover(t.artwork)) continue;
+      const isOwn =
+        t.source === 'own' ||
+        Boolean(resolveOwnUploadId(t)) ||
+        String(t.artist || '').trim().toLowerCase() === 'archivo propio';
+      if (isOwn) {
+        seen.add(resolveOwnUploadId(t) || String(t.id));
+      }
+    }
+    return seen.size;
+  })();
+
   const normalizedLibQuery = libraryQuery
     .trim()
     .toLowerCase()
@@ -4902,16 +5719,21 @@ export default function HomePage() {
                     <Icon name={repeatMode === 'one' ? 'repeat-1' : 'repeat'} size={17} />
                   </button>
 
-                  {(missingCoversInActiveLibrary.length > 0 || coverSync.active) && (
+                  {(totalMissingCoversForButton > 0 || coverSync.active) && (
                     <button
                       type="button"
                       className={`icon-btn ${coverSync.active ? 'active' : ''}`}
                       disabled={isOffline}
                       onClick={() => syncMissingCoversForList(activeLibraryTracks, true)}
+                      aria-label={
+                        coverSync.active
+                          ? `Pausar carga de portadas (${coverSync.done} de ${coverSync.total})`
+                          : `Descargar portadas faltantes (${totalMissingCoversForButton})`
+                      }
                       title={
                         coverSync.active
                           ? `Pausar carga de portadas (${coverSync.done}/${coverSync.total})`
-                          : `Cargar y comprimir portadas faltantes (${missingCoversInActiveLibrary.length})`
+                          : `Descargar portadas faltantes (${totalMissingCoversForButton})`
                       }
                     >
                       <Icon
@@ -5061,442 +5883,68 @@ export default function HomePage() {
 
       {/* ==================== AJUSTES & SPOTIFY SYNC ==================== */}
       {activeTab === 'settings' && (
-        <section>
-          <div className="section-bar">
-            <div>
-              <h1 className="section-bar-title">Ajustes y sincronización</h1>
-              <p className="section-bar-sub">
-                Importá colecciones desde Spotify o CSV y administrá tu espacio Offline.
-              </p>
-            </div>
-          </div>
-
-          <div className="card" style={{ marginBottom: 14 }}>
-            <div className="settings-card-head">
-              <div className="settings-card-info">
-                <div className="settings-card-title">
-                  Importar desde Spotify
-                </div>
-                <div className="settings-card-sub">
-                  Pegá un link público de Spotify o subí tu archivo <code>.csv</code> de Exportify. Podrás elegir en qué librería guardarlo.
-                </div>
-              </div>
-              <span className="badge lime">Sync</span>
-            </div>
-
-            {spotifyMsg.text && (
-              <div className={`alert ${spotifyMsg.type === 'err' ? 'err' : 'ok'}`}>
-                <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, flexWrap: 'wrap' }}>
-                  <span>{spotifyMsg.text}</span>
-                  {spotifyMsg.type === 'ok' && !pendingSpotifyImport && (
-                    <button
-                      type="button"
-                      className="btn secondary sm"
-                      onClick={() => setActiveTab('library')}
-                    >
-                      Ver en Biblioteca <Icon name="arrow-right" size={13} />
-                    </button>
-                  )}
-                </div>
-              </div>
-            )}
-
-            <form
-              className={`search-bar ${isOffline ? 'offline-section-disabled' : ''}`.trim()}
-              style={{ marginBottom: 12 }}
-              onSubmit={async e => {
-                e.preventDefault();
-                if (!spotifyUrl.trim() || spotifyBusy || isOffline) return;
-                setSpotifyBusy(true);
-                setSpotifyMsg({ type: '', text: '' });
-                try {
-                  const res = await fetch('/api/spotify', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ url: spotifyUrl.trim() })
-                  });
-                  const data = await res.json();
-                  if (!res.ok) {
-                    setSpotifyMsg({
-                      type: 'err',
-                      text: data.error || 'No se pudo importar desde Spotify.'
-                    });
-                  } else {
-                    setSpotifyUrl('');
-                    openSpotifyImportModal(
-                      data.tracks || [],
-                      data.playlistName || 'Playlist Spotify'
-                    );
-                  }
-                } catch {
-                  setSpotifyMsg({ type: 'err', text: 'Error de red al importar playlist.' });
-                } finally {
-                  setSpotifyBusy(false);
-                }
-              }}
-            >
-              <input
-                type="url"
-                className="search-input"
-                placeholder="https://open.spotify.com/playlist/..."
-                value={spotifyUrl}
-                onChange={e => setSpotifyUrl(e.target.value)}
-                disabled={isOffline}
-                required
-              />
-              <button type="submit" className="btn sm" disabled={spotifyBusy || isOffline}>
-                {spotifyBusy ? 'Leyendo…' : 'Importar link'}
-              </button>
-            </form>
-
-            {/* CSV Upload works even offline because it parses locally! */}
-            <div
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'space-between',
-                flexWrap: 'wrap',
-                gap: 10,
-                fontSize: '0.8rem',
-                color: 'var(--muted)'
-              }}
-            >
-              <span>
-                ¿Tenés un archivo <code>.csv</code> de{' '}
-                <a
-                  href="https://exportify.net"
-                  target="_blank"
-                  rel="noreferrer"
-                  style={{ textDecoration: 'underline', fontWeight: 700 }}
-                >
-                  exportify.net
-                </a>
-                ?
-              </span>
-              <label className="btn secondary sm" style={{ cursor: 'pointer' }}>
-                <Icon name="folder" size={14} /> Subir CSV de Spotify
-                <input
-                  type="file"
-                  accept=".csv,text/csv,text/plain,application/vnd.ms-excel"
-                  style={{ display: 'none' }}
-                  onChange={async e => {
-                    const file = e.target.files?.[0];
-                    e.target.value = '';
-                    if (file) {
-                      await handleSpotifyCsvFile(file);
-                    }
-                  }}
-                />
-              </label>
-            </div>
-
-            {/* Inline destination picker so mobile browsers that block <dialog> after file input still work 100% */}
-            {pendingSpotifyImport && (
-              <div className="import-destination-box">
-                <div className="dialog-head" style={{ marginBottom: 8 }}>
-                  <div>
-                    <div className="dialog-title">
-                      ¿En qué librería querés guardar estas {pendingSpotifyImport.tracks.length} canciones?
-                    </div>
-                    <div className="dialog-sub">
-                      Origen: «{pendingSpotifyImport.sourceName}»
-                    </div>
-                  </div>
-                  <button
-                    type="button"
-                    className="icon-btn"
-                    onClick={closeSpotifyImportModal}
-                    title="Cancelar"
-                  >
-                    <Icon name="close" size={15} />
-                  </button>
-                </div>
-
-                <div className="dialog-list">
-                  <button
-                    type="button"
-                    className="dialog-option selected"
-                    onClick={() => confirmSpotifyImport('liked')}
-                  >
-                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 7 }}>
-                      <Icon name="heart-fill" size={14} /> Guardar en Favoritos (Con corazón)
-                    </span>
-                    <Icon name="arrow-right" size={14} />
-                  </button>
-
-                  {customPlaylists.map(pl => (
-                    <button
-                      key={pl.id}
-                      type="button"
-                      className="dialog-option"
-                      onClick={() => confirmSpotifyImport(pl.id)}
-                    >
-                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 7 }}>
-                        <Icon name="folder" size={14} /> Guardar en «{pl.name}» ({pl.tracks.length})
-                      </span>
-                      <Icon name="arrow-right" size={14} />
-                    </button>
-                  ))}
-                </div>
-
-                <form
-                  className="search-bar"
-                  style={{ marginTop: 8, marginBottom: 0 }}
-                  onSubmit={e => {
-                    e.preventDefault();
-                    confirmSpotifyImport('new_playlist', spotifyNewLibName);
-                  }}
-                >
-                  <input
-                    type="text"
-                    className="search-input"
-                    placeholder="O escribir nombre de nueva librería…"
-                    value={spotifyNewLibName}
-                    onChange={e => setSpotifyNewLibName(e.target.value)}
-                    required
-                  />
-                  <button type="submit" className="btn sm">
-                    <Icon name="plus" size={13} /> Crear y guardar
-                  </button>
-                </form>
-              </div>
-            )}
-          </div>
-
-          <div className="card">
-            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
-              <div className="settings-card-info">
-                <div className="settings-card-title">
-                  Almacenamiento Offline
-                </div>
-                <div className="settings-card-sub">
-                  {deviceQuota
-                    ? `${deviceQuota.usedMB} MB usados de ~${deviceQuota.quotaGB} GB (${offlineCatalog.length} canciones en caché).`
-                    : `${offlineCatalog.length} canciones guardadas en este dispositivo.`}
-                </div>
-              </div>
-              {offlineCatalog.length > 0 && (
-                <button
-                  type="button"
-                  className="btn danger sm"
-                  onClick={async () => {
-                    if ('caches' in window) {
-                      await caches.delete(AUDIO_CACHE_NAME);
-                    }
-                    persistOfflineCatalog([]);
-                    await refreshOfflineCacheList();
-                  }}
-                >
-                  <Icon name="trash" size={14} /> Vaciar Offline
-                </button>
-              )}
-            </div>
-          </div>
-
-          {user?.is_admin && (
-            <div className="card" style={{ marginTop: 14 }}>
-              <div className="settings-card-head">
-                <div className="settings-card-info">
-                  <div className="settings-card-title">
-                    Cookies de YouTube
-                  </div>
-                  <div className="settings-card-sub">
-                    Pegá o subí tus cookies en <code>JSON</code> (Cookie-Editor) o <code>cookies.txt</code> (Netscape) para priorizar YouTube en el VPS.
-                  </div>
-                </div>
-                <span className={`badge ${adminData.ytCookies?.configured ? 'lime' : ''}`}>
-                  {adminData.ytCookies?.configured
-                    ? `Activas (${adminData.ytCookies.cookieLines})`
-                    : 'Sin configurar'}
-                </span>
-              </div>
-
-              {ytCookiesMsg.text && (
-                <div
-                  className={`alert ${ytCookiesMsg.type === 'error' ? 'err' : 'ok'}`}
-                  style={{ marginBottom: 10 }}
-                >
-                  {ytCookiesMsg.text}
-                </div>
-              )}
-
-              <textarea
-                className="cookies-textarea"
-                rows={4}
-                placeholder='Pegá aquí el JSON exportado ([ { "domain": ".youtube.com", ... } ]) o el contenido de cookies.txt…'
-                value={ytCookiesText}
-                disabled={ytCookiesBusy || isOffline}
-                onChange={e => setYtCookiesText(e.target.value)}
-              />
-
-              <div className="settings-actions-row">
-                <div className="settings-actions-group">
-                  <button
-                    type="button"
-                    className="btn sm"
-                    disabled={ytCookiesBusy || isOffline || !ytCookiesText.trim()}
-                    onClick={() => saveYtCookiesContent(ytCookiesText)}
-                  >
-                    <Icon name="check" size={14} /> {ytCookiesBusy ? 'Guardando…' : 'Guardar cookies'}
-                  </button>
-
-                  <label
-                    className="btn secondary sm"
-                    style={{ cursor: ytCookiesBusy || isOffline ? 'not-allowed' : 'pointer' }}
-                  >
-                    <Icon name="folder" size={14} /> Subir .json / .txt
-                    <input
-                      type="file"
-                      accept=".txt,.json,text/plain,application/json"
-                      disabled={ytCookiesBusy || isOffline}
-                      style={{ display: 'none' }}
-                      onChange={async e => {
-                        const file = e.target.files?.[0];
-                        e.target.value = '';
-                        if (!file) return;
-                        const text = await file.text();
-                        await saveYtCookiesContent(text);
-                      }}
-                    />
-                  </label>
-                </div>
-
-                {adminData.ytCookies?.configured && (
-                  <button
-                    type="button"
-                    className="btn danger sm"
-                    disabled={ytCookiesBusy || isOffline}
-                    onClick={handleClearYtCookies}
-                  >
-                    <Icon name="trash" size={14} /> Quitar
-                  </button>
-                )}
-              </div>
-            </div>
-          )}
-        </section>
+        <SettingsPanel
+          user={user}
+          isOffline={isOffline}
+          Icon={Icon}
+          syncState={syncState}
+          likedCount={likedTracks.length}
+          playlistsCount={customPlaylists.length}
+          backupMsg={backupMsg}
+          onExportBackupJson={handleExportBackupJson}
+          onImportBackupJson={handleImportBackupJson}
+          onForceCloudSync={() => pushCollectionsToServerNow()}
+          spotifyUrl={spotifyUrl}
+          setSpotifyUrl={setSpotifyUrl}
+          spotifyBusy={spotifyBusy}
+          spotifyMsg={spotifyMsg}
+          pendingSpotifyImport={pendingSpotifyImport}
+          spotifyNewLibName={spotifyNewLibName}
+          setSpotifyNewLibName={setSpotifyNewLibName}
+          customPlaylists={customPlaylists}
+          onSpotifyUrlSubmit={handleSpotifyUrlSubmit}
+          onSpotifyCsvFile={handleSpotifyCsvFile}
+          onConfirmSpotifyImport={confirmSpotifyImport}
+          onCloseSpotifyImport={closeSpotifyImportModal}
+          onGoToLibrary={() => setActiveTab('library')}
+          deviceQuota={deviceQuota}
+          offlineCount={offlineCatalog.length}
+          storagePersisted={storagePersisted}
+          storagePersistMsg={storagePersistMsg}
+          onRequestPersistentStorage={() => ensurePersistentStorage(true)}
+          onClearOfflineCache={async () => {
+            if ('caches' in window) {
+              await caches.delete(AUDIO_CACHE_NAME);
+            }
+            persistOfflineCatalog([]);
+            await refreshOfflineCacheList();
+          }}
+          adminYtCookies={adminData.ytCookies}
+          ytCookiesText={ytCookiesText}
+          setYtCookiesText={setYtCookiesText}
+          ytCookiesBusy={ytCookiesBusy}
+          ytCookiesMsg={ytCookiesMsg}
+          onSaveYtCookies={saveYtCookiesContent}
+          onClearYtCookies={handleClearYtCookies}
+        />
       )}
 
       {/* ==================== TAB 5: ADMIN PANEL ==================== */}
       {activeTab === 'admin' && user.is_admin && (
-        <section className={isOffline ? 'offline-section-disabled' : ''}>
-          <div className="section-bar">
-            <div>
-              <h1 className="section-bar-title">Administración</h1>
-              <p className="section-bar-sub">
-                Códigos de invitación, usuarios y estado del servidor.
-              </p>
-            </div>
-          </div>
-
-          <div className="grid three" style={{ marginBottom: 16 }}>
-            <div className="stat">
-              <div className="stat-label">Usuarios</div>
-              <div className="stat-value">{adminData.users.length}</div>
-              <div className="stat-hint">
-                {adminData.users.filter(u => u.active).length} activos
-              </div>
-            </div>
-
-            <div className="stat">
-              <div className="stat-label">Invitaciones</div>
-              <div className="stat-value">
-                {adminData.invites.filter(i => !i.revoked && i.used_count < i.max_uses).length}
-              </div>
-              <div className="stat-hint">Disponibles</div>
-            </div>
-
-            <div className="stat full-mobile">
-              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12, flexWrap: 'wrap' }}>
-                <div>
-                  <div className="stat-label">Disco VPS (Puente temporal)</div>
-                  <div className="stat-value">
-                    {adminData.storage
-                      ? `${adminData.storage.usedMB} / ${adminData.storage.maxMB} MB`
-                      : '—'}
-                  </div>
-                </div>
-                <div className="stat-hint" style={{ fontWeight: 700 }}>
-                  {adminData.storage ? `${adminData.storage.fileCount} archivos en cola` : 'Calculando…'}
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <div className="card" style={{ marginBottom: 16 }}>
-            <div className="track-title" style={{ fontSize: '1rem', marginBottom: 10 }}>
-              Crear código de invitación
-            </div>
-            {adminMsg && <div className="alert ok">{adminMsg}</div>}
-            <form className="form" onSubmit={handleCreateInvite}>
-              <div className="grid two">
-                <div className="field">
-                  <label htmlFor="invite-label">Etiqueta</label>
-                  <input
-                    id="invite-label"
-                    type="text"
-                    placeholder="Ej. Amigos, Móvil…"
-                    value={inviteLabel}
-                    onChange={e => setInviteLabel(e.target.value)}
-                  />
-                </div>
-                <div className="field">
-                  <label htmlFor="invite-uses">Usos permitidos</label>
-                  <input
-                    id="invite-uses"
-                    type="number"
-                    min={1}
-                    max={100}
-                    value={inviteMaxUses}
-                    onChange={e => setInviteMaxUses(e.target.value)}
-                  />
-                </div>
-              </div>
-              <div>
-                <button type="submit" className="btn sm">
-                  <Icon name="plus" size={14} /> Generar código
-                </button>
-              </div>
-            </form>
-          </div>
-
-          <div className="track-list" style={{ marginBottom: 16 }}>
-            {adminData.invites.map(inv => {
-              const exhausted = inv.used_count >= inv.max_uses;
-              return (
-                <div key={inv.code} className="track-row">
-                  <div className="track-text">
-                    <div className="track-title" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                      <span className="code-pill">{inv.code}</span>
-                      <span>{inv.label}</span>
-                    </div>
-                    <div className="track-sub">
-                      Usos: {inv.used_count}/{inv.max_uses} ·{' '}
-                      {inv.revoked ? 'Revocado' : exhausted ? 'Agotado' : 'Activo'}
-                    </div>
-                  </div>
-                  <div className="track-actions">
-                    <button
-                      type="button"
-                      className="btn secondary sm"
-                      onClick={() => copyInviteCode(inv.code)}
-                    >
-                      {copiedCode === inv.code ? 'Copiado' : 'Copiar'}
-                    </button>
-                    <button
-                      type="button"
-                      className="icon-btn"
-                      onClick={() => handleAdminAction({ action: 'delete_invite', code: inv.code })}
-                      title="Eliminar invitación"
-                    >
-                      <Icon name="trash" size={15} />
-                    </button>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        </section>
+        <AdminPanel
+          isOffline={isOffline}
+          adminData={adminData}
+          adminMsg={adminMsg}
+          inviteLabel={inviteLabel}
+          setInviteLabel={setInviteLabel}
+          inviteMaxUses={inviteMaxUses}
+          setInviteMaxUses={setInviteMaxUses}
+          copiedCode={copiedCode}
+          onCreateInvite={handleCreateInvite}
+          onCopyInviteCode={copyInviteCode}
+          onAdminAction={handleAdminAction}
+          Icon={Icon}
+        />
       )}
       </main>
 
@@ -5550,6 +5998,17 @@ export default function HomePage() {
               >
                 <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
                   <Icon name="folder" size={15} /> Guardar en una librería…
+                </span>
+                <Icon name="arrow-right" size={14} />
+              </button>
+
+              <button
+                type="button"
+                className="dialog-option"
+                onClick={() => openEditTrackModal(menuTrack.track)}
+              >
+                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+                  <Icon name="edit" size={15} /> Editar título, artista y portada…
                 </span>
                 <Icon name="arrow-right" size={14} />
               </button>
@@ -6108,24 +6567,109 @@ export default function HomePage() {
         </div>
       </dialog>
 
+      {/* ==================== DIALOG 6: EDIT TRACK METADATA MODAL ==================== */}
+      <dialog
+        ref={editDialogRef}
+        closedby="any"
+        className="save-dialog"
+        aria-labelledby="edit-dialog-title"
+        onClose={() => setEditingTrack(null)}
+        onClick={e => handleDialogBackdropClick(e, closeEditTrackModal)}
+      >
+        {editingTrack && (
+          <div>
+            <div className="dialog-head">
+              <div style={{ minWidth: 0 }}>
+                <h2 id="edit-dialog-title" className="dialog-title" style={{ margin: 0 }}>
+                  Editar canción
+                </h2>
+                <div className="dialog-sub">
+                  Corrige el título o artista para obtener la portada exacta
+                </div>
+              </div>
+              <button
+                type="button"
+                className="icon-btn"
+                onClick={closeEditTrackModal}
+                aria-label="Cerrar editor"
+              >
+                <Icon name="close" size={16} />
+              </button>
+            </div>
+
+            <form className="form" onSubmit={handleEditTrackSubmit}>
+              <div className="field">
+                <label htmlFor="edit-track-title">Título de la canción</label>
+                <input
+                  id="edit-track-title"
+                  name="title"
+                  type="text"
+                  required
+                  autoFocus
+                  value={editForm.title}
+                  onChange={e => setEditForm(prev => ({ ...prev, title: e.target.value }))}
+                  placeholder="Ej. La Pinta La Niña y la Santa María"
+                />
+              </div>
+
+              <div className="field">
+                <label htmlFor="edit-track-artist">Artista o grupo</label>
+                <input
+                  id="edit-track-artist"
+                  name="artist"
+                  type="text"
+                  value={editForm.artist}
+                  onChange={e => setEditForm(prev => ({ ...prev, artist: e.target.value }))}
+                  placeholder="Ej. Black Sun"
+                />
+              </div>
+
+              <div className="field">
+                <label htmlFor="edit-track-album">Álbum (opcional)</label>
+                <input
+                  id="edit-track-album"
+                  name="album"
+                  type="text"
+                  value={editForm.album}
+                  onChange={e => setEditForm(prev => ({ ...prev, album: e.target.value }))}
+                  placeholder="Ej. La Lógica del León"
+                />
+              </div>
+
+              {!isOffline && (
+                <div className="checkbox-inline-row">
+                  <input
+                    id="edit-track-refresh-cover"
+                    name="refreshCover"
+                    type="checkbox"
+                    checked={Boolean(editForm.refreshCover)}
+                    onChange={e =>
+                      setEditForm(prev => ({ ...prev, refreshCover: e.target.checked }))
+                    }
+                  />
+                  <label htmlFor="edit-track-refresh-cover">
+                    Buscar y actualizar portada automáticamente al guardar
+                  </label>
+                </div>
+              )}
+
+              <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8, marginTop: 4 }}>
+                <button type="button" className="btn ghost sm" onClick={closeEditTrackModal}>
+                  Cancelar
+                </button>
+                <button type="submit" className="btn sm">
+                  Guardar cambios
+                </button>
+              </div>
+            </form>
+          </div>
+        )}
+      </dialog>
+
       {/* ==================== COMPACT FLOATING MINI-PLAYER DOCK ==================== */}
       {currentTrack && (
         <div className="player-dock">
-          <div className="player-scrubber">
-            <span>{formatSec(progress)}</span>
-            <input
-              type="range"
-              min="0"
-              max={duration || 100}
-              value={progress}
-              onChange={e => {
-                const val = Number(e.target.value);
-                setProgress(val);
-                if (audioRef.current) audioRef.current.currentTime = val;
-              }}
-            />
-            <span>{formatSec(duration)}</span>
-          </div>
+          <PlayerScrubber audioRef={audioRef} trackKey={currentTrack.id} />
 
           <div className="player-main">
             <div className="player-track">
@@ -6196,7 +6740,6 @@ export default function HomePage() {
         playsInline
         onTimeUpdate={e => {
           const cur = e.currentTarget.currentTime;
-          setProgress(cur);
           const warmKey = `${currentIndexRef.current}_${queueRef.current.length}`;
           if (cur > 0.5 && lastWarmedKeyRef.current !== warmKey) {
             lastWarmedKeyRef.current = warmKey;
@@ -6206,7 +6749,6 @@ export default function HomePage() {
         onLoadedMetadata={e => {
           const audioEl = e.currentTarget;
           const dur = audioEl.duration;
-          setDuration(dur);
           if (isPlayingRef.current && audioEl.paused && !playInFlightRef.current) {
             playInFlightRef.current = true;
             audioEl

@@ -31,7 +31,12 @@ const {
   UPLOAD_TTL_MS
 } = storeMod;
 
-const { MAX_UPLOAD_BYTES, UPLOAD_ID_REGEX, probeAudioFile } = uploadMod;
+const {
+  MAX_UPLOAD_BYTES,
+  UPLOAD_ID_REGEX,
+  probeAudioFile,
+  sanitizeDisplayMetadataFromName
+} = uploadMod;
 
 function setupTwoUsers() {
   const store = loadStore();
@@ -412,4 +417,153 @@ test('24-hour sweep deletes unconfirmed upload files while keeping <24h uploads 
   assert.equal(recentAfter.source, 'own');
   assert.equal(recentAfter.fileDeleted, false);
   assert.equal(fs.existsSync(recentFile), true);
+});
+
+test('sanitizeDisplayMetadataFromName strips downloader prefixes, bitrates, and glued media extensions', () => {
+  const cleaned = sanitizeDisplayMetadataFromName(
+    'y2mate.gs - Black Sun - La Pinta La Niña y la Santa MARIAavi (320 kbps) [Official Video].mp3'
+  );
+  assert.equal(cleaned.fallbackArtist, 'Black Sun');
+  assert.equal(cleaned.fallbackTitle, 'La Pinta La Niña y la Santa MARIA');
+
+  const singlePart = sanitizeDisplayMetadataFromName(
+    'spotifydown.com - Bohemian_Rhapsody_320kbps.m4a'
+  );
+  assert.equal(singlePart.fallbackArtist, 'Archivo propio');
+  assert.equal(singlePart.fallbackTitle, 'Bohemian Rhapsody');
+});
+
+test('POST /api/upload extracts embedded ID3 cover art and PATCH /api/upload/:id updates metadata for owner only', async () => {
+  const ffmpegBin = process.env.FFMPEG_BIN?.trim() || 'ffmpeg';
+  const coverJpgPath = path.join(fixturesDir, 'cover.jpg');
+  const mp3WithCoverPath = path.join(fixturesDir, 'with_cover.mp3');
+
+  const imgGen = spawnSync(
+    ffmpegBin,
+    [
+      '-hide_banner',
+      '-loglevel',
+      'error',
+      '-y',
+      '-f',
+      'lavfi',
+      '-i',
+      'color=c=orange:s=120x120:d=0.1',
+      '-frames:v',
+      '1',
+      coverJpgPath
+    ],
+    { encoding: 'utf8', windowsHide: true }
+  );
+  assert.equal(imgGen.status, 0, `Cover fixture generation failed: ${imgGen.stderr}`);
+
+  const mp3Gen = spawnSync(
+    ffmpegBin,
+    [
+      '-hide_banner',
+      '-loglevel',
+      'error',
+      '-y',
+      '-f',
+      'lavfi',
+      '-i',
+      'sine=frequency=523.25:sample_rate=44100:duration=1.0',
+      '-i',
+      coverJpgPath,
+      '-map',
+      '0:a',
+      '-map',
+      '1:v',
+      '-c:a',
+      'libmp3lame',
+      '-b:a',
+      '128k',
+      '-c:v',
+      'mjpeg',
+      '-id3v2_version',
+      '3',
+      '-disposition:v:0',
+      'attached_pic',
+      mp3WithCoverPath
+    ],
+    { encoding: 'utf8', windowsHide: true }
+  );
+  assert.equal(mp3Gen.status, 0, `MP3 with embedded cover failed: ${mp3Gen.stderr}`);
+
+  const form = new FormData();
+  form.append(
+    'file',
+    new File(
+      [fs.readFileSync(mp3WithCoverPath)],
+      'y2mate.gs - Black Sun - La Pinta La Niña.mp3',
+      { type: 'audio/mpeg' }
+    )
+  );
+
+  const uploadRes = await uploadRoute.POST(
+    new Request('http://localhost/api/upload', {
+      method: 'POST',
+      headers: { cookie: auth.ownerCookie },
+      body: form
+    })
+  );
+  assert.equal(uploadRes.status, 200);
+  const uploaded = await uploadRes.json();
+  assert.equal(uploaded.ok, true);
+  assert.equal(uploaded.track.artist, 'Black Sun');
+  assert.equal(uploaded.track.title, 'La Pinta La Niña');
+  assert.ok(
+    String(uploaded.track.artwork || '').startsWith('data:image/jpeg;base64,'),
+    `Expected extracted data:image/jpeg cover, got ${uploaded.track.artwork}`
+  );
+
+  // Unauthenticated PATCH -> 401
+  const unauthPatch = await uploadDeleteRoute.PATCH(
+    new Request(`http://localhost/api/upload/${uploaded.id}`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ artist: 'Hacker' })
+    }),
+    { params: Promise.resolve({ id: uploaded.id }) }
+  );
+  assert.equal(unauthPatch.status, 401);
+
+  // Non-owner PATCH -> 403
+  const otherPatch = await uploadDeleteRoute.PATCH(
+    new Request(`http://localhost/api/upload/${uploaded.id}`, {
+      method: 'PATCH',
+      headers: {
+        cookie: auth.otherCookie,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({ artist: 'Other User' })
+    }),
+    { params: Promise.resolve({ id: uploaded.id }) }
+  );
+  assert.equal(otherPatch.status, 403);
+
+  // Owner PATCH -> 200 and persists updated cover + metadata
+  const newCover = 'https://is1-ssl.mzstatic.com/image/thumb/Music/v4/test/100x100bb.jpg';
+  const ownerPatch = await uploadDeleteRoute.PATCH(
+    new Request(`http://localhost/api/upload/${uploaded.id}`, {
+      method: 'PATCH',
+      headers: {
+        cookie: auth.ownerCookie,
+        'Content-Type': 'application/json'
+      },
+      body: JSON.stringify({
+        title: 'La Pinta La Niña y la Santa María',
+        artist: 'Black Sun',
+        album: 'La Lógica del León',
+        artwork: newCover
+      })
+    }),
+    { params: Promise.resolve({ id: uploaded.id }) }
+  );
+  assert.equal(ownerPatch.status, 200);
+  const patchedBody = await ownerPatch.json();
+  assert.equal(patchedBody.ok, true);
+  assert.equal(patchedBody.track.title, 'La Pinta La Niña y la Santa María');
+  assert.equal(patchedBody.track.album, 'La Lógica del León');
+  assert.equal(patchedBody.track.artwork, newCover);
 });

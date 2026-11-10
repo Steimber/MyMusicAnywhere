@@ -1661,6 +1661,38 @@ body:has(.player-dock) .tab-section .track-list {
   border-color: var(--clay);
 }
 
+.field input:focus-visible,
+.cookies-textarea:focus-visible {
+  outline: 2px solid var(--clay);
+  outline-offset: 2px;
+}
+
+.checkbox-inline-row {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  font-size: 0.82rem;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.checkbox-inline-row input[type='checkbox'] {
+  width: 1.05rem;
+  height: 1.05rem;
+  accent-color: var(--clay);
+  flex-shrink: 0;
+  cursor: pointer;
+}
+
+.checkbox-inline-row label {
+  cursor: pointer;
+  line-height: 1.35;
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
 .input-row {
   display: flex;
   gap: 8px;
@@ -1754,6 +1786,15 @@ body:has(.player-dock) .tab-section .track-list {
 }
 
 /* ==================== DIALOGS & ACTION SHEETS ==================== */
+dialog:modal {
+  overscroll-behavior: contain;
+}
+
+dialog::backdrop {
+  overflow: hidden;
+  overscroll-behavior: contain;
+}
+
 dialog.save-dialog {
   width: min(92vw, 400px);
   border: 1px solid var(--border);

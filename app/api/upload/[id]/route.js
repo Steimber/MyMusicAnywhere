@@ -4,11 +4,56 @@ import {
   getDownloadsDir,
   getSessionUser,
   getUploadRecordById,
-  markUploadFileDeleted
+  markUploadFileDeleted,
+  updateUserUploadMetadata
 } from '../../../../lib/store.js';
 import { UPLOAD_ID_REGEX } from '../../../../lib/upload.js';
 
 export const runtime = 'nodejs';
+
+const MAX_PATCH_BYTES = 64 * 1024;
+
+export async function PATCH(request, context) {
+  const user = getSessionUser(request);
+  if (!user) {
+    return Response.json({ error: 'No autorizado' }, { status: 401 });
+  }
+
+  const resolvedParams = await context?.params;
+  const id = String(resolvedParams?.id || '').trim();
+  if (!UPLOAD_ID_REGEX.test(id)) {
+    return Response.json({ error: 'Identificador de subida inválido.' }, { status: 400 });
+  }
+
+  let rawBody = '';
+  try {
+    rawBody = await request.text();
+  } catch {
+    return Response.json({ error: 'Cuerpo de solicitud inválido.' }, { status: 400 });
+  }
+
+  if (Buffer.byteLength(rawBody, 'utf8') > MAX_PATCH_BYTES) {
+    return Response.json({ error: 'Los metadatos enviados exceden el tamaño permitido.' }, { status: 413 });
+  }
+
+  let body;
+  try {
+    body = JSON.parse(rawBody || '{}');
+  } catch {
+    return Response.json({ error: 'Formato JSON inválido.' }, { status: 400 });
+  }
+
+  const updated = updateUserUploadMetadata(id, user.id, body || {});
+  if (!updated.ok) {
+    return Response.json({ error: updated.error }, { status: updated.status || 400 });
+  }
+
+  return Response.json({
+    ok: true,
+    id,
+    track: updated.record
+  });
+}
 
 export async function DELETE(request, context) {
   const user = getSessionUser(request);
