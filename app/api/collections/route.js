@@ -15,11 +15,18 @@ export async function GET(request) {
   }
 
   const snapshot = getUserCollections(user.id);
+  if (!snapshot.ok) {
+    return Response.json({ error: snapshot.error }, { status: snapshot.status || 400 });
+  }
+
   return Response.json({
     ok: true,
     hasSnapshot: snapshot.hasSnapshot,
+    version: snapshot.version,
     likedTracks: snapshot.likedTracks,
+    deletedLikes: snapshot.deletedLikes,
     customPlaylists: snapshot.customPlaylists,
+    deletedPlaylists: snapshot.deletedPlaylists,
     updatedAt: snapshot.updatedAt
   });
 }
@@ -62,6 +69,7 @@ export async function PUT(request) {
   if (
     !parsed ||
     typeof parsed !== 'object' ||
+    Array.isArray(parsed) ||
     (!Array.isArray(parsed.likedTracks) && !Array.isArray(parsed.customPlaylists))
   ) {
     return Response.json(
@@ -70,13 +78,35 @@ export async function PUT(request) {
     );
   }
 
-  const saved = saveUserCollections(user.id, parsed);
+  const result = saveUserCollections(user.id, parsed);
+  if (!result.ok) {
+    if (result.status === 409 && result.snapshot) {
+      return Response.json(
+        {
+          error: 'Conflicto de versión en colecciones.',
+          conflict: true,
+          hasSnapshot: result.snapshot.hasSnapshot,
+          version: result.snapshot.version,
+          likedTracks: result.snapshot.likedTracks,
+          deletedLikes: result.snapshot.deletedLikes,
+          customPlaylists: result.snapshot.customPlaylists,
+          deletedPlaylists: result.snapshot.deletedPlaylists,
+          updatedAt: result.snapshot.updatedAt
+        },
+        { status: 409 }
+      );
+    }
+    return Response.json({ error: result.error }, { status: result.status || 400 });
+  }
+
+  const saved = result.snapshot;
   return Response.json({
     ok: true,
-    updatedAt: saved?.updatedAt || Date.now(),
+    version: saved.version,
+    updatedAt: saved.updatedAt,
     counts: {
-      liked: saved?.likedTracks?.length || 0,
-      playlists: saved?.customPlaylists?.length || 0
+      liked: saved.likedTracks.length,
+      playlists: saved.customPlaylists.length
     }
   });
 }
