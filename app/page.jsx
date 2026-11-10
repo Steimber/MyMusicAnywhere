@@ -6,13 +6,18 @@ import { NoSleepController } from '../lib/nosleep';
 import { buildSmartShuffleOrder, getShuffleTrackKey } from '../lib/shuffle';
 
 const AUDIO_CACHE_NAME = 'my-music-offline-audio-v1';
-const SHELL_CACHE_NAME = 'mymusic-shell-v24';
+const SHELL_CACHE_NAME = 'mymusic-shell-v25';
 const DEFAULT_TRACK_COVER = '/icon.svg?v=3';
 const USER_STORAGE_KEY = 'mma_cached_user_v1';
 const LIKES_STORAGE_KEY = 'mma_liked_tracks_v1';
 const OFFLINE_CATALOG_KEY = 'mma_offline_catalog_v1';
 const PLAYLISTS_STORAGE_KEY = 'mma_custom_playlists_v1';
+const UNLIKED_OWN_STORAGE_KEY = 'mma_unliked_own_v1';
 const MAX_SIMULTANEOUS_DOWNLOADS = 4;
+const MAX_OWN_UPLOAD_BYTES = 50 * 1024 * 1024;
+const OWN_UPLOAD_CHUNK_BYTES = Math.floor(3.5 * 1024 * 1024);
+const OWN_AUDIO_ACCEPT =
+  '.mp3,.m4a,.wav,.flac,audio/mpeg,audio/mp4,audio/x-m4a,audio/wav,audio/x-wav,audio/flac,audio/x-flac';
 
 function isPlaceholderCover(rawUrl) {
   if (!rawUrl || typeof rawUrl !== 'string') return true;
@@ -45,6 +50,9 @@ const dedupKeyMemo = new Map();
 
 function getTrackDedupKey(track) {
   if (!track) return '';
+  if (track.source === 'own' && String(track.id || '').startsWith('upl_')) {
+    return `own:${track.id}`;
+  }
   const memoSignature = `${track.title || ''}\0${track.artist || ''}\0${track.id || ''}`;
   const cached = dedupKeyMemo.get(memoSignature);
   if (cached !== undefined) return cached;
@@ -90,6 +98,11 @@ function deduplicateTracksList(list) {
       const existing = byKey.get(key);
       if (!existing.filename && item.filename) existing.filename = item.filename;
       if (!existing.streamUrl && item.streamUrl) existing.streamUrl = item.streamUrl;
+      if (!existing.source && item.source) existing.source = item.source;
+      if (item.fileDeleted !== undefined) {
+        existing.fileDeleted = Boolean(existing.fileDeleted || item.fileDeleted);
+      }
+      if (!existing.uploadId && item.uploadId) existing.uploadId = item.uploadId;
       if (isPlaceholderCover(existing.artwork) && !isPlaceholderCover(item.artwork)) {
         existing.artwork = item.artwork;
       }
@@ -178,6 +191,14 @@ function Icon({ name, size = 16, className = '' }) {
           <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
           <polyline points="7 10 12 15 17 10" />
           <line x1="12" y1="15" x2="12" y2="3" />
+        </svg>
+      );
+    case 'upload':
+      return (
+        <svg {...props}>
+          <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4" />
+          <polyline points="17 8 12 3 7 8" />
+          <line x1="12" y1="3" x2="12" y2="15" />
         </svg>
       );
     case 'file-audio':
@@ -472,6 +493,9 @@ export default function HomePage() {
   const [deviceQuota, setDeviceQuota] = useState(null);
   const [syncingAll, setSyncingAll] = useState(false);
   const [syncProgress, setSyncProgress] = useState({ done: 0, total: 0 });
+  const [ownUploadState, setOwnUploadState] = useState({ busy: false, type: '', text: '' });
+  const ownUploadInputLibRef = useRef(null);
+  const ownUploadInputExpRef = useRef(null);
   const cancelSyncRef = useRef(false);
   const noSleepRef = useRef(null);
 
@@ -831,6 +855,7 @@ export default function HomePage() {
       return;
     }
     fetchLibraryFiles();
+    syncOwnUploadedTracks();
     let initialLikes = likedTracks;
     try {
       const raw = localStorage.getItem(LIKES_STORAGE_KEY);
@@ -1189,8 +1214,26 @@ export default function HomePage() {
 
   function toggleLike(track) {
     if (isLiked(track.id)) {
+      if (track?.source === 'own' && String(track.id || '').startsWith('upl_')) {
+        try {
+          const raw = JSON.parse(localStorage.getItem(UNLIKED_OWN_STORAGE_KEY) || '[]');
+          const nextUnliked = Array.from(new Set([...(Array.isArray(raw) ? raw : []), String(track.id)]));
+          localStorage.setItem(UNLIKED_OWN_STORAGE_KEY, JSON.stringify(nextUnliked));
+        } catch {}
+      }
       persistLikes(likedTracks.filter(t => String(t.id) !== String(track.id)));
     } else {
+      if (track?.source === 'own' && String(track.id || '').startsWith('upl_')) {
+        try {
+          const raw = JSON.parse(localStorage.getItem(UNLIKED_OWN_STORAGE_KEY) || '[]');
+          if (Array.isArray(raw) && raw.includes(String(track.id))) {
+            localStorage.setItem(
+              UNLIKED_OWN_STORAGE_KEY,
+              JSON.stringify(raw.filter(id => id !== String(track.id)))
+            );
+          }
+        } catch {}
+      }
       const existingDl = downloads[track.id];
       const offMatch = offlineCatalog.find(t => String(t.id) === String(track.id));
       const filename = existingDl?.filename || offMatch?.filename || track.filename || null;
@@ -2000,11 +2043,36 @@ export default function HomePage() {
         await refreshOfflineCacheList();
 
         if (fileToDelete) {
-          fetch(`/api/library?file=${encodeURIComponent(fileToDelete)}`, {
-            method: 'DELETE'
-          })
-            .then(() => fetchLibraryFiles())
-            .catch(() => {});
+          const isOwnUpload =
+            trackMeta?.source === 'own' || String(fileToDelete).startsWith('upl_');
+          if (isOwnUpload) {
+            const resolvedUploadId =
+              trackMeta?.uploadId ||
+              (String(trackMeta?.id || '').startsWith('upl_')
+                ? String(trackMeta.id)
+                : String(fileToDelete).replace(/\.(m4a|mp3|wav|flac)$/i, ''));
+            if (resolvedUploadId && /^upl_[a-f0-9]{32}$/.test(resolvedUploadId)) {
+              fetch(`/api/upload/${encodeURIComponent(resolvedUploadId)}`, {
+                method: 'DELETE'
+              })
+                .then(r => {
+                  if (r.ok) {
+                    updateTrackMetadataAcrossLibraries(resolvedUploadId, {
+                      source: 'own',
+                      fileDeleted: true
+                    });
+                  }
+                  fetchLibraryFiles();
+                })
+                .catch(() => {});
+            }
+          } else {
+            fetch(`/api/library?file=${encodeURIComponent(fileToDelete)}`, {
+              method: 'DELETE'
+            })
+              .then(() => fetchLibraryFiles())
+              .catch(() => {});
+          }
         }
         return true;
       }
@@ -2285,6 +2353,10 @@ export default function HomePage() {
       'spotify csv',
       'importado de spotify',
       'guardado en dispositivo',
+      'archivo propio',
+      'mi música',
+      'mi musica',
+      'audio subido',
       'artista'
     ]);
     return ignored.has(norm) || norm.startsWith('offline_');
@@ -2416,6 +2488,335 @@ export default function HomePage() {
       const data = await res.json();
       setLibraryFiles(data.files || []);
     } catch {}
+  }
+
+  async function syncOwnUploadedTracks() {
+    try {
+      const res = await fetch('/api/upload', { cache: 'no-store' });
+      if (!res.ok) return;
+      const data = await res.json();
+      const serverTracks = Array.isArray(data?.tracks) ? data.tracks : [];
+      if (serverTracks.length === 0) return;
+
+      let unlikedSet = new Set();
+      try {
+        const rawUnliked = JSON.parse(localStorage.getItem(UNLIKED_OWN_STORAGE_KEY) || '[]');
+        if (Array.isArray(rawUnliked)) {
+          unlikedSet = new Set(rawUnliked.map(String));
+        }
+      } catch {}
+
+      const byId = new Map(serverTracks.map(t => [String(t.id), { ...t, source: 'own', uploadId: t.id }]));
+      const byFile = new Map(
+        serverTracks
+          .filter(t => t.filename)
+          .map(t => [String(t.filename), { ...t, source: 'own', uploadId: t.id }])
+      );
+
+      const playlistIds = new Set();
+      try {
+        const storedPls = JSON.parse(localStorage.getItem(PLAYLISTS_STORAGE_KEY) || '[]');
+        if (Array.isArray(storedPls)) {
+          for (const pl of storedPls) {
+            for (const tr of pl?.tracks || []) {
+              if (tr?.id != null) playlistIds.add(String(tr.id));
+            }
+          }
+        }
+      } catch {}
+
+      setCustomPlaylists(prev => {
+        let changed = false;
+        const next = prev.map(pl => {
+          const updatedTracks = (pl.tracks || []).map(t => {
+            const match = byId.get(String(t.id)) || (t.filename ? byFile.get(t.filename) : null);
+            if (!match) return t;
+            changed = true;
+            return {
+              ...t,
+              id: match.id,
+              source: 'own',
+              uploadId: match.id,
+              fileDeleted: Boolean(match.fileDeleted),
+              filename: match.filename || t.filename,
+              streamUrl: match.streamUrl || t.streamUrl
+            };
+          });
+          return { ...pl, tracks: updatedTracks };
+        });
+        if (changed) {
+          try {
+            localStorage.setItem(PLAYLISTS_STORAGE_KEY, JSON.stringify(next));
+          } catch {}
+          return next;
+        }
+        return prev;
+      });
+
+      setOfflineCatalog(prev => {
+        let changed = false;
+        const next = prev.map(t => {
+          const match = byId.get(String(t.id)) || (t.filename ? byFile.get(t.filename) : null);
+          if (!match) return t;
+          changed = true;
+          return {
+            ...t,
+            id: match.id,
+            title: match.title || t.title,
+            artist: match.artist || t.artist,
+            album: match.album || t.album,
+            duration: match.duration || t.duration,
+            source: 'own',
+            uploadId: match.id,
+            fileDeleted: Boolean(match.fileDeleted),
+            filename: match.filename || t.filename,
+            streamUrl: match.streamUrl || t.streamUrl
+          };
+        });
+        if (changed) {
+          try {
+            localStorage.setItem(OFFLINE_CATALOG_KEY, JSON.stringify(next));
+          } catch {}
+          return next;
+        }
+        return prev;
+      });
+
+      setLikedTracks(prev => {
+        let changed = false;
+        const seenIds = new Set(prev.map(t => String(t.id)));
+        const updated = prev.map(t => {
+          const match = byId.get(String(t.id)) || (t.filename ? byFile.get(t.filename) : null);
+          if (!match) return t;
+          changed = true;
+          seenIds.add(String(match.id));
+          return {
+            ...t,
+            id: match.id,
+            source: 'own',
+            uploadId: match.id,
+            fileDeleted: Boolean(match.fileDeleted),
+            filename: match.filename || t.filename,
+            streamUrl: match.streamUrl || t.streamUrl
+          };
+        });
+
+        const missingFromLocal = serverTracks
+          .filter(
+            st =>
+              !seenIds.has(String(st.id)) &&
+              !playlistIds.has(String(st.id)) &&
+              !unlikedSet.has(String(st.id))
+          )
+          .map(st => ({
+            ...st,
+            source: 'own',
+            uploadId: st.id,
+            addedAt: st.createdAt || Date.now()
+          }));
+
+        if (missingFromLocal.length > 0) {
+          changed = true;
+        }
+
+        if (!changed) return prev;
+        const merged = deduplicateTracksList([...missingFromLocal, ...updated]);
+        try {
+          localStorage.setItem(LIKES_STORAGE_KEY, JSON.stringify(merged));
+        } catch {}
+        return merged;
+      });
+    } catch {}
+  }
+
+  async function cacheOwnTrackAndConfirmDelete(track) {
+    if (!track) return false;
+    const filename = track.filename;
+    const streamUrl =
+      track.streamUrl || (filename ? `/api/stream?file=${encodeURIComponent(filename)}` : null);
+    if (!streamUrl) return false;
+    const key = track.id;
+    setDownloads(prev => ({
+      ...prev,
+      [key]: { status: 'downloading', progress: 65, startedAt: Date.now(), isManual: true, trackMeta: track }
+    }));
+    const saved = await saveUrlToOfflineCache(streamUrl, {
+      ...track,
+      source: 'own',
+      uploadId: track.uploadId || track.id
+    });
+    setDownloads(prev => ({
+      ...prev,
+      [key]: { status: saved ? 'ready' : 'error', progress: saved ? 100 : 0, filename }
+    }));
+    if (!saved) {
+      updateTrackMetadataAcrossLibraries(track.id, { fileDeleted: true });
+    }
+    return saved;
+  }
+
+  async function handleOwnAudioUpload(rawFiles) {
+    const files = Array.from(rawFiles || []).filter(Boolean);
+    if (files.length === 0 || isOffline || ownUploadState.busy) return;
+
+    setOwnUploadState({ busy: true, type: 'info', text: 'Preparando subida…' });
+    let uploadedCount = 0;
+    let lastError = '';
+
+    try {
+      for (let fIdx = 0; fIdx < files.length; fIdx++) {
+        const file = files[fIdx];
+        const prefix = files.length > 1 ? `(${fIdx + 1}/${files.length}) ` : '';
+
+        if (!file.size || file.size <= 0) {
+          lastError = `«${file.name}» está vacío.`;
+          continue;
+        }
+        if (file.size > MAX_OWN_UPLOAD_BYTES) {
+          lastError = `«${file.name}» supera el límite máximo de 50 MB.`;
+          continue;
+        }
+
+        const totalChunks = Math.max(1, Math.ceil(file.size / OWN_UPLOAD_CHUNK_BYTES));
+        let sessionId = '';
+        let finalPayload = null;
+        let failedThisFile = false;
+
+        for (let chunkIdx = 0; chunkIdx < totalChunks; chunkIdx++) {
+          const start = chunkIdx * OWN_UPLOAD_CHUNK_BYTES;
+          const end = Math.min(file.size, start + OWN_UPLOAD_CHUNK_BYTES);
+          const slice = file.slice(start, end);
+          const pct = Math.max(8, Math.round(((chunkIdx + 1) / (totalChunks + 1)) * 82));
+
+          setOwnUploadState({
+            busy: true,
+            type: 'info',
+            text:
+              chunkIdx === totalChunks - 1
+                ? `${prefix}Convirtiendo «${file.name}» a M4A…`
+                : `${prefix}Subiendo «${file.name}» · ${pct}%`
+          });
+
+          let res;
+          try {
+            res = await fetch('/api/upload', {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/octet-stream',
+                'x-upload-mode': 'chunk',
+                'x-chunk-index': String(chunkIdx),
+                'x-total-chunks': String(totalChunks),
+                'x-total-size': String(file.size),
+                'x-file-name': encodeURIComponent(file.name),
+                ...(sessionId ? { 'x-upload-session': sessionId } : {})
+              },
+              body: slice
+            });
+          } catch {
+            lastError = `Error de red al subir «${file.name}».`;
+            failedThisFile = true;
+            break;
+          }
+
+          const payload = await res.json().catch(() => ({}));
+          if (!res.ok || !payload.ok) {
+            lastError = payload.error || `No se pudo procesar «${file.name}».`;
+            failedThisFile = true;
+            break;
+          }
+
+          if (payload.partial) {
+            sessionId = payload.uploadSession || sessionId;
+          } else {
+            finalPayload = payload;
+          }
+        }
+
+        if (failedThisFile || !finalPayload?.track) continue;
+
+        const ownTrack = {
+          ...finalPayload.track,
+          id: finalPayload.id,
+          uploadId: finalPayload.id,
+          source: 'own',
+          fileDeleted: false,
+          addedAt: Date.now()
+        };
+
+        // Add to user's library marked as source: "own"
+        setLikedTracks(prev => {
+          const next = deduplicateTracksList([ownTrack, ...prev]);
+          try {
+            localStorage.setItem(LIKES_STORAGE_KEY, JSON.stringify(next));
+          } catch {}
+          return next;
+        });
+
+        const targetCustomId =
+          activeTab === 'library' && selectedLibrary !== 'liked' && selectedLibrary !== 'offline'
+            ? selectedLibrary
+            : null;
+        if (targetCustomId) {
+          setCustomPlaylists(prev => {
+            const next = prev.map(pl =>
+              pl.id === targetCustomId
+                ? { ...pl, tracks: deduplicateTracksList([ownTrack, ...(pl.tracks || [])]) }
+                : pl
+            );
+            try {
+              localStorage.setItem(PLAYLISTS_STORAGE_KEY, JSON.stringify(next));
+            } catch {}
+            return next;
+          });
+        }
+
+        setOwnUploadState({
+          busy: true,
+          type: 'info',
+          text: `${prefix}Guardando «${ownTrack.title}» en tu dispositivo…`
+        });
+
+        // Cache in Service Worker offline audio cache; saveUrlToOfflineCache calls DELETE /api/upload/:id once cached
+        const cachedOk = await saveUrlToOfflineCache(finalPayload.streamUrl, ownTrack);
+        setDownloads(prev => ({
+          ...prev,
+          [ownTrack.id]: {
+            status: cachedOk ? 'ready' : 'error',
+            progress: cachedOk ? 100 : 0,
+            filename: ownTrack.filename
+          }
+        }));
+        uploadedCount += 1;
+      }
+
+      if (uploadedCount > 0 && !lastError) {
+        setOwnUploadState({
+          busy: false,
+          type: 'ok',
+          text:
+            uploadedCount === 1
+              ? 'Canción guardada en tu biblioteca y en el teléfono.'
+              : `${uploadedCount} canciones guardadas en tu biblioteca y en el teléfono.`
+        });
+        setTimeout(() => {
+          setOwnUploadState(cur => (cur.busy ? cur : { busy: false, type: '', text: '' }));
+        }, 5500);
+      } else if (lastError) {
+        setOwnUploadState({
+          busy: false,
+          type: 'error',
+          text: uploadedCount > 0 ? `${lastError} (${uploadedCount} subida correctamente)` : lastError
+        });
+      } else {
+        setOwnUploadState({ busy: false, type: '', text: '' });
+      }
+    } catch {
+      setOwnUploadState({
+        busy: false,
+        type: 'error',
+        text: 'Ocurrió un error inesperado al subir el archivo.'
+      });
+    }
   }
 
   async function startDownload(track, waitUntilFinished = false, forceRetry = false) {
@@ -2641,17 +3042,18 @@ export default function HomePage() {
         }
 
         let ok = false;
-        if (streamUrl) {
+        if (streamUrl && !(track.source === 'own' && track.fileDeleted)) {
           ok = await saveUrlToOfflineCache(streamUrl, track);
         }
-        // If streamUrl was missing OR its temporary VPS file had already expired/deleted, run a fresh extraction
-        if (!ok) {
+        // If streamUrl was missing OR its temporary VPS file had already expired/deleted, run a fresh extraction (skip for user-uploaded own files)
+        if (!ok && track.source !== 'own') {
           ok = await startDownload(track, true, true);
         }
 
         // If the download was interrupted specifically because the user briefly left the app, wait until visible and retry this track once
         if (
           !ok &&
+          track.source !== 'own' &&
           !cancelSyncRef.current &&
           typeof document !== 'undefined' &&
           document.visibilityState === 'hidden'
@@ -3470,6 +3872,45 @@ export default function HomePage() {
     );
   }
 
+  function renderOwnUploadStatusBanner() {
+    if (!ownUploadState.text) return null;
+    const toneClass =
+      ownUploadState.type === 'error'
+        ? 'is-error'
+        : ownUploadState.type === 'ok'
+        ? 'is-ok'
+        : '';
+    return (
+      <div
+        className={`own-upload-status ${toneClass}`.trim()}
+        role="status"
+        aria-live="polite"
+      >
+        <div className="own-upload-status-main">
+          {ownUploadState.busy ? (
+            <Icon name="loader" size={13} className="spin" />
+          ) : ownUploadState.type === 'ok' ? (
+            <Icon name="check" size={13} />
+          ) : (
+            <Icon name="upload" size={13} />
+          )}
+          <span className="own-upload-status-text">{ownUploadState.text}</span>
+        </div>
+        {!ownUploadState.busy && (
+          <button
+            type="button"
+            className="icon-btn"
+            style={{ width: 24, height: 24 }}
+            onClick={() => setOwnUploadState({ busy: false, type: '', text: '' })}
+            aria-label="Cerrar aviso de subida"
+          >
+            <Icon name="close" size={13} />
+          </button>
+        )}
+      </div>
+    );
+  }
+
   function renderTrackSkeletons(count = 8) {
     return Array.from({ length: count }, (_, i) => (
       <div key={`skel_${i}`} className="track-row skeleton-row" aria-hidden="true">
@@ -3632,6 +4073,11 @@ export default function HomePage() {
                   {!contextLib && <span className="offline-tag-label">Descargada</span>}
                 </span>
               )}
+              {track.source === 'own' && (
+                <span className="own-tag-label" title="Subida desde tu dispositivo">
+                  Propia
+                </span>
+              )}
               <span className="track-sub-text">
                 {dl?.status === 'downloading'
                   ? isQueuedForSlot
@@ -3673,7 +4119,17 @@ export default function HomePage() {
               type="button"
               className="icon-btn"
               disabled={isOffline}
-              onClick={() => startDownload(track)}
+              onClick={() => {
+                if (track.source === 'own') {
+                  if (!track.fileDeleted) {
+                    cacheOwnTrackAndConfirmDelete(track);
+                  } else {
+                    openDownloadPromptModal(track, list, idx);
+                  }
+                  return;
+                }
+                startDownload(track);
+              }}
               aria-label="Descargar para escuchar sin internet"
               title="Descargar MP3 Offline"
             >
@@ -4205,6 +4661,34 @@ export default function HomePage() {
                 </div>
 
                 <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <label
+                    htmlFor="upload-own-music-exp"
+                    className={`library-pill upload-trigger-label ${
+                      isOffline || ownUploadState.busy ? 'is-disabled' : ''
+                    }`.trim()}
+                    title="Subir archivo de audio propio (.mp3, .m4a, .wav o .flac)"
+                  >
+                    <input
+                      ref={ownUploadInputExpRef}
+                      id="upload-own-music-exp"
+                      type="file"
+                      accept={OWN_AUDIO_ACCEPT}
+                      multiple
+                      className="visually-hidden"
+                      disabled={isOffline || ownUploadState.busy}
+                      onChange={e => {
+                        const selectedFiles = Array.from(e.target.files || []);
+                        e.target.value = '';
+                        handleOwnAudioUpload(selectedFiles);
+                      }}
+                    />
+                    <Icon
+                      name={ownUploadState.busy ? 'loader' : 'upload'}
+                      size={14}
+                      className={ownUploadState.busy ? 'spin' : ''}
+                    />
+                    <span>Subir mi música</span>
+                  </label>
                   <button
                     type="button"
                     className="icon-btn"
@@ -4220,6 +4704,7 @@ export default function HomePage() {
                   </button>
                 </div>
               </div>
+              {renderOwnUploadStatusBanner()}
               {renderSimultaneousDownloadsBanner()}
             </div>
           </div>
@@ -4309,6 +4794,35 @@ export default function HomePage() {
                   <Icon name="youtube" size={14} />
                   <span>Link YouTube</span>
                 </button>
+
+                <label
+                  htmlFor="upload-own-music-lib"
+                  className={`library-pill upload-trigger-label ${
+                    isOffline || ownUploadState.busy ? 'is-disabled' : ''
+                  }`.trim()}
+                  title="Subir archivo de audio propio (.mp3, .m4a, .wav o .flac)"
+                >
+                  <input
+                    ref={ownUploadInputLibRef}
+                    id="upload-own-music-lib"
+                    type="file"
+                    accept={OWN_AUDIO_ACCEPT}
+                    multiple
+                    className="visually-hidden"
+                    disabled={isOffline || ownUploadState.busy}
+                    onChange={e => {
+                      const selectedFiles = Array.from(e.target.files || []);
+                      e.target.value = '';
+                      handleOwnAudioUpload(selectedFiles);
+                    }}
+                  />
+                  <Icon
+                    name={ownUploadState.busy ? 'loader' : 'upload'}
+                    size={14}
+                    className={ownUploadState.busy ? 'spin' : ''}
+                  />
+                  <span>Subir mi música</span>
+                </label>
               </div>
 
               {creatingPlaylist && (
@@ -4496,6 +5010,7 @@ export default function HomePage() {
                 </div>
               )}
 
+              {renderOwnUploadStatusBanner()}
               {renderSimultaneousDownloadsBanner()}
             </div>
           </div>
@@ -5330,33 +5845,56 @@ export default function HomePage() {
             </div>
 
             <p style={{ fontSize: '0.84rem', color: 'var(--text-muted)', margin: '0 0 12px' }}>
-              Esta canción de tu librería todavía no está descargada en el dispositivo para escuchar sin internet.
+              {downloadPrompt.track.source === 'own' && downloadPrompt.track.fileDeleted
+                ? 'Esta canción subida ya se eliminó del servidor tras guardarse en tu otro dispositivo. Sube el archivo desde este equipo si quieres escucharla aquí también.'
+                : 'Esta canción de tu librería todavía no está descargada en el dispositivo para escuchar sin internet.'}
             </p>
 
             <div className="dialog-list">
-              <button
-                type="button"
-                className="dialog-option selected"
-                disabled={isOffline}
-                onClick={async () => {
-                  const target = downloadPrompt;
-                  setOptimisticTrack(target.track);
-                  closeDownloadPromptModal();
-                  const ok = await startDownload(target.track, true);
-                  if (ok && target.list?.length > 0) {
-                    playFromList(target.list, target.idx, false, {
-                      forceIncludeTrack: target.track
-                    });
-                  } else if (!ok) {
+              {downloadPrompt.track.source === 'own' && downloadPrompt.track.fileDeleted ? (
+                <button
+                  type="button"
+                  className="dialog-option selected"
+                  disabled={isOffline || ownUploadState.busy}
+                  onClick={() => {
                     setOptimisticTrack(null);
-                  }
-                }}
-              >
-                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
-                  <Icon name="download" size={15} /> Sí, descargar y reproducir
-                </span>
-                <Icon name="arrow-right" size={14} />
-              </button>
+                    closeDownloadPromptModal();
+                    (ownUploadInputLibRef.current || ownUploadInputExpRef.current)?.click();
+                  }}
+                >
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+                    <Icon name="upload" size={15} /> Subir mi música en este dispositivo
+                  </span>
+                  <Icon name="arrow-right" size={14} />
+                </button>
+              ) : (
+                <button
+                  type="button"
+                  className="dialog-option selected"
+                  disabled={isOffline}
+                  onClick={async () => {
+                    const target = downloadPrompt;
+                    setOptimisticTrack(target.track);
+                    closeDownloadPromptModal();
+                    const ok =
+                      target.track.source === 'own'
+                        ? await cacheOwnTrackAndConfirmDelete(target.track)
+                        : await startDownload(target.track, true);
+                    if (ok && target.list?.length > 0) {
+                      playFromList(target.list, target.idx, false, {
+                        forceIncludeTrack: target.track
+                      });
+                    } else if (!ok) {
+                      setOptimisticTrack(null);
+                    }
+                  }}
+                >
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+                    <Icon name="download" size={15} /> Sí, descargar y reproducir
+                  </span>
+                  <Icon name="arrow-right" size={14} />
+                </button>
+              )}
 
               {downloadPrompt.track.previewUrl && (
                 <button

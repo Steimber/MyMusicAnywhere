@@ -1,6 +1,11 @@
 import fs from 'fs';
 import path from 'path';
-import { getDownloadsDir, getSessionUser, scheduleFileCleanup } from '../../../lib/store';
+import {
+  getDownloadsDir,
+  getSessionUser,
+  getUploadRecordByFilename,
+  scheduleFileCleanup
+} from '../../../lib/store.js';
 
 const AUDIO_MIME_BY_EXT = {
   '.mp3': 'audio/mpeg',
@@ -103,6 +108,16 @@ export async function GET(request) {
 
   const downloadsDir = getDownloadsDir();
   const safePath = path.resolve(downloadsDir, cleanFile);
+  const isUserUpload = cleanFile.startsWith('upl_');
+  if (isUserUpload) {
+    const uploadRecord = getUploadRecordByFilename(cleanFile);
+    if (!uploadRecord) {
+      return new Response('Archivo no encontrado', { status: 404 });
+    }
+    if (uploadRecord.userId !== user.id) {
+      return new Response('No autorizado', { status: 403 });
+    }
+  }
   if (!safePath.startsWith(path.resolve(downloadsDir) + path.sep) || !fs.existsSync(safePath)) {
     return new Response('Archivo no encontrado', { status: 404 });
   }
@@ -120,8 +135,11 @@ export async function GET(request) {
     headers['Content-Disposition'] = `attachment; filename="${encodeURIComponent(cleanFile)}"`;
   }
 
-  // Always schedule server file deletion once it has been served to the client
-  scheduleFileCleanup(safePath, 15000);
+  // Ephemeral search/YouTube files are auto-deleted after streaming;
+  // user uploads (upl_*) are deleted via DELETE /api/upload/:id after device caching or the 24h sweep.
+  if (!isUserUpload) {
+    scheduleFileCleanup(safePath, 15000);
+  }
 
   if (range) {
     const parts = range.replace(/bytes=/, '').split('-');
@@ -132,7 +150,7 @@ export async function GET(request) {
     const webStream = createSafeFileStream(
       safePath,
       { start, end },
-      end >= stat.size - 1 ? () => scheduleFileCleanup(safePath, 5000) : null
+      !isUserUpload && end >= stat.size - 1 ? () => scheduleFileCleanup(safePath, 5000) : null
     );
 
     return new Response(webStream, {
@@ -145,8 +163,10 @@ export async function GET(request) {
     });
   }
 
-  const webStream = createSafeFileStream(safePath, undefined, () =>
-    scheduleFileCleanup(safePath, 5000)
+  const webStream = createSafeFileStream(
+    safePath,
+    undefined,
+    !isUserUpload ? () => scheduleFileCleanup(safePath, 5000) : null
   );
   return new Response(webStream, { headers });
 }

@@ -1,7 +1,12 @@
 import { NextResponse } from 'next/server';
 import fs from 'fs';
 import path from 'path';
-import { getDownloadsDir, getSessionUser } from '../../../lib/store';
+import {
+  getDownloadsDir,
+  getSessionUser,
+  getUploadRecordByFilename,
+  markUploadFileDeleted
+} from '../../../lib/store';
 
 export async function GET(request) {
   try {
@@ -17,9 +22,16 @@ export async function GET(request) {
 
     const files = fs
       .readdirSync(downloadsDir)
-      .filter(
-        f => !f.includes('.raw.') && (f.endsWith('.mp3') || f.endsWith('.m4a') || f.endsWith('.opus'))
-      )
+      .filter(f => {
+        if (f.includes('.raw.') || !(f.endsWith('.mp3') || f.endsWith('.m4a') || f.endsWith('.opus'))) {
+          return false;
+        }
+        if (f.startsWith('upl_')) {
+          const rec = getUploadRecordByFilename(f);
+          if (!rec || rec.userId !== user.id) return false;
+        }
+        return true;
+      })
       .map(name => {
         const filePath = path.join(downloadsDir, name);
         const stat = fs.statSync(filePath);
@@ -53,11 +65,22 @@ export async function DELETE(request) {
       return NextResponse.json({ error: 'Nombre de archivo inválido' }, { status: 400 });
     }
 
+    let uploadRec = null;
+    if (safeName.startsWith('upl_')) {
+      uploadRec = getUploadRecordByFilename(safeName);
+      if (!uploadRec || uploadRec.userId !== user.id) {
+        return NextResponse.json({ error: 'No autorizado' }, { status: 403 });
+      }
+    }
+
     const downloadsDir = getDownloadsDir();
     const targetPath = path.join(downloadsDir, safeName);
 
     if (fs.existsSync(targetPath)) {
       fs.unlinkSync(targetPath);
+    }
+    if (uploadRec) {
+      markUploadFileDeleted(uploadRec.id);
     }
 
     return NextResponse.json({ deleted: true, filename: safeName });
