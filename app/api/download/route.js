@@ -33,6 +33,7 @@ import {
   getTitleCoreTokens,
   extractParentheticalTokenGroups,
   parseDurationToSec,
+  buildWordCompounds,
   buildCandidateContext,
   evaluateCandidatePool,
   parseCandidateLines,
@@ -181,19 +182,23 @@ function resolveYtDlpCommand(extraArgs) {
 // Universal catalog lookup (iTunes + Deezer in parallel):
 // Resolves the canonical studio duration, canonical title/artist (even when artist was missing or combined in title),
 // AND collects official alternate/parenthetical titles and album words.
-async function resolveCatalogMetadata(rawDuration, cleanTitle, primaryArtist) {
+async function resolveCatalogMetadata(rawDuration, cleanTitle, primaryArtist, options = {}) {
+  const { allowTitleOnlyFallback = false } = options || {};
   const parsed = parseDurationToSec(rawDuration);
   const extraWords = new Set();
   const extraTokenGroups = [];
   let canonicalTitle = null;
   let canonicalArtist = null;
+  let matchedViaEmbeddedArtist = false;
 
-  const query = `${stripParentheticalSubtitles(cleanTitle)} ${primaryArtist || ''}`.trim();
+  const strippedPrimaryTitle = stripParentheticalSubtitles(cleanTitle);
+  const query = `${strippedPrimaryTitle} ${primaryArtist || ''}`.trim();
   if (!query) {
     return {
       durationSec: parsed || null,
       canonicalTitle: null,
       canonicalArtist: null,
+      matchedViaEmbeddedArtist: false,
       catalogWords: extraWords,
       catalogTokenGroups: extraTokenGroups
     };
@@ -201,11 +206,14 @@ async function resolveCatalogMetadata(rawDuration, cleanTitle, primaryArtist) {
 
   const titleTokens = getTitleCoreTokens(cleanTitle);
   const artistTokens = getArtistTokens(primaryArtist);
+  const cleanTitleNorm = normalizeText(cleanTitle);
+  const cleanTitleWords = cleanTitleNorm.split(/\s+/).filter(Boolean);
+  const cleanTitleCompounds = buildWordCompounds(cleanTitleWords);
   const wantLive = /\b(live|vivo)\b/i.test(cleanTitle);
   const wantDemo = /\bdemo\b/i.test(cleanTitle);
   const wantExtended = /\bextended\b/i.test(cleanTitle);
 
-  const matchCatalogTrack = (trackTitle, trackArtist, sec) => {
+  const matchCatalogTrack = (trackTitle, trackArtist, sec, ignorePrimaryArtist = false) => {
     if (!sec || sec < 45 || sec > 1200) return false;
     const hTitle = normalizeText(trackTitle);
     const hArtist = normalizeText(trackArtist);
@@ -213,32 +221,68 @@ async function resolveCatalogMetadata(rawDuration, cleanTitle, primaryArtist) {
     if (wantDemo !== /\bdemo\b/i.test(hTitle)) return false;
     if (wantExtended && !/\bextended\b/i.test(hTitle)) return false;
 
-    if (artistTokens.length > 0) {
-      const tOk = titleTokens.every(t => hTitle.includes(t));
-      const aOk = artistTokens.some(t => hArtist.includes(t));
+    const hTitleWords = hTitle.split(/\s+/).filter(Boolean);
+    const hArtistWords = hArtist.split(/\s+/).filter(Boolean);
+    const hTitleCompounds = buildWordCompounds(hTitleWords);
+    const hArtistCompounds = buildWordCompounds(hArtistWords);
+
+    if (!ignorePrimaryArtist && artistTokens.length > 0) {
+      const tOk = titleTokens.every(t => hTitle.includes(t) || hTitleCompounds.has(t));
+      const aOk = artistTokens.some(t => hArtist.includes(t) || hArtistCompounds.has(t));
       return tOk && aOk;
     }
 
-    // When primaryArtist was empty/generic (e.g. Offline PWA "Two Door Cinema Club I Can Talk"),
-    // verify that all query tokens match across the catalog track's title + artist combined
+    // When primaryArtist was empty/generic or an unverified YouTube re-uploader,
+    // verify that all query tokens match across the catalog track's title + artist combined.
     const hCombined = `${hTitle} ${hArtist}`;
     const hTitleCore = getTitleCoreTokens(stripRemasterNoise(trackTitle));
-    return (
-      titleTokens.every(t => hCombined.includes(t)) &&
-      hTitleCore.length > 0 &&
-      hTitleCore.every(t => normalizeText(cleanTitle).includes(t))
+    const hArtistCore = getArtistTokens(trackArtist);
+    const allQueryMatched = titleTokens.every(
+      t =>
+        hCombined.includes(t) ||
+        hTitleCompounds.has(t) ||
+        hArtistCompounds.has(t)
     );
+    const allTitleCoreMatched =
+      hTitleCore.length > 0 &&
+      hTitleCore.every(t => cleanTitleNorm.includes(t) || cleanTitleCompounds.has(t));
+
+    if (!allQueryMatched || !allTitleCoreMatched) return false;
+
+    if (ignorePrimaryArtist) {
+      const joinedCatalogArtist = hArtistWords.join('');
+      const artistEmbeddedInTitle =
+        (hArtistCore.length > 0 &&
+          hArtistCore.every(t => cleanTitleWords.includes(t) || cleanTitleCompounds.has(t))) ||
+        (joinedCatalogArtist.length >= 4 &&
+          (cleanTitleWords.includes(joinedCatalogArtist) ||
+            cleanTitleCompounds.has(joinedCatalogArtist)));
+      return artistEmbeddedInTitle;
+    }
+
+    return true;
   };
 
-  const harvestTrackMeta = (trackTitle, trackArtist, albumTitle) => {
+  const harvestTrackMeta = (trackTitle, trackArtist, albumTitle, viaEmbedded = false) => {
     if (!canonicalTitle && trackTitle) {
       canonicalTitle = stripRemasterNoise(trackTitle) || trackTitle;
     }
     if (!canonicalArtist && trackArtist) {
       canonicalArtist = cleanArtistName(trackArtist) || trackArtist;
     }
-    for (const w of normalizeText(`${trackTitle || ''} ${trackArtist || ''} ${albumTitle || ''}`).split(/\s+/)) {
-      if (w && w.length >= 2) extraWords.add(w);
+    if (viaEmbedded) {
+      matchedViaEmbeddedArtist = true;
+    }
+    const harvestWords = normalizeText(
+      `${trackTitle || ''} ${trackArtist || ''} ${albumTitle || ''}`
+    )
+      .split(/\s+/)
+      .filter(Boolean);
+    for (const w of harvestWords) {
+      if (w.length >= 2) extraWords.add(w);
+    }
+    for (const c of buildWordCompounds(harvestWords)) {
+      extraWords.add(c);
     }
     for (const grp of extractParentheticalTokenGroups(trackTitle)) {
       extraTokenGroups.push(grp);
@@ -269,37 +313,49 @@ async function resolveCatalogMetadata(rawDuration, cleanTitle, primaryArtist) {
     }
   };
 
-  const fetchItunes = async () => {
+  const fetchItunes = async (searchTerm, ignorePrimaryArtist = false) => {
     const itunesUrl = `https://itunes.apple.com/search?term=${encodeURIComponent(
-      query
+      searchTerm
     )}&media=music&entity=song&limit=6`;
     const data = await fetchCatalogJson(itunesUrl, 2200);
     const hits = Array.isArray(data?.results) ? data.results : [];
     for (const h of hits) {
       const sec = h.trackTimeMillis ? Math.round(h.trackTimeMillis / 1000) : null;
-      if (matchCatalogTrack(h.trackName, h.artistName, sec)) {
-        harvestTrackMeta(h.trackName, h.artistName, h.collectionName);
+      if (matchCatalogTrack(h.trackName, h.artistName, sec, ignorePrimaryArtist)) {
+        harvestTrackMeta(h.trackName, h.artistName, h.collectionName, ignorePrimaryArtist);
         return sec;
       }
     }
     return null;
   };
 
-  const fetchDeezer = async () => {
-    const dzUrl = `https://api.deezer.com/search?q=${encodeURIComponent(query)}&limit=6`;
+  const fetchDeezer = async (searchTerm, ignorePrimaryArtist = false) => {
+    const dzUrl = `https://api.deezer.com/search?q=${encodeURIComponent(searchTerm)}&limit=6`;
     const data = await fetchCatalogJson(dzUrl, 2200);
     const hits = Array.isArray(data?.data) ? data.data : [];
     for (const h of hits) {
       const sec = Number(h.duration);
-      if (matchCatalogTrack(h.title, h.artist?.name, sec)) {
-        harvestTrackMeta(h.title, h.artist?.name, h.album?.title);
+      if (matchCatalogTrack(h.title, h.artist?.name, sec, ignorePrimaryArtist)) {
+        harvestTrackMeta(h.title, h.artist?.name, h.album?.title, ignorePrimaryArtist);
         return sec;
       }
     }
     return null;
   };
 
-  const [itSec, dzSec] = await Promise.all([fetchItunes(), fetchDeezer()]);
+  let [itSec, dzSec] = await Promise.all([fetchItunes(query), fetchDeezer(query)]);
+  if (
+    !itSec &&
+    !dzSec &&
+    allowTitleOnlyFallback &&
+    artistTokens.length > 0 &&
+    strippedPrimaryTitle.length >= 3
+  ) {
+    [itSec, dzSec] = await Promise.all([
+      fetchItunes(strippedPrimaryTitle, true),
+      fetchDeezer(strippedPrimaryTitle, true)
+    ]);
+  }
   let durationSec = parsed && parsed <= 420 ? parsed : null;
   if (!durationSec) {
     if (itSec && dzSec) {
@@ -313,6 +369,7 @@ async function resolveCatalogMetadata(rawDuration, cleanTitle, primaryArtist) {
     durationSec,
     canonicalTitle,
     canonicalArtist,
+    matchedViaEmbeddedArtist,
     catalogWords: extraWords,
     catalogTokenGroups: extraTokenGroups
   };
@@ -1128,15 +1185,38 @@ async function runExtractionPipeline(
           }
           if (fallbackQueries.length > 0) {
             const [catalogMeta, lazyScRaw] = await Promise.all([
-              resolveCatalogMetadata(item.duration, fallbackTitle, hasRealArtist ? fallbackArtist : ''),
+              resolveCatalogMetadata(
+                item.duration,
+                fallbackTitle,
+                hasRealArtist ? fallbackArtist : '',
+                { allowTitleOnlyFallback: true }
+              ),
               discoverCandidatesFromSearch(fallbackQueries, 10000)
             ]);
             expectedDurationSec = catalogMeta.durationSec;
             maxAllowedDur = expectedDurationSec ? expectedDurationSec + 5 : null;
+            const resolvedFallbackArtist =
+              catalogMeta.matchedViaEmbeddedArtist && catalogMeta.canonicalArtist
+                ? catalogMeta.canonicalArtist
+                : hasRealArtist
+                ? fallbackArtist
+                : '';
+            const resolvedFallbackTitle =
+              catalogMeta.matchedViaEmbeddedArtist && catalogMeta.canonicalTitle
+                ? catalogMeta.canonicalTitle
+                : fallbackTitle;
+            if (catalogMeta.matchedViaEmbeddedArtist && catalogMeta.canonicalArtist) {
+              metaArtist = catalogMeta.canonicalArtist;
+              item.artist = catalogMeta.canonicalArtist;
+              if (catalogMeta.canonicalTitle) {
+                metaTitle = catalogMeta.canonicalTitle;
+                item.title = catalogMeta.canonicalTitle;
+              }
+            }
             const fallbackCtx = buildCandidateContext(
               fallbackTitle,
-              fallbackTitle,
-              hasRealArtist ? fallbackArtist : '',
+              resolvedFallbackTitle,
+              resolvedFallbackArtist,
               expectedDurationSec,
               catalogMeta
             );

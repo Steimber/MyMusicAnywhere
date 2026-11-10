@@ -11,6 +11,7 @@ import {
 } from '../lib/download/queue.js';
 
 import {
+  stripMediaExtensionNoise,
   cleanYouTubeOembedMetadata,
   buildCandidateContext,
   evaluateCandidate,
@@ -482,4 +483,93 @@ test('candidates: evaluateCandidatePool falls back to relaxedDuration when only 
   assert.equal(pool.tier1.length, 1);
   assert.equal(pool.tier1[0].webpageUrl, 'https://soundcloud.com/youth-is-arcadia/hero-papaya-mp3');
   assert.equal(pool.tier1[0].relaxedDuration, true);
+});
+
+test('candidates: strips glued/dotted media extensions without corrupting real names and matches Black Sun on SoundCloud', () => {
+  // Glued uppercase+lowercase and dotted/unambiguous extensions
+  assert.equal(
+    stripMediaExtensionNoise('Torrez Aleks - BLACKSUN LA PINTA LA NIÑA Y LA SANTA MARIAavi'),
+    'Torrez Aleks - BLACKSUN LA PINTA LA NIÑA Y LA SANTA MARIA'
+  );
+  assert.equal(
+    stripMediaExtensionNoise('Cancion.avi'),
+    'Cancion'
+  );
+  assert.equal(
+    stripMediaExtensionNoise('TemaFinalmp4'),
+    'TemaFinal'
+  );
+  assert.equal(
+    stripMediaExtensionNoise('Archivo_mkv'),
+    'Archivo'
+  );
+
+  // Must NEVER corrupt real artist/song words ending in avi, mov, ogg, aac, opus
+  for (const safeTitle of [
+    'Javi',
+    'JAVI',
+    'Xavi',
+    'Navi',
+    'Snoop Dogg',
+    'SNOOP DOGG',
+    'Isaac Asimov',
+    'Octopus'
+  ]) {
+    assert.equal(stripMediaExtensionNoise(safeTitle), safeTitle);
+  }
+
+  const meta = cleanYouTubeOembedMetadata(
+    'Torrez Aleks - BLACKSUN LA PINTA LA NIÑA Y LA SANTA MARIAavi',
+    'Torrez Aleks'
+  );
+  assert.equal(meta.artist, 'Torrez Aleks');
+  assert.equal(meta.title, 'BLACKSUN LA PINTA LA NIÑA Y LA SANTA MARIA');
+
+  const ctx = buildCandidateContext(meta.title, meta.title, meta.artist, null);
+  const pool = evaluateCandidatePool(
+    [
+      {
+        extractor: 'soundcloud',
+        webpageUrl: 'https://soundcloud.com/blacksun-ec/la-nina-la-pinta-y-la-santa-maria',
+        title: 'La Niña la Pinta y la Santa María',
+        uploader: 'Black Sun',
+        duration: 258
+      },
+      {
+        extractor: 'soundcloud',
+        webpageUrl: 'https://soundcloud.com/rock-ecuador/blacksun-la-nina',
+        title: 'Black Sun - La Niña la Pinta y la Santa María',
+        uploader: 'Rock Ecuatoriano',
+        duration: 258
+      },
+      {
+        extractor: 'soundcloud',
+        webpageUrl: 'https://soundcloud.com/pedro-perez/la-nina-la-pinta',
+        title: 'La Niña la Pinta y la Santa María',
+        uploader: 'Pedro Perez',
+        duration: 258
+      },
+      {
+        extractor: 'soundcloud',
+        webpageUrl: 'https://soundcloud.com/blacksun-ec/milenio',
+        title: 'Milenio',
+        uploader: 'Black Sun',
+        duration: 245
+      }
+    ],
+    ctx,
+    'sc-blacksun',
+    meta.title
+  );
+
+  assert.equal(pool.tier1.length, 2);
+  // Official/band uploader ("Black Sun") ranks #1 ahead of third-party uploader ("Rock Ecuatoriano")
+  assert.equal(
+    pool.tier1[0].webpageUrl,
+    'https://soundcloud.com/blacksun-ec/la-nina-la-pinta-y-la-santa-maria'
+  );
+  assert.equal(
+    pool.tier1[1].webpageUrl,
+    'https://soundcloud.com/rock-ecuador/blacksun-la-nina'
+  );
 });
