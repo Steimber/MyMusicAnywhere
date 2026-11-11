@@ -5,6 +5,14 @@ import { flushSync } from 'react-dom';
 import { NoSleepController } from '../lib/nosleep';
 import { buildSmartShuffleOrder, getShuffleTrackKey } from '../lib/shuffle';
 import { mergeCollectionsSnapshots, normalizeTombstoneList } from '../lib/collections-merge';
+import {
+  HOUR_BUCKETS,
+  applyListeningDeltaToMap,
+  getHourBucketName,
+  mergeListeningEntries,
+  normalizeListeningEntry
+} from '../lib/listening-shared';
+import { readListeningStateFromIdb, writeListeningStateToIdb } from '../lib/listening-idb';
 import PlayerScrubber from './components/PlayerScrubber';
 import SettingsPanel from './components/SettingsPanel';
 import AdminPanel from './components/AdminPanel';
@@ -530,6 +538,7 @@ export default function HomePage() {
   const [storagePersistMsg, setStoragePersistMsg] = useState('');
   const [syncState, setSyncState] = useState({ status: 'idle', updatedAt: null });
   const [syncConflictNotice, setSyncConflictNotice] = useState('');
+  const [listeningEntries, setListeningEntries] = useState({});
   const [backupMsg, setBackupMsg] = useState({ type: '', text: '' });
   const [syncingAll, setSyncingAll] = useState(false);
   const [syncProgress, setSyncProgress] = useState({ done: 0, total: 0 });
@@ -589,6 +598,24 @@ export default function HomePage() {
   const pushInFlightRef = useRef(false);
   const lastFocusReconcileAtRef = useRef(0);
   const syncDebounceTimerRef = useRef(null);
+  const listeningStateRef = useRef({
+    userId: '',
+    version: 0,
+    syncedEntries: {},
+    pendingDelta: {}
+  });
+  const listeningSyncTimerRef = useRef(null);
+  const listeningPushInFlightRef = useRef(false);
+  const playbackSessionRef = useRef({
+    trackId: '',
+    lastTimeSec: 0,
+    listenedSec: 0,
+    durationSec: 0,
+    playCounted: false,
+    completeCounted: false,
+    skipCounted: false,
+    hourBucket: 'tarde'
+  });
   const blobUrlCacheRef = useRef(new Map());
   const inflightBlobPromisesRef = useRef(new Map());
   const cachedStreamKeysRef = useRef(new Map());
@@ -899,13 +926,23 @@ export default function HomePage() {
     const handleVisibility = () => {
       if (document.visibilityState === 'visible') {
         verifyInternetConnection().then(alive => {
-          if (alive) reconcileCollectionsOnAppReturn();
+          if (alive) {
+            reconcileCollectionsOnAppReturn();
+            if (userRef.current?.id && !userRef.current.offline) {
+              hydrateAndSyncListeningHistory(userRef.current.id);
+            }
+          }
         });
       }
     };
     const handleWindowFocus = () => {
       verifyInternetConnection().then(alive => {
-        if (alive) reconcileCollectionsOnAppReturn();
+        if (alive) {
+          reconcileCollectionsOnAppReturn();
+          if (userRef.current?.id && !userRef.current.offline) {
+            hydrateAndSyncListeningHistory(userRef.current.id);
+          }
+        }
       });
     };
 
@@ -940,15 +977,18 @@ export default function HomePage() {
     if (!user) return;
     if (isOffline) {
       wasOfflineRef.current = true;
+      hydrateAndSyncListeningHistory(user.id || 'offline_local');
       return;
     }
     fetchLibraryFiles();
     if (!user.offline && user.id) {
       (async () => {
         await syncCollectionsWithServer(user.id);
+        await hydrateAndSyncListeningHistory(user.id);
         await syncOwnUploadedTracks();
       })();
     } else {
+      hydrateAndSyncListeningHistory(user.id || 'offline_local');
       syncOwnUploadedTracks();
     }
     let initialLikes = likedTracks;
@@ -989,6 +1029,10 @@ export default function HomePage() {
       String(lastDirectPlayRef.current.id) === String(currentTrack.id);
 
     if (!alreadyHandledByDirectStart) {
+      if (String(playbackSessionRef.current.trackId) !== String(currentTrack.id)) {
+        finalizeActivePlaybackSession(false);
+        beginPlaybackSessionForTrack(currentTrack);
+      }
       const playTrack = async () => {
         const src = await resolvePlayableSource(currentTrack);
         if (!src || cancelled || !audioRef.current) return;
@@ -1164,11 +1208,22 @@ export default function HomePage() {
       clearTimeout(syncDebounceTimerRef.current);
       syncDebounceTimerRef.current = null;
     }
+    if (listeningSyncTimerRef.current) {
+      clearTimeout(listeningSyncTimerRef.current);
+      listeningSyncTimerRef.current = null;
+    }
     collectionsHydratedForUserRef.current = '';
     collectionsVersionRef.current = 0;
     reconcilingCollectionsRef.current = false;
     pendingSaveAfterReconcileRef.current = false;
     setSyncConflictNotice('');
+    listeningStateRef.current = {
+      userId: '',
+      version: 0,
+      syncedEntries: {},
+      pendingDelta: {}
+    };
+    setListeningEntries({});
     try {
       await fetch('/api/auth', {
         method: 'POST',
@@ -1670,6 +1725,301 @@ export default function HomePage() {
       setSyncState(prev => ({ ...prev, status: 'error' }));
     } finally {
       reconcilingCollectionsRef.current = false;
+    }
+  }
+
+  // ==================== LISTENING HISTORY (INDEXEDDB + /api/listening SYNC) ====================
+  function subtractFlushedListeningDelta(currentDelta = {}, flushedDelta = {}) {
+    const remaining = {};
+    for (const [trackId, curRaw] of Object.entries(currentDelta)) {
+      const cur = normalizeListeningEntry(curRaw);
+      const sent = flushedDelta[trackId] ? normalizeListeningEntry(flushedDelta[trackId]) : null;
+      if (!sent) {
+        remaining[trackId] = cur;
+        continue;
+      }
+      const remPlays = Math.max(0, cur.plays - sent.plays);
+      const remSkips = Math.max(0, cur.skips - sent.skips);
+      const remCompletes = Math.max(0, cur.completes - sent.completes);
+      const remBuckets = {};
+      let hasBucket = false;
+      for (const slot of HOUR_BUCKETS) {
+        remBuckets[slot] = Math.max(0, (cur.hourBuckets[slot] || 0) - (sent.hourBuckets[slot] || 0));
+        if (remBuckets[slot] > 0) hasBucket = true;
+      }
+      if (remPlays > 0 || remSkips > 0 || remCompletes > 0 || hasBucket) {
+        remaining[trackId] = {
+          plays: remPlays,
+          skips: remSkips,
+          completes: remCompletes,
+          lastPlayedAt: cur.lastPlayedAt,
+          hourBuckets: remBuckets
+        };
+      }
+    }
+    return remaining;
+  }
+
+  async function pushListeningHistoryNow() {
+    const activeUser = userRef.current;
+    if (!activeUser || activeUser.offline || !activeUser.id || isOfflineRef.current) {
+      return false;
+    }
+    if (listeningPushInFlightRef.current) return false;
+
+    const uid = String(activeUser.id);
+    if (listeningStateRef.current.userId !== uid) return false;
+    if (Object.keys(listeningStateRef.current.pendingDelta || {}).length === 0) return true;
+
+    listeningPushInFlightRef.current = true;
+    try {
+      for (let retry = 0; retry <= MAX_COLLECTION_SYNC_RETRIES; retry++) {
+        const snapshotDelta = { ...(listeningStateRef.current.pendingDelta || {}) };
+        if (Object.keys(snapshotDelta).length === 0) return true;
+
+        const baseVersion = listeningStateRef.current.version || 0;
+        const candidateEntries = mergeListeningEntries(
+          listeningStateRef.current.syncedEntries,
+          snapshotDelta
+        );
+
+        const res = await fetch('/api/listening', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            baseVersion,
+            entries: candidateEntries
+          })
+        });
+
+        if (res.status === 409) {
+          const conflictBody = await res.json().catch(() => ({}));
+          const serverEntries =
+            conflictBody && typeof conflictBody.entries === 'object' ? conflictBody.entries : {};
+          const serverVer = Number.isInteger(conflictBody?.version) ? conflictBody.version : 0;
+
+          listeningStateRef.current = {
+            ...listeningStateRef.current,
+            version: serverVer,
+            syncedEntries: serverEntries
+          };
+          setListeningEntries(
+            mergeListeningEntries(serverEntries, listeningStateRef.current.pendingDelta)
+          );
+          await writeListeningStateToIdb(uid, listeningStateRef.current);
+
+          if (retry < MAX_COLLECTION_SYNC_RETRIES) {
+            continue;
+          }
+          return false;
+        }
+
+        if (!res.ok) {
+          return false;
+        }
+
+        const data = await res.json().catch(() => ({}));
+        const nextVer = Number.isInteger(data.version) ? data.version : baseVersion + 1;
+        const leftoverDelta = subtractFlushedListeningDelta(
+          listeningStateRef.current.pendingDelta,
+          snapshotDelta
+        );
+
+        listeningStateRef.current = {
+          userId: uid,
+          version: nextVer,
+          syncedEntries: candidateEntries,
+          pendingDelta: leftoverDelta
+        };
+        setListeningEntries(mergeListeningEntries(candidateEntries, leftoverDelta));
+        await writeListeningStateToIdb(uid, listeningStateRef.current);
+        return true;
+      }
+      return false;
+    } catch {
+      return false;
+    } finally {
+      listeningPushInFlightRef.current = false;
+    }
+  }
+
+  function scheduleListeningSync() {
+    const activeUser = userRef.current;
+    if (!activeUser || activeUser.offline || !activeUser.id || isOfflineRef.current) return;
+    if (listeningSyncTimerRef.current) {
+      clearTimeout(listeningSyncTimerRef.current);
+    }
+    listeningSyncTimerRef.current = setTimeout(() => {
+      listeningSyncTimerRef.current = null;
+      pushListeningHistoryNow();
+    }, 2500);
+  }
+
+  async function hydrateAndSyncListeningHistory(userId) {
+    const uid = String(userId || 'offline_local').trim() || 'offline_local';
+    try {
+      const localRecord = await readListeningStateFromIdb(uid);
+      listeningStateRef.current = {
+        userId: uid,
+        version: localRecord.version || 0,
+        syncedEntries: localRecord.syncedEntries || {},
+        pendingDelta: localRecord.pendingDelta || {}
+      };
+      setListeningEntries(
+        mergeListeningEntries(
+          listeningStateRef.current.syncedEntries,
+          listeningStateRef.current.pendingDelta
+        )
+      );
+
+      if (isOfflineRef.current || uid === 'offline_local' || userRef.current?.offline) {
+        return;
+      }
+
+      const res = await fetch('/api/listening', { cache: 'no-store' });
+      if (!res.ok) return;
+      const serverData = await res.json();
+      const serverVer = Number.isInteger(serverData.version) ? serverData.version : 0;
+      const serverEntries =
+        serverData && typeof serverData.entries === 'object' ? serverData.entries : {};
+
+      listeningStateRef.current = {
+        userId: uid,
+        version: serverVer,
+        syncedEntries: serverEntries,
+        pendingDelta: listeningStateRef.current.pendingDelta
+      };
+      setListeningEntries(
+        mergeListeningEntries(serverEntries, listeningStateRef.current.pendingDelta)
+      );
+      await writeListeningStateToIdb(uid, listeningStateRef.current);
+
+      if (Object.keys(listeningStateRef.current.pendingDelta || {}).length > 0) {
+        await pushListeningHistoryNow();
+      }
+    } catch {}
+  }
+
+  function recordListeningDeltaSync(trackId, delta) {
+    const cleanId = String(trackId || '').trim();
+    if (!cleanId) return;
+    const uid = String(userRef.current?.id || 'offline_local');
+    if (listeningStateRef.current.userId !== uid) {
+      listeningStateRef.current.userId = uid;
+    }
+    const nextPending = applyListeningDeltaToMap(
+      listeningStateRef.current.pendingDelta,
+      cleanId,
+      delta
+    );
+    listeningStateRef.current = {
+      ...listeningStateRef.current,
+      pendingDelta: nextPending
+    };
+    const combined = mergeListeningEntries(listeningStateRef.current.syncedEntries, nextPending);
+    setListeningEntries(combined);
+    // Persist asynchronously in background — never block synchronous <audio> calls
+    writeListeningStateToIdb(uid, listeningStateRef.current).catch(() => {});
+    scheduleListeningSync();
+  }
+
+  function parseTrackDurationHintSec(track) {
+    if (!track) return 0;
+    const direct = Number(track.durationSec);
+    if (Number.isFinite(direct) && direct > 0) return direct;
+    const str = String(track.duration || '').trim();
+    const match = str.match(/^(\d+):(\d{2})$/);
+    if (match) {
+      return Number(match[1]) * 60 + Number(match[2]);
+    }
+    return 0;
+  }
+
+  function finalizeActivePlaybackSession(didComplete = false) {
+    const sess = playbackSessionRef.current;
+    if (!sess || !sess.trackId) return;
+    const tid = sess.trackId;
+    const now = Date.now();
+
+    if (didComplete) {
+      const needPlay = !sess.playCounted;
+      const needComplete = !sess.completeCounted;
+      sess.playCounted = true;
+      sess.completeCounted = true;
+      if (needPlay || needComplete) {
+        recordListeningDeltaSync(tid, {
+          plays: needPlay ? 1 : 0,
+          completes: needComplete ? 1 : 0,
+          lastPlayedAt: now,
+          ...(needPlay ? { hourBucket: sess.hourBucket } : {})
+        });
+      }
+      return;
+    }
+
+    // Track switched before ending: count as skip if playback actually started (>0.25s) and stayed <25%
+    if (!sess.playCounted && !sess.completeCounted && !sess.skipCounted) {
+      const playedAny = sess.listenedSec > 0.25 || sess.lastTimeSec > 0.25;
+      if (playedAny) {
+        const dur = sess.durationSec;
+        const skippedEarly = dur > 0 ? sess.listenedSec / dur < 0.25 : sess.listenedSec < 15;
+        if (skippedEarly) {
+          sess.skipCounted = true;
+          recordListeningDeltaSync(tid, { skips: 1 });
+        }
+      }
+    }
+  }
+
+  function beginPlaybackSessionForTrack(track) {
+    if (!track || track.id == null) {
+      playbackSessionRef.current = {
+        trackId: '',
+        lastTimeSec: 0,
+        listenedSec: 0,
+        durationSec: 0,
+        playCounted: false,
+        completeCounted: false,
+        skipCounted: false,
+        hourBucket: getHourBucketName(new Date())
+      };
+      return;
+    }
+    playbackSessionRef.current = {
+      trackId: String(track.id),
+      lastTimeSec: 0,
+      listenedSec: 0,
+      durationSec: parseTrackDurationHintSec(track),
+      playCounted: false,
+      completeCounted: false,
+      skipCounted: false,
+      hourBucket: getHourBucketName(new Date())
+    };
+  }
+
+  function handlePlaybackTimeTick(curSec, rawDurationSec) {
+    const sess = playbackSessionRef.current;
+    if (!sess || !sess.trackId) return;
+    if (Number.isFinite(rawDurationSec) && rawDurationSec > 0) {
+      sess.durationSec = rawDurationSec;
+    }
+    const dt = curSec - sess.lastTimeSec;
+    if (dt > 0 && dt < 2.5) {
+      sess.listenedSec += dt;
+    }
+    sess.lastTimeSec = curSec;
+
+    if (!sess.playCounted) {
+      const reached30s = sess.listenedSec >= 30;
+      const reachedHalf = sess.durationSec > 0 && sess.listenedSec / sess.durationSec >= 0.5;
+      if (reached30s || reachedHalf) {
+        sess.playCounted = true;
+        recordListeningDeltaSync(sess.trackId, {
+          plays: 1,
+          lastPlayedAt: Date.now(),
+          hourBucket: sess.hourBucket
+        });
+      }
     }
   }
 
@@ -4601,6 +4951,9 @@ export default function HomePage() {
       return;
     }
 
+    finalizeActivePlaybackSession(false);
+    beginPlaybackSessionForTrack(nextTrack);
+
     const trackHistoryKey = getShuffleTrackKey(nextTrack);
     if (trackHistoryKey) {
       const filteredHistory = recentPlayedKeysRef.current.filter(k => k !== trackHistoryKey);
@@ -4940,7 +5293,9 @@ export default function HomePage() {
   }
 
   function handleTrackEnded() {
+    finalizeActivePlaybackSession(true);
     if (repeatModeRef.current === 'one' && audioRef.current) {
+      beginPlaybackSessionForTrack(queueRef.current[currentIndexRef.current]);
       audioRef.current.currentTime = 0;
       audioRef.current.play().then(() => setIsPlaying(true)).catch(() => {});
       return;
@@ -7155,6 +7510,7 @@ export default function HomePage() {
         playsInline
         onTimeUpdate={e => {
           const cur = e.currentTarget.currentTime;
+          handlePlaybackTimeTick(cur, e.currentTarget.duration);
           const warmKey = `${currentIndexRef.current}_${queueRef.current.length}`;
           if (cur > 0.5 && lastWarmedKeyRef.current !== warmKey) {
             lastWarmedKeyRef.current = warmKey;
