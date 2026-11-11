@@ -25,7 +25,7 @@ import AdminPanel from './components/AdminPanel';
 import ForYouPanel from './components/ForYouPanel';
 
 const AUDIO_CACHE_NAME = 'my-music-offline-audio-v1';
-const SHELL_CACHE_NAME = 'mymusic-shell-v28';
+const SHELL_CACHE_NAME = 'mymusic-shell-v29';
 const DEFAULT_TRACK_COVER = '/icon.svg?v=3';
 const FORYOU_RECS_STORAGE_KEY = 'mma_foryou_recs_v1';
 const USER_STORAGE_KEY = 'mma_cached_user_v1';
