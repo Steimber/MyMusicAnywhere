@@ -11,6 +11,7 @@ import {
   registerActiveRawJob,
   unregisterActiveRawJob
 } from '../../../lib/store.js';
+import { recordDownloadOutcome } from '../../../lib/alerts.js';
 import {
   MAX_QUEUED_PER_USER,
   getUserQueuedCount,
@@ -1407,6 +1408,7 @@ async function runExtractionPipeline(
       );
       if (finalized.valid && finalized.filePath && fs.existsSync(finalized.filePath)) {
         console.log(`[download] OK: ${finalized.filename} <- ${redactProxySecrets(t.url)}`);
+        recordDownloadOutcome(true).catch(() => {});
         enforceStorageQuota();
         scheduleFileCleanup(finalized.filePath, 90000);
         item.status = 'ready';
@@ -1448,6 +1450,7 @@ async function runExtractionPipeline(
       );
     }
 
+    recordDownloadOutcome(false).catch(() => {});
     enforceStorageQuota();
     item.status = 'error';
     item.stage = 'error';
@@ -1557,7 +1560,8 @@ export async function POST(request) {
       )
     ).catch(err => {
       const item = activeDownloads.get(downloadId);
-      if (item) {
+      if (item && item.status === 'downloading') {
+        recordDownloadOutcome(false).catch(() => {});
         item.status = 'error';
         item.stage = 'error';
         item.error = redactProxySecrets(err.message);

@@ -71,6 +71,7 @@ En el archivo `.env` local (nunca versionado en Git) se configuran las siguiente
 | `ENABLE_BILIBILI` | `true` | Permite habilitar (`true`) o desactivar (`false`) el respaldo de Bilibili. |
 | `YTDLP_BIN` | `yt-dlp` | Ruta al binario de `yt-dlp` en el servidor. |
 | `YTDLP_PROXY` | *(vacío)* | Proxy opcional (`http://` o `socks5://`) aplicado **únicamente** a las llamadas `yt-dlp` contra YouTube. Su valor nunca se registra en logs ni se expone en la API (el panel de Admin solo indica `Sí` o `No`). |
+| `NTFY_URL` | *(vacío)* | Endpoint opcional (`https://<NTFY_HOST>/<TOPIC_SECRETO>`) para avisos operativos: bloqueo de YouTube, 5 descargas fallidas consecutivas o disco de descargas por encima del 90 %. Máximo un aviso por tipo cada 30 minutos, sin datos personales ni títulos de canciones. |
 | `FFMPEG_BIN` | `ffmpeg` | Ruta al binario de `ffmpeg` en el servidor. |
 | `YTDLP_POT_PROVIDER_URL` | `http://127.0.0.1:4416` | Endpoint local del proveedor de PO-Token para YouTube. |
 | `SESSION_SECRET` | `<REDACTED>` | Clave secreta HMAC para firmar las cookies de sesión (`HttpOnly`). |
