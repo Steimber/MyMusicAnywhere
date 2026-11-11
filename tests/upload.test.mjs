@@ -512,9 +512,11 @@ test('POST /api/upload extracts embedded ID3 cover art and PATCH /api/upload/:id
   assert.equal(uploaded.ok, true);
   assert.equal(uploaded.track.artist, 'Black Sun');
   assert.equal(uploaded.track.title, 'La Pinta La Niña');
-  assert.ok(
-    String(uploaded.track.artwork || '').startsWith('data:image/jpeg;base64,'),
-    `Expected extracted data:image/jpeg cover, got ${uploaded.track.artwork}`
+  assert.equal(uploaded.track.artwork, `/api/cover/${uploaded.id}`);
+  assert.equal(
+    fs.existsSync(path.join(tempDataDir, 'covers', `${uploaded.id}.jpg`)),
+    true,
+    'Extracted JPEG cover should be saved on disk under data/covers/<uploadId>.jpg'
   );
 
   // Unauthenticated PATCH -> 401

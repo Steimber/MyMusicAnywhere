@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import {
+  deleteUserUploadRecord,
   getDownloadsDir,
   getSessionUser,
   getUploadRecordById,
@@ -65,6 +66,26 @@ export async function DELETE(request, context) {
   const id = String(resolvedParams?.id || '').trim();
   if (!UPLOAD_ID_REGEX.test(id)) {
     return Response.json({ error: 'Identificador de subida inválido.' }, { status: 400 });
+  }
+
+  let deleteRecord = false;
+  try {
+    deleteRecord = new URL(request.url).searchParams.get('record') === '1';
+  } catch {}
+
+  if (deleteRecord) {
+    const removed = deleteUserUploadRecord(id, user.id);
+    if (!removed.ok) {
+      return Response.json({ error: removed.error }, { status: removed.status || 400 });
+    }
+    return Response.json({
+      ok: true,
+      id,
+      deleted: true,
+      recordDeleted: true,
+      coverDeleted: removed.coverDeleted,
+      removedFromDisk: removed.removedFromDisk
+    });
   }
 
   const record = getUploadRecordById(id);
