@@ -4,20 +4,25 @@ import { useState, useEffect, useRef, useMemo } from 'react';
 import { flushSync } from 'react-dom';
 import { NoSleepController } from '../lib/nosleep';
 import { buildSmartShuffleOrder, getShuffleTrackKey } from '../lib/shuffle';
+import { mergeCollectionsSnapshots, normalizeTombstoneList } from '../lib/collections-merge';
 import PlayerScrubber from './components/PlayerScrubber';
 import SettingsPanel from './components/SettingsPanel';
 import AdminPanel from './components/AdminPanel';
 
 const AUDIO_CACHE_NAME = 'my-music-offline-audio-v1';
-const SHELL_CACHE_NAME = 'mymusic-shell-v26';
+const SHELL_CACHE_NAME = 'mymusic-shell-v27';
 const DEFAULT_TRACK_COVER = '/icon.svg?v=3';
 const USER_STORAGE_KEY = 'mma_cached_user_v1';
 const LIKES_STORAGE_KEY = 'mma_liked_tracks_v1';
+const DELETED_LIKES_STORAGE_KEY = 'mma_deleted_likes_v1';
 const OFFLINE_CATALOG_KEY = 'mma_offline_catalog_v1';
 const PLAYLISTS_STORAGE_KEY = 'mma_custom_playlists_v1';
+const DELETED_PLAYLISTS_STORAGE_KEY = 'mma_deleted_playlists_v1';
 const UNLIKED_OWN_STORAGE_KEY = 'mma_unliked_own_v1';
 const SYNCED_UID_STORAGE_KEY = 'mma_synced_uid_v1';
 const COLLECTIONS_DIRTY_KEY = 'mma_collections_dirty_v1';
+const COLLECTIONS_VERSION_KEY_PREFIX = 'mma_collections_version_v1_';
+const MAX_COLLECTION_SYNC_RETRIES = 3;
 const MAX_SIMULTANEOUS_DOWNLOADS = 4;
 const MAX_OWN_UPLOAD_BYTES = 50 * 1024 * 1024;
 const OWN_UPLOAD_CHUNK_BYTES = Math.floor(3.5 * 1024 * 1024);
@@ -26,8 +31,10 @@ const OWN_AUDIO_ACCEPT =
 
 function isPlaceholderCover(rawUrl) {
   if (!rawUrl || typeof rawUrl !== 'string') return true;
-  const u = rawUrl.trim().toLowerCase();
+  const trimmed = rawUrl.trim();
+  const u = trimmed.toLowerCase();
   if (u.startsWith('data:image/')) return false;
+  if (/^\/api\/cover\/upl_[a-f0-9]{32}$/i.test(trimmed)) return false;
   return (
     !u.startsWith('http') ||
     u.includes('/icon.svg') ||
@@ -37,8 +44,12 @@ function isPlaceholderCover(rawUrl) {
 
 function compressArtworkUrl(rawUrl) {
   if (isPlaceholderCover(rawUrl)) return DEFAULT_TRACK_COVER;
-  if (rawUrl.trim().toLowerCase().startsWith('data:image/')) {
-    return rawUrl.trim();
+  const trimmed = rawUrl.trim();
+  if (trimmed.toLowerCase().startsWith('data:image/')) {
+    return trimmed;
+  }
+  if (/^\/api\/cover\/upl_[a-f0-9]{32}$/i.test(trimmed)) {
+    return trimmed;
   }
   // Spotify CDN: replace 640x640 (ab67616d0000b273) with compact 300x300 (ab67616d00001e02)
   if (rawUrl.includes('i.scdn.co/image/')) {
@@ -518,6 +529,7 @@ export default function HomePage() {
   const [storagePersisted, setStoragePersisted] = useState('prompt');
   const [storagePersistMsg, setStoragePersistMsg] = useState('');
   const [syncState, setSyncState] = useState({ status: 'idle', updatedAt: null });
+  const [syncConflictNotice, setSyncConflictNotice] = useState('');
   const [backupMsg, setBackupMsg] = useState({ type: '', text: '' });
   const [syncingAll, setSyncingAll] = useState(false);
   const [syncProgress, setSyncProgress] = useState({ done: 0, total: 0 });
@@ -569,6 +581,13 @@ export default function HomePage() {
   const userRef = useRef(null);
   const isOfflineRef = useRef(false);
   const collectionsHydratedForUserRef = useRef('');
+  const collectionsVersionRef = useRef(0);
+  const deletedLikesRef = useRef([]);
+  const deletedPlaylistsRef = useRef([]);
+  const reconcilingCollectionsRef = useRef(false);
+  const pendingSaveAfterReconcileRef = useRef(false);
+  const pushInFlightRef = useRef(false);
+  const lastFocusReconcileAtRef = useRef(0);
   const syncDebounceTimerRef = useRef(null);
   const blobUrlCacheRef = useRef(new Map());
   const inflightBlobPromisesRef = useRef(new Map());
@@ -770,6 +789,28 @@ export default function HomePage() {
         cachedUser = JSON.parse(rawUser);
         setUser(cachedUser);
         setAuthChecked(true);
+        if (cachedUser?.id) {
+          const savedVer = Number(
+            localStorage.getItem(`${COLLECTIONS_VERSION_KEY_PREFIX}${cachedUser.id}`)
+          );
+          if (Number.isInteger(savedVer) && savedVer >= 0) {
+            collectionsVersionRef.current = savedVer;
+          }
+        }
+      }
+    } catch {}
+
+    try {
+      const rawDeletedLikes = localStorage.getItem(DELETED_LIKES_STORAGE_KEY);
+      if (rawDeletedLikes) {
+        deletedLikesRef.current = normalizeTombstoneList(JSON.parse(rawDeletedLikes));
+      }
+    } catch {}
+
+    try {
+      const rawDeletedPlaylists = localStorage.getItem(DELETED_PLAYLISTS_STORAGE_KEY);
+      if (rawDeletedPlaylists) {
+        deletedPlaylistsRef.current = normalizeTombstoneList(JSON.parse(rawDeletedPlaylists));
       }
     } catch {}
 
@@ -857,13 +898,21 @@ export default function HomePage() {
     };
     const handleVisibility = () => {
       if (document.visibilityState === 'visible') {
-        verifyInternetConnection();
+        verifyInternetConnection().then(alive => {
+          if (alive) reconcileCollectionsOnAppReturn();
+        });
       }
+    };
+    const handleWindowFocus = () => {
+      verifyInternetConnection().then(alive => {
+        if (alive) reconcileCollectionsOnAppReturn();
+      });
     };
 
     window.addEventListener('online', handleOnline);
     window.addEventListener('offline', handleOffline);
     document.addEventListener('visibilitychange', handleVisibility);
+    window.addEventListener('focus', handleWindowFocus);
 
     const probeTimer = setInterval(() => {
       if (typeof document !== 'undefined' && document.visibilityState === 'hidden') return;
@@ -880,6 +929,7 @@ export default function HomePage() {
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
       document.removeEventListener('visibilitychange', handleVisibility);
+      window.removeEventListener('focus', handleWindowFocus);
       window.removeEventListener('beforeinstallprompt', handleBeforeInstall);
     };
   }, []);
@@ -1030,6 +1080,8 @@ export default function HomePage() {
       if (currentTrack && typeof window !== 'undefined' && 'MediaMetadata' in window) {
         const artUrl = isPlaceholderCover(currentTrack.artwork)
           ? new URL(DEFAULT_TRACK_COVER, window.location.origin).href
+          : currentTrack.artwork.startsWith('/')
+          ? new URL(currentTrack.artwork, window.location.origin).href
           : currentTrack.artwork;
         const artMime = String(artUrl || '').startsWith('data:image/png')
           ? 'image/png'
@@ -1113,6 +1165,10 @@ export default function HomePage() {
       syncDebounceTimerRef.current = null;
     }
     collectionsHydratedForUserRef.current = '';
+    collectionsVersionRef.current = 0;
+    reconcilingCollectionsRef.current = false;
+    pendingSaveAfterReconcileRef.current = false;
+    setSyncConflictNotice('');
     try {
       await fetch('/api/auth', {
         method: 'POST',
@@ -1209,53 +1265,202 @@ export default function HomePage() {
     } catch {}
   }
 
+  function persistDeletedLikes(nextDeleted) {
+    const clean = normalizeTombstoneList(nextDeleted);
+    deletedLikesRef.current = clean;
+    try {
+      localStorage.setItem(DELETED_LIKES_STORAGE_KEY, JSON.stringify(clean));
+    } catch {}
+    return clean;
+  }
+
+  function persistDeletedPlaylists(nextDeleted) {
+    const clean = normalizeTombstoneList(nextDeleted);
+    deletedPlaylistsRef.current = clean;
+    try {
+      localStorage.setItem(DELETED_PLAYLISTS_STORAGE_KEY, JSON.stringify(clean));
+    } catch {}
+    return clean;
+  }
+
+  function persistCollectionsVersion(userId, versionNum) {
+    const safeVersion = Number.isInteger(versionNum) && versionNum >= 0 ? versionNum : 0;
+    collectionsVersionRef.current = safeVersion;
+    if (userId) {
+      try {
+        localStorage.setItem(`${COLLECTIONS_VERSION_KEY_PREFIX}${userId}`, String(safeVersion));
+      } catch {}
+    }
+  }
+
+  function reattachOfflinePointers(list) {
+    return deduplicateTracksList(list).map(tr => {
+      const off = findOfflineItem(tr);
+      if (!off) return tr;
+      return {
+        ...tr,
+        filename: off.filename || tr.filename || null,
+        streamUrl: off.streamUrl || tr.streamUrl || null,
+        artwork: !isPlaceholderCover(tr.artwork) ? tr.artwork : off.artwork || tr.artwork
+      };
+    });
+  }
+
+  function applyMergedSnapshotToClientState(userId, localSnap, serverSnap) {
+    const merged = mergeCollectionsSnapshots(localSnap, serverSnap);
+    const resolvedLikes = reattachOfflinePointers(merged.likedTracks);
+    const resolvedPlaylists = (merged.customPlaylists || []).map(pl => ({
+      ...pl,
+      tracks: reattachOfflinePointers(pl.tracks || []),
+      deletedTracks: normalizeTombstoneList(pl.deletedTracks)
+    }));
+
+    setLikedTracks(resolvedLikes);
+    likedTracksRef.current = resolvedLikes;
+    persistDeletedLikes(merged.deletedLikes);
+    setCustomPlaylists(resolvedPlaylists);
+    customPlaylistsRef.current = resolvedPlaylists;
+    persistDeletedPlaylists(merged.deletedPlaylists);
+
+    if (Number.isInteger(serverSnap?.version) && serverSnap.version >= 0) {
+      persistCollectionsVersion(userId, serverSnap.version);
+    }
+
+    try {
+      localStorage.setItem(LIKES_STORAGE_KEY, JSON.stringify(resolvedLikes));
+      localStorage.setItem(PLAYLISTS_STORAGE_KEY, JSON.stringify(resolvedPlaylists));
+    } catch {}
+
+    return {
+      likedTracks: resolvedLikes,
+      deletedLikes: deletedLikesRef.current,
+      customPlaylists: resolvedPlaylists,
+      deletedPlaylists: deletedPlaylistsRef.current
+    };
+  }
+
   async function pushCollectionsToServerNow(likesOverride = null, playlistsOverride = null) {
     const activeUser = userRef.current;
     if (!activeUser || activeUser.offline || !activeUser.id || isOfflineRef.current) {
       markCollectionsDirtyOffline();
       return false;
     }
-    const likesToPush = sanitizeLikedTracksList(likesOverride ?? likedTracksRef.current);
-    const playlistsToPush = Array.isArray(playlistsOverride ?? customPlaylistsRef.current)
-      ? (playlistsOverride ?? customPlaylistsRef.current).map(pl => ({
-          ...pl,
-          tracks: sanitizeLikedTracksList(deduplicateTracksList(pl.tracks || []))
-        }))
-      : [];
 
+    // Hold saves until any active focus/visibility GET + merge finishes
+    if (reconcilingCollectionsRef.current) {
+      pendingSaveAfterReconcileRef.current = true;
+      markCollectionsDirtyOffline();
+      return false;
+    }
+
+    if (pushInFlightRef.current) {
+      pendingSaveAfterReconcileRef.current = true;
+      markCollectionsDirtyOffline();
+      return false;
+    }
+
+    pushInFlightRef.current = true;
     setSyncState(prev => ({ ...prev, status: 'syncing' }));
+
     try {
-      const res = await fetch('/api/collections', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          likedTracks: likesToPush,
-          customPlaylists: playlistsToPush
-        })
-      });
-      if (!res.ok) {
-        setSyncState(prev => ({ ...prev, status: 'error' }));
-        return false;
+      let currentLikes = sanitizeLikedTracksList(likesOverride ?? likedTracksRef.current);
+      let currentPlaylists = Array.isArray(playlistsOverride ?? customPlaylistsRef.current)
+        ? (playlistsOverride ?? customPlaylistsRef.current).map(pl => ({
+            ...pl,
+            tracks: sanitizeLikedTracksList(deduplicateTracksList(pl.tracks || [])),
+            deletedTracks: normalizeTombstoneList(pl.deletedTracks)
+          }))
+        : [];
+
+      for (let retry = 0; retry <= MAX_COLLECTION_SYNC_RETRIES; retry++) {
+        const baseVersion = collectionsVersionRef.current;
+        const payload = {
+          baseVersion,
+          likedTracks: currentLikes,
+          deletedLikes: deletedLikesRef.current,
+          customPlaylists: currentPlaylists,
+          deletedPlaylists: deletedPlaylistsRef.current
+        };
+
+        const res = await fetch('/api/collections', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+
+        if (res.status === 409) {
+          const conflictBody = await res.json().catch(() => ({}));
+          const mergedState = applyMergedSnapshotToClientState(
+            activeUser.id,
+            {
+              likedTracks: currentLikes,
+              deletedLikes: deletedLikesRef.current,
+              customPlaylists: currentPlaylists,
+              deletedPlaylists: deletedPlaylistsRef.current
+            },
+            conflictBody
+          );
+
+          currentLikes = sanitizeLikedTracksList(mergedState.likedTracks);
+          currentPlaylists = mergedState.customPlaylists.map(pl => ({
+            ...pl,
+            tracks: sanitizeLikedTracksList(deduplicateTracksList(pl.tracks || [])),
+            deletedTracks: normalizeTombstoneList(pl.deletedTracks)
+          }));
+
+          if (retry < MAX_COLLECTION_SYNC_RETRIES) {
+            continue;
+          }
+
+          markCollectionsDirtyOffline();
+          setSyncState(prev => ({ ...prev, status: 'conflict' }));
+          setSyncConflictNotice(
+            'No se pudo completar el guardado en la nube tras 3 reintentos por cambios simultáneos en otro dispositivo. Tus canciones y playlists locales se conservaron intactas.'
+          );
+          return false;
+        }
+
+        if (!res.ok) {
+          markCollectionsDirtyOffline();
+          setSyncState(prev => ({ ...prev, status: 'error' }));
+          return false;
+        }
+
+        const data = await res.json().catch(() => ({}));
+        if (Number.isInteger(data.version)) {
+          persistCollectionsVersion(activeUser.id, data.version);
+        }
+        try {
+          localStorage.setItem(SYNCED_UID_STORAGE_KEY, String(activeUser.id));
+          localStorage.removeItem(COLLECTIONS_DIRTY_KEY);
+        } catch {}
+        setSyncConflictNotice('');
+        setSyncState({ status: 'synced', updatedAt: data.updatedAt || Date.now() });
+        return true;
       }
-      const data = await res.json().catch(() => ({}));
-      try {
-        localStorage.setItem(SYNCED_UID_STORAGE_KEY, String(activeUser.id));
-        localStorage.removeItem(COLLECTIONS_DIRTY_KEY);
-      } catch {}
-      setSyncState({ status: 'synced', updatedAt: data.updatedAt || Date.now() });
-      return true;
+      return false;
     } catch {
       markCollectionsDirtyOffline();
       setSyncState(prev => ({ ...prev, status: 'error' }));
       return false;
+    } finally {
+      pushInFlightRef.current = false;
+      if (pendingSaveAfterReconcileRef.current && !reconcilingCollectionsRef.current) {
+        pendingSaveAfterReconcileRef.current = false;
+        scheduleCollectionsSync(false);
+      }
     }
   }
 
   function scheduleCollectionsSync(immediate = false, likesOverride = null, playlistsOverride = null) {
     const activeUser = userRef.current;
     if (!activeUser || activeUser.offline || !activeUser.id) return;
+    markCollectionsDirtyOffline();
     if (isOfflineRef.current || collectionsHydratedForUserRef.current !== String(activeUser.id)) {
-      markCollectionsDirtyOffline();
+      return;
+    }
+    if (reconcilingCollectionsRef.current) {
+      pendingSaveAfterReconcileRef.current = true;
       return;
     }
     if (syncDebounceTimerRef.current) {
@@ -1272,6 +1477,69 @@ export default function HomePage() {
     }, 650);
   }
 
+  async function reconcileCollectionsOnAppReturn() {
+    const activeUser = userRef.current;
+    if (!activeUser || activeUser.offline || !activeUser.id || isOfflineRef.current) return;
+    if (collectionsHydratedForUserRef.current !== String(activeUser.id)) return;
+    if (reconcilingCollectionsRef.current) return;
+
+    const now = Date.now();
+    if (now - lastFocusReconcileAtRef.current < 1200) return;
+    lastFocusReconcileAtRef.current = now;
+
+    let hadUnsavedLocal = pendingSaveAfterReconcileRef.current;
+    if (syncDebounceTimerRef.current) {
+      clearTimeout(syncDebounceTimerRef.current);
+      syncDebounceTimerRef.current = null;
+      hadUnsavedLocal = true;
+    }
+    try {
+      if (localStorage.getItem(COLLECTIONS_DIRTY_KEY) === '1') {
+        hadUnsavedLocal = true;
+      }
+    } catch {}
+
+    reconcilingCollectionsRef.current = true;
+    try {
+      const res = await fetch('/api/collections', { cache: 'no-store' });
+      if (!res.ok) return;
+      const serverData = await res.json();
+
+      if (!serverData.hasSnapshot) {
+        persistCollectionsVersion(activeUser.id, 0);
+        return;
+      }
+
+      const prevServerVer = collectionsVersionRef.current;
+      applyMergedSnapshotToClientState(
+        activeUser.id,
+        {
+          likedTracks: sanitizeLikedTracksList(likedTracksRef.current),
+          deletedLikes: deletedLikesRef.current,
+          customPlaylists: (customPlaylistsRef.current || []).map(pl => ({
+            ...pl,
+            tracks: sanitizeLikedTracksList(deduplicateTracksList(pl.tracks || [])),
+            deletedTracks: normalizeTombstoneList(pl.deletedTracks)
+          })),
+          deletedPlaylists: deletedPlaylistsRef.current
+        },
+        serverData
+      );
+
+      if (!hadUnsavedLocal && serverData.version >= prevServerVer) {
+        setSyncState({ status: 'synced', updatedAt: serverData.updatedAt || Date.now() });
+      }
+    } catch {
+      // Keep local state untouched on transient network errors
+    } finally {
+      reconcilingCollectionsRef.current = false;
+      if (hadUnsavedLocal || pendingSaveAfterReconcileRef.current) {
+        pendingSaveAfterReconcileRef.current = false;
+        pushCollectionsToServerNow();
+      }
+    }
+  }
+
   function mergePlaylistsByIdOrName(primaryList, secondaryList) {
     const out = [];
     const byId = new Map();
@@ -1286,7 +1554,9 @@ export default function HomePage() {
           id: pl.id || `pl_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
           name: String(pl.name).trim(),
           createdAt: Number(pl.createdAt) || Date.now(),
-          tracks: deduplicateTracksList(pl.tracks || [])
+          updatedAt: Number(pl.updatedAt) || Number(pl.createdAt) || Date.now(),
+          tracks: deduplicateTracksList(pl.tracks || []),
+          deletedTracks: normalizeTombstoneList(pl.deletedTracks)
         };
         byId.set(String(copy.id), copy);
         byName.set(normName, copy);
@@ -1300,6 +1570,7 @@ export default function HomePage() {
 
   async function syncCollectionsWithServer(userId) {
     if (!userId || isOfflineRef.current) return;
+    reconcilingCollectionsRef.current = true;
     setSyncState(prev => ({ ...prev, status: 'syncing' }));
     try {
       const res = await fetch('/api/collections', { cache: 'no-store' });
@@ -1321,7 +1592,8 @@ export default function HomePage() {
           if (Array.isArray(parsedP)) {
             localPlaylists = parsedP.map(pl => ({
               ...pl,
-              tracks: deduplicateTracksList(pl.tracks || [])
+              tracks: deduplicateTracksList(pl.tracks || []),
+              deletedTracks: normalizeTombstoneList(pl.deletedTracks)
             }));
           }
         }
@@ -1334,25 +1606,25 @@ export default function HomePage() {
         wasDirtyOffline = localStorage.getItem(COLLECTIONS_DIRTY_KEY) === '1';
       } catch {}
 
-      const reattachOfflinePointers = list =>
-        deduplicateTracksList(list).map(tr => {
-          const off = findOfflineItem(tr);
-          if (!off) return tr;
-          return {
-            ...tr,
-            filename: off.filename || tr.filename || null,
-            streamUrl: off.streamUrl || tr.streamUrl || null,
-            artwork: !isPlaceholderCover(tr.artwork) ? tr.artwork : off.artwork || tr.artwork
-          };
-        });
-
       collectionsHydratedForUserRef.current = String(userId);
 
+      // If switching to a different user on the same browser without prior sync for that user,
+      // do not leak the previous account's cached local tracks into the new user's snapshot.
+      const isDifferentPreviousAccount = Boolean(syncedUid && syncedUid !== String(userId));
+      if (isDifferentPreviousAccount) {
+        localLikes = [];
+        localPlaylists = [];
+        persistDeletedLikes([]);
+        persistDeletedPlaylists([]);
+      }
+
       if (!data.hasSnapshot) {
+        persistCollectionsVersion(userId, 0);
         try {
           localStorage.setItem(SYNCED_UID_STORAGE_KEY, String(userId));
           localStorage.removeItem(COLLECTIONS_DIRTY_KEY);
         } catch {}
+        reconcilingCollectionsRef.current = false;
         if (localLikes.length > 0 || localPlaylists.length > 0) {
           await pushCollectionsToServerNow(localLikes, localPlaylists);
         } else {
@@ -1361,40 +1633,43 @@ export default function HomePage() {
         return;
       }
 
-      const serverLikes = Array.isArray(data.likedTracks) ? data.likedTracks : [];
-      const serverPlaylists = Array.isArray(data.customPlaylists) ? data.customPlaylists : [];
-      const shouldUnionMerge = syncedUid !== String(userId) || wasDirtyOffline;
+      const localSnapForMerge =
+        wasDirtyOffline || !syncedUid
+          ? {
+              likedTracks: localLikes,
+              deletedLikes: deletedLikesRef.current,
+              customPlaylists: localPlaylists,
+              deletedPlaylists: deletedPlaylistsRef.current
+            }
+          : {
+              likedTracks: [],
+              deletedLikes: [],
+              customPlaylists: [],
+              deletedPlaylists: []
+            };
 
-      const resolvedLikes = reattachOfflinePointers(
-        shouldUnionMerge ? [...localLikes, ...serverLikes] : serverLikes
-      );
-      const rawResolvedPlaylists = shouldUnionMerge
-        ? mergePlaylistsByIdOrName(serverPlaylists, localPlaylists)
-        : serverPlaylists;
-      const resolvedPlaylists = rawResolvedPlaylists.map(pl => ({
-        ...pl,
-        tracks: reattachOfflinePointers(pl.tracks || [])
-      }));
-
-      setLikedTracks(resolvedLikes);
-      likedTracksRef.current = resolvedLikes;
-      setCustomPlaylists(resolvedPlaylists);
-      customPlaylistsRef.current = resolvedPlaylists;
+      const merged = applyMergedSnapshotToClientState(userId, localSnapForMerge, data);
 
       try {
-        localStorage.setItem(LIKES_STORAGE_KEY, JSON.stringify(resolvedLikes));
-        localStorage.setItem(PLAYLISTS_STORAGE_KEY, JSON.stringify(resolvedPlaylists));
         localStorage.setItem(SYNCED_UID_STORAGE_KEY, String(userId));
-        localStorage.removeItem(COLLECTIONS_DIRTY_KEY);
+        if (!wasDirtyOffline) {
+          localStorage.removeItem(COLLECTIONS_DIRTY_KEY);
+        }
       } catch {}
 
-      if (shouldUnionMerge && (localLikes.length > 0 || localPlaylists.length > 0)) {
-        await pushCollectionsToServerNow(resolvedLikes, resolvedPlaylists);
+      reconcilingCollectionsRef.current = false;
+
+      if (
+        (wasDirtyOffline || (!syncedUid && (localLikes.length > 0 || localPlaylists.length > 0)))
+      ) {
+        await pushCollectionsToServerNow(merged.likedTracks, merged.customPlaylists);
       } else {
         setSyncState({ status: 'synced', updatedAt: data.updatedAt || Date.now() });
       }
     } catch {
       setSyncState(prev => ({ ...prev, status: 'error' }));
+    } finally {
+      reconcilingCollectionsRef.current = false;
     }
   }
 
@@ -1641,6 +1916,7 @@ export default function HomePage() {
   }
 
   function toggleLike(track) {
+    const now = Date.now();
     if (isLiked(track.id)) {
       if (track?.source === 'own' && String(track.id || '').startsWith('upl_')) {
         try {
@@ -1649,6 +1925,10 @@ export default function HomePage() {
           localStorage.setItem(UNLIKED_OWN_STORAGE_KEY, JSON.stringify(nextUnliked));
         } catch {}
       }
+      persistDeletedLikes([
+        { id: String(track.id), deletedAt: now },
+        ...deletedLikesRef.current
+      ]);
       persistLikes(likedTracks.filter(t => String(t.id) !== String(track.id)));
     } else {
       if (track?.source === 'own' && String(track.id || '').startsWith('upl_')) {
@@ -1662,12 +1942,16 @@ export default function HomePage() {
           }
         } catch {}
       }
+      persistDeletedLikes(
+        deletedLikesRef.current.filter(item => String(item.id) !== String(track.id))
+      );
       const existingDl = downloads[track.id];
       const offMatch = offlineCatalog.find(t => String(t.id) === String(track.id));
       const filename = existingDl?.filename || offMatch?.filename || track.filename || null;
       const entry = {
         ...track,
-        addedAt: Date.now(),
+        addedAt: now,
+        updatedAt: now,
         filename,
         streamUrl: filename
           ? `/api/stream?file=${encodeURIComponent(filename)}`
@@ -1683,13 +1967,26 @@ export default function HomePage() {
   function createCustomPlaylist(name, initialTracks = []) {
     const clean = (name || '').trim();
     if (!clean) return null;
-    const dedupedInitial = deduplicateTracksList(initialTracks);
+    const now = Date.now();
+    const dedupedInitial = deduplicateTracksList(initialTracks).map(tr => ({
+      ...tr,
+      addedAt: Number(tr.addedAt) || now,
+      updatedAt: Number(tr.updatedAt) || now
+    }));
     const existingPl = customPlaylists.find(
       p => String(p.name || '').trim().toLowerCase() === clean.toLowerCase()
     );
     if (existingPl) {
+      const addedIds = new Set(dedupedInitial.map(tr => String(tr.id)));
       const mergedTracks = deduplicateTracksList([...dedupedInitial, ...(existingPl.tracks || [])]);
-      const updatedPl = { ...existingPl, tracks: mergedTracks };
+      const updatedPl = {
+        ...existingPl,
+        updatedAt: now,
+        tracks: mergedTracks,
+        deletedTracks: normalizeTombstoneList(existingPl.deletedTracks).filter(
+          d => !addedIds.has(String(d.id))
+        )
+      };
       const next = customPlaylists.map(p => (p.id === existingPl.id ? updatedPl : p));
       persistCustomPlaylists(next);
       if (dedupedInitial.some(t => isPlaceholderCover(t?.artwork))) {
@@ -1698,10 +1995,12 @@ export default function HomePage() {
       return updatedPl;
     }
     const newPl = {
-      id: `pl_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      id: `pl_${now}_${Math.random().toString(36).slice(2, 6)}`,
       name: clean,
-      createdAt: Date.now(),
-      tracks: dedupedInitial
+      createdAt: now,
+      updatedAt: now,
+      tracks: dedupedInitial,
+      deletedTracks: []
     };
     const next = [...customPlaylists, newPl];
     persistCustomPlaylists(next);
@@ -1712,6 +2011,11 @@ export default function HomePage() {
   }
 
   function deleteCustomPlaylist(playlistId) {
+    const now = Date.now();
+    persistDeletedPlaylists([
+      { id: String(playlistId), deletedAt: now },
+      ...deletedPlaylistsRef.current
+    ]);
     const next = customPlaylists.filter(p => p.id !== playlistId);
     persistCustomPlaylists(next);
     if (selectedLibrary === playlistId) {
@@ -1720,12 +2024,14 @@ export default function HomePage() {
   }
 
   function toggleTrackInPlaylist(playlistId, track) {
+    const now = Date.now();
     const existingDl = downloads[track.id];
     const offMatch = offlineCatalog.find(t => String(t.id) === String(track.id));
     const filename = existingDl?.filename || offMatch?.filename || track.filename || null;
     const preparedTrack = {
       ...track,
-      addedAt: Date.now(),
+      addedAt: now,
+      updatedAt: now,
       filename,
       streamUrl: filename
         ? `/api/stream?file=${encodeURIComponent(filename)}`
@@ -1737,11 +2043,16 @@ export default function HomePage() {
       if (pl.id !== playlistId) return pl;
       const exists = pl.tracks.some(t => String(t.id) === String(track.id));
       if (!exists) addedNew = true;
+      const prevDeleted = normalizeTombstoneList(pl.deletedTracks);
       return {
         ...pl,
+        updatedAt: now,
         tracks: exists
           ? pl.tracks.filter(t => String(t.id) !== String(track.id))
-          : [preparedTrack, ...pl.tracks]
+          : [preparedTrack, ...pl.tracks],
+        deletedTracks: exists
+          ? normalizeTombstoneList([{ id: String(track.id), deletedAt: now }, ...prevDeleted])
+          : prevDeleted.filter(d => String(d.id) !== String(track.id))
       };
     });
     persistCustomPlaylists(next);
@@ -1751,12 +2062,69 @@ export default function HomePage() {
   }
 
   function removeTrackFromPlaylist(playlistId, trackId) {
+    const now = Date.now();
     const next = customPlaylists.map(pl =>
       pl.id === playlistId
-        ? { ...pl, tracks: pl.tracks.filter(t => String(t.id) !== String(trackId)) }
+        ? {
+            ...pl,
+            updatedAt: now,
+            tracks: pl.tracks.filter(t => String(t.id) !== String(trackId)),
+            deletedTracks: normalizeTombstoneList([
+              { id: String(trackId), deletedAt: now },
+              ...normalizeTombstoneList(pl.deletedTracks)
+            ])
+          }
         : pl
     );
     persistCustomPlaylists(next);
+  }
+
+  async function deleteOwnUploadEverywhere(track) {
+    const uploadId = resolveOwnUploadId(track);
+    if (!uploadId) return;
+    const now = Date.now();
+
+    deleteOfflineTrack(track);
+
+    persistDeletedLikes([{ id: uploadId, deletedAt: now }, ...deletedLikesRef.current]);
+    const nextLikes = likedTracksRef.current.filter(
+      t => String(t.id) !== uploadId && resolveOwnUploadId(t) !== uploadId
+    );
+    const nextPls = (customPlaylistsRef.current || []).map(pl => {
+      const had = (pl.tracks || []).some(
+        t => String(t.id) === uploadId || resolveOwnUploadId(t) === uploadId
+      );
+      if (!had) return pl;
+      return {
+        ...pl,
+        updatedAt: now,
+        tracks: (pl.tracks || []).filter(
+          t => String(t.id) !== uploadId && resolveOwnUploadId(t) !== uploadId
+        ),
+        deletedTracks: normalizeTombstoneList([
+          { id: uploadId, deletedAt: now },
+          ...normalizeTombstoneList(pl.deletedTracks)
+        ])
+      };
+    });
+
+    setLikedTracks(nextLikes);
+    likedTracksRef.current = nextLikes;
+    setCustomPlaylists(nextPls);
+    customPlaylistsRef.current = nextPls;
+    try {
+      localStorage.setItem(LIKES_STORAGE_KEY, JSON.stringify(nextLikes));
+      localStorage.setItem(PLAYLISTS_STORAGE_KEY, JSON.stringify(nextPls));
+    } catch {}
+    scheduleCollectionsSync(true, nextLikes, nextPls);
+
+    if (!isOfflineRef.current) {
+      try {
+        await fetch(`/api/upload/${encodeURIComponent(uploadId)}?record=1`, {
+          method: 'DELETE'
+        });
+      } catch {}
+    }
   }
 
   function openTrackMenu(track, contextLibrary = null) {
@@ -2018,12 +2386,13 @@ export default function HomePage() {
   }
 
   function updateTrackFileAcrossLibraries(trackId, filename, streamUrl) {
+    const now = Date.now();
     let collectionsChanged = false;
     setLikedTracks(prev => {
       if (!prev.some(t => String(t.id) === String(trackId))) return prev;
       collectionsChanged = true;
       const updated = prev.map(t =>
-        String(t.id) === String(trackId) ? { ...t, filename, streamUrl } : t
+        String(t.id) === String(trackId) ? { ...t, filename, streamUrl, updatedAt: now } : t
       );
       likedTracksRef.current = updated;
       try {
@@ -2039,8 +2408,9 @@ export default function HomePage() {
         changed = true;
         return {
           ...pl,
+          updatedAt: now,
           tracks: pl.tracks.map(t =>
-            String(t.id) === String(trackId) ? { ...t, filename, streamUrl } : t
+            String(t.id) === String(trackId) ? { ...t, filename, streamUrl, updatedAt: now } : t
           )
         };
       });
@@ -2061,6 +2431,8 @@ export default function HomePage() {
   }
 
   function updateTrackMetadataAcrossLibraries(trackId, patch, targetFilename = null) {
+    const now = Date.now();
+    const stampedPatch = { ...patch, updatedAt: now };
     const resolvedTargetUploadId = resolveOwnUploadId({
       id: trackId,
       uploadId: trackId,
@@ -2081,7 +2453,7 @@ export default function HomePage() {
     setLikedTracks(prev => {
       if (!prev.some(matchesTarget)) return prev;
       collectionsChanged = true;
-      const updated = prev.map(t => (matchesTarget(t) ? { ...t, ...patch } : t));
+      const updated = prev.map(t => (matchesTarget(t) ? { ...t, ...stampedPatch } : t));
       likedTracksRef.current = updated;
       try {
         localStorage.setItem(LIKES_STORAGE_KEY, JSON.stringify(updated));
@@ -2091,7 +2463,7 @@ export default function HomePage() {
 
     setOfflineCatalog(prev => {
       if (!prev.some(matchesTarget)) return prev;
-      const updated = prev.map(t => (matchesTarget(t) ? { ...t, ...patch } : t));
+      const updated = prev.map(t => (matchesTarget(t) ? { ...t, ...stampedPatch } : t));
       try {
         localStorage.setItem(OFFLINE_CATALOG_KEY, JSON.stringify(updated));
       } catch {}
@@ -2105,7 +2477,8 @@ export default function HomePage() {
         changed = true;
         return {
           ...pl,
-          tracks: pl.tracks.map(t => (matchesTarget(t) ? { ...t, ...patch } : t))
+          updatedAt: now,
+          tracks: pl.tracks.map(t => (matchesTarget(t) ? { ...t, ...stampedPatch } : t))
         };
       });
       if (changed) {
@@ -5358,6 +5731,32 @@ export default function HomePage() {
         </div>
       )}
 
+      {syncConflictNotice && (
+        <div className="offline-pill-bar" role="status" aria-live="polite">
+          <div className="offline-pill-copy">
+            <Icon name="refresh" size={14} />
+            <div className="offline-pill-text">
+              <strong>Sincronización pendiente</strong>
+              <span>{syncConflictNotice}</span>
+            </div>
+          </div>
+          <div className="offline-pill-actions">
+            <button
+              type="button"
+              onClick={() => {
+                setSyncConflictNotice('');
+                pushCollectionsToServerNow();
+              }}
+            >
+              Reintentar
+            </button>
+            <button type="button" onClick={() => setSyncConflictNotice('')}>
+              Cerrar
+            </button>
+          </div>
+        </div>
+      )}
+
       {/* ==================== TAB 1: EXPLORAR ==================== */}
       {activeTab === 'explore' && (
         <section className="tab-section">
@@ -6087,6 +6486,22 @@ export default function HomePage() {
                 >
                   <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
                     <Icon name="trash" size={15} /> Borrar descarga Offline del dispositivo
+                  </span>
+                </button>
+              )}
+
+              {resolveOwnUploadId(menuTrack.track) && (
+                <button
+                  type="button"
+                  className="dialog-option danger"
+                  onClick={() => {
+                    const target = menuTrack.track;
+                    closeTrackMenu();
+                    deleteOwnUploadEverywhere(target);
+                  }}
+                >
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+                    <Icon name="trash" size={15} /> Eliminar canción subida de mi cuenta
                   </span>
                 </button>
               )}

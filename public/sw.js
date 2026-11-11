@@ -1,4 +1,4 @@
-const STATIC_CACHE = 'mymusic-shell-v26';
+const STATIC_CACHE = 'mymusic-shell-v27';
 const AUDIO_CACHE = 'my-music-offline-audio-v1';
 
 function inferAudioMimeFromUrl(reqUrl, cachedResponse) {
@@ -128,7 +128,30 @@ self.addEventListener('fetch', (event) => {
     return;
   }
 
-  // 2. Live API endpoints: pass through to network
+  // 2. Authenticated upload covers (/api/cover/<uploadId>): network-first so online auth/ownership
+  // checks always apply, caching 200 responses for offline playback and evicting on 401/403/404.
+  if (url.pathname.startsWith('/api/cover/')) {
+    event.respondWith(
+      caches.open(STATIC_CACHE).then(async (cache) => {
+        try {
+          const response = await fetch(event.request);
+          if (response && response.ok) {
+            cache.put(event.request, response.clone());
+          } else if (response && (response.status === 401 || response.status === 403 || response.status === 404)) {
+            cache.delete(event.request);
+          }
+          return response;
+        } catch {
+          const cachedCover = await cache.match(event.request);
+          if (cachedCover) return cachedCover;
+          return (await cache.match('/icon.svg?v=3')) || new Response('Offline', { status: 503 });
+        }
+      })
+    );
+    return;
+  }
+
+  // 3. Live API endpoints: pass through to network
   if (url.pathname.startsWith('/api/')) {
     return;
   }
