@@ -13,13 +13,21 @@ import {
   normalizeListeningEntry
 } from '../lib/listening-shared';
 import { readListeningStateFromIdb, writeListeningStateToIdb } from '../lib/listening-idb';
+import {
+  formatLocalDateKey,
+  generateAutoPlaylists,
+  getTopAffinityArtists,
+  isRealGenre
+} from '../lib/autoplaylists';
 import PlayerScrubber from './components/PlayerScrubber';
 import SettingsPanel from './components/SettingsPanel';
 import AdminPanel from './components/AdminPanel';
+import ForYouPanel from './components/ForYouPanel';
 
 const AUDIO_CACHE_NAME = 'my-music-offline-audio-v1';
-const SHELL_CACHE_NAME = 'mymusic-shell-v27';
+const SHELL_CACHE_NAME = 'mymusic-shell-v28';
 const DEFAULT_TRACK_COVER = '/icon.svg?v=3';
+const FORYOU_RECS_STORAGE_KEY = 'mma_foryou_recs_v1';
 const USER_STORAGE_KEY = 'mma_cached_user_v1';
 const LIKES_STORAGE_KEY = 'mma_liked_tracks_v1';
 const DELETED_LIKES_STORAGE_KEY = 'mma_deleted_likes_v1';
@@ -421,6 +429,13 @@ function Icon({ name, size = 16, className = '' }) {
           <path d="M16.5 3.5a2.12 2.12 0 0 1 3 3L7 19l-4 1 1-4 12.5-12.5z" />
         </svg>
       );
+    case 'sparkles':
+      return (
+        <svg {...props}>
+          <path d="M12 3l1.9 5.3L19 10.2l-5.1 1.9L12 17.4l-1.9-5.3L5 10.2l5.1-1.9L12 3z" />
+          <path d="M19 3v4M17 5h4M6 17v3M4.5 18.5h3" />
+        </svg>
+      );
     default:
       return null;
   }
@@ -539,6 +554,11 @@ export default function HomePage() {
   const [syncState, setSyncState] = useState({ status: 'idle', updatedAt: null });
   const [syncConflictNotice, setSyncConflictNotice] = useState('');
   const [listeningEntries, setListeningEntries] = useState({});
+  const [forYouRecommendations, setForYouRecommendations] = useState([]);
+  const [forYouRefreshNonce, setForYouRefreshNonce] = useState(0);
+  const [forYouRefreshing, setForYouRefreshing] = useState(false);
+  const [forYouSavedMap, setForYouSavedMap] = useState({});
+  const forYouLastFetchKeyRef = useRef('');
   const [backupMsg, setBackupMsg] = useState({ type: '', text: '' });
   const [syncingAll, setSyncingAll] = useState(false);
   const [syncProgress, setSyncProgress] = useState({ done: 0, total: 0 });
@@ -874,6 +894,16 @@ export default function HomePage() {
       }
     } catch {}
 
+    try {
+      const savedRecs = localStorage.getItem(FORYOU_RECS_STORAGE_KEY);
+      if (savedRecs) {
+        const parsedRecs = JSON.parse(savedRecs);
+        if (Array.isArray(parsedRecs)) {
+          setForYouRecommendations(parsedRecs);
+        }
+      }
+    } catch {}
+
     const offlineNow = typeof navigator !== 'undefined' && !navigator.onLine;
     setIsOffline(offlineNow);
     wasOfflineRef.current = offlineNow;
@@ -906,7 +936,7 @@ export default function HomePage() {
       .catch(async () => {
         const alive = await verifyInternetConnection();
         if (!alive) {
-          setActiveTab('library');
+          rawSetActiveTab(prev => (prev === 'foryou' ? 'foryou' : 'library'));
           setSelectedLibrary('offline');
           setUser(prev => prev || cachedUser || { username: 'Offline', is_admin: false, offline: true });
         }
@@ -5114,7 +5144,11 @@ export default function HomePage() {
 
   function playFromList(list, index, startRandom = false, options = {}) {
     if (!Array.isArray(list) || list.length === 0) return;
-    const { forceIncludeTrack = null, allowSinglePreview = false } = options || {};
+    const {
+      forceIncludeTrack = null,
+      allowSinglePreview = false,
+      preserveOrder = false
+    } = options || {};
     const clickedTrack = index >= 0 && index < list.length ? list[index] : null;
 
     if (allowSinglePreview && clickedTrack && !isTrackAvailableOffline(clickedTrack)) {
@@ -5143,6 +5177,15 @@ export default function HomePage() {
 
     queueRef.current = playableList;
     setQueue(playableList);
+
+    if (preserveOrder && !startRandom) {
+      shuffleRef.current = false;
+      setShuffle(false);
+      shuffleStateRef.current = { order: [], pos: -1, queueLen: playableList.length };
+      startTrackAtIndexImmediate(mappedIdx, playableList);
+      return;
+    }
+
     if (!shuffleRef.current) {
       shuffleRef.current = true;
       setShuffle(true);
@@ -5679,6 +5722,189 @@ export default function HomePage() {
     );
   }
 
+  const topAffinityArtistsList = useMemo(() => {
+    const likedSet = new Set(likedTracks.filter(Boolean).map(t => String(t.id)));
+    const combinedPool = [
+      ...likedTracks,
+      ...customPlaylists.flatMap(p => p?.tracks || []),
+      ...offlineCatalog
+    ];
+    return getTopAffinityArtists(combinedPool, listeningEntries, { likedIds: likedSet }, 6).map(
+      a => a.displayName
+    );
+  }, [likedTracks, customPlaylists, offlineCatalog, listeningEntries]);
+
+  const topRealGenresList = useMemo(() => {
+    const counts = new Map();
+    const combinedPool = [
+      ...likedTracks,
+      ...customPlaylists.flatMap(p => p?.tracks || []),
+      ...offlineCatalog
+    ];
+    for (const tr of combinedPool) {
+      if (!tr || !isRealGenre(tr.genre)) continue;
+      const g = tr.genre.trim();
+      counts.set(g, (counts.get(g) || 0) + 1);
+    }
+    return Array.from(counts.entries())
+      .sort((a, b) => b[1] - a[1])
+      .map(([g]) => g)
+      .slice(0, 4);
+  }, [likedTracks, customPlaylists, offlineCatalog]);
+
+  useEffect(() => {
+    if (!user || isOffline) return;
+    if (activeTab !== 'foryou' && forYouRecommendations.length > 0) return;
+
+    const dateKey = formatLocalDateKey(new Date());
+    const uid = String(user.id || user.username || 'anon');
+    const seedSignature = `${uid}:${dateKey}:${topAffinityArtistsList
+      .slice(0, 3)
+      .join('|')}:${forYouRefreshNonce}`;
+    if (forYouLastFetchKeyRef.current === seedSignature) return;
+    forYouLastFetchKeyRef.current = seedSignature;
+
+    const allKnown = [
+      ...likedTracks,
+      ...customPlaylists.flatMap(p => p?.tracks || []),
+      ...offlineCatalog
+    ];
+    const excludeKeys = Array.from(
+      new Set(
+        allKnown
+          .map(
+            t =>
+              `${String(t?.title || '').trim().toLowerCase()}|${String(t?.artist || '')
+                .trim()
+                .toLowerCase()}`
+          )
+          .filter(k => k && k !== '|')
+      )
+    ).slice(0, 400);
+
+    let cancelled = false;
+    setForYouRefreshing(true);
+
+    fetch('/api/recommend', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        mode: topAffinityArtistsList.length > 0 ? 'recommended' : 'random',
+        seed: `${uid}:${dateKey}:${forYouRefreshNonce}`,
+        artists: topAffinityArtistsList,
+        genres: topRealGenresList,
+        excludeKeys
+      })
+    })
+      .then(async res => {
+        if (!res.ok) return;
+        const data = await res.json().catch(() => ({}));
+        if (cancelled) return;
+        const nextTracks = Array.isArray(data.tracks) ? data.tracks : [];
+        if (nextTracks.length > 0) {
+          setForYouRecommendations(nextTracks);
+          try {
+            localStorage.setItem(FORYOU_RECS_STORAGE_KEY, JSON.stringify(nextTracks));
+          } catch {}
+        }
+      })
+      .catch(() => {})
+      .finally(() => {
+        if (!cancelled) setForYouRefreshing(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    user,
+    isOffline,
+    activeTab,
+    topAffinityArtistsList,
+    topRealGenresList,
+    forYouRefreshNonce
+  ]);
+
+  const autoPlaylistsData = useMemo(() => {
+    const uid = String(user?.id || user?.username || 'anon');
+    const dateKey = formatLocalDateKey(new Date());
+    const filterIfOffline = list =>
+      isOffline
+        ? (Array.isArray(list) ? list : []).filter(t => isTrackAvailableOffline(t))
+        : Array.isArray(list)
+        ? list
+        : [];
+
+    const scopedCustomPlaylists = isOffline
+      ? customPlaylists.map(pl => ({
+          ...pl,
+          tracks: filterIfOffline(pl?.tracks)
+        }))
+      : customPlaylists;
+
+    return generateAutoPlaylists({
+      userId: uid,
+      dateKey,
+      tracksPool: filterIfOffline(offlineCatalog),
+      likedTracks: filterIfOffline(likedTracks),
+      customPlaylists: scopedCustomPlaylists,
+      listeningEntries,
+      recommendedTracks: filterIfOffline(forYouRecommendations),
+      refreshNonce: forYouRefreshNonce
+    });
+  }, [
+    user?.id,
+    user?.username,
+    isOffline,
+    offlineCatalog,
+    likedTracks,
+    customPlaylists,
+    listeningEntries,
+    forYouRecommendations,
+    forYouRefreshNonce,
+    offlineUrls
+  ]);
+
+  function handleRefreshForYou() {
+    setForYouSavedMap({});
+    setForYouRefreshNonce(n => n + 1);
+  }
+
+  function handlePlayAutoPlaylist(playlist, startRandom = false) {
+    const tracks = Array.isArray(playlist?.tracks) ? playlist.tracks : [];
+    if (tracks.length === 0) return;
+
+    const offlineReady = tracks.filter(t => isTrackAvailableOffline(t));
+    if (offlineReady.length > 0) {
+      playFromList(tracks, 0, startRandom, { preserveOrder: !startRandom });
+      return;
+    }
+
+    if (!isOffline) {
+      const targetIdx = startRandom ? Math.floor(Math.random() * tracks.length) : 0;
+      openDownloadPromptModal(tracks[targetIdx], tracks, targetIdx);
+    }
+  }
+
+  function handleSelectForYouTrack(track, list, idx) {
+    if (!track) return;
+    if (isTrackAvailableOffline(track)) {
+      playFromList(list, idx, false, { preserveOrder: true });
+      return;
+    }
+    if (!isOffline) {
+      openDownloadPromptModal(track, list, idx);
+    }
+  }
+
+  function handleSaveAutoPlaylist(playlist) {
+    if (!playlist || !Array.isArray(playlist.tracks) || playlist.tracks.length === 0) return;
+    const saved = createCustomPlaylist(playlist.title, playlist.tracks);
+    if (saved) {
+      setForYouSavedMap(prev => ({ ...prev, [playlist.id]: true }));
+    }
+  }
+
   if (!authChecked) {
     return (
       <main className="app-shell">
@@ -5968,6 +6194,7 @@ export default function HomePage() {
             className={`nav-link ${activeTab === 'explore' ? 'active' : ''} ${
               isOffline ? 'offline-nav-item' : ''
             }`.trim()}
+            aria-current={activeTab === 'explore' ? 'page' : undefined}
             onClick={() => setActiveTab('explore')}
           >
             <Icon name="search" size={16} />
@@ -5976,7 +6203,18 @@ export default function HomePage() {
 
           <button
             type="button"
+            className={`nav-link ${activeTab === 'foryou' ? 'active' : ''}`.trim()}
+            aria-current={activeTab === 'foryou' ? 'page' : undefined}
+            onClick={() => setActiveTab('foryou')}
+          >
+            <Icon name="sparkles" size={16} />
+            <span>Para ti</span>
+          </button>
+
+          <button
+            type="button"
             className={`nav-link ${activeTab === 'library' ? 'active' : ''}`}
+            aria-current={activeTab === 'library' ? 'page' : undefined}
             onClick={() => setActiveTab('library')}
           >
             <Icon name="heart" size={16} />
@@ -6680,6 +6918,28 @@ export default function HomePage() {
           ytCookiesMsg={ytCookiesMsg}
           onSaveYtCookies={saveYtCookiesContent}
           onClearYtCookies={handleClearYtCookies}
+        />
+      )}
+
+      {/* ==================== TAB: PARA TI (AUTOMATIC PLAYLISTS) ==================== */}
+      {activeTab === 'foryou' && (
+        <ForYouPanel
+          playlists={autoPlaylistsData.playlists}
+          coldStart={autoPlaylistsData.coldStart}
+          coldStartMessage={autoPlaylistsData.message}
+          totalPlays={autoPlaylistsData.totalPlays}
+          isOffline={isOffline}
+          isRefreshing={forYouRefreshing}
+          savedFeedbackMap={forYouSavedMap}
+          currentTrackId={currentTrack?.id ?? null}
+          isPlaying={isPlaying}
+          compressArtworkUrl={compressArtworkUrl}
+          isTrackAvailableOffline={isTrackAvailableOffline}
+          onRefresh={handleRefreshForYou}
+          onPlayPlaylist={handlePlayAutoPlaylist}
+          onSaveAsPlaylist={handleSaveAutoPlaylist}
+          onSelectTrack={handleSelectForYouTrack}
+          Icon={Icon}
         />
       )}
 
@@ -7630,6 +7890,16 @@ export default function HomePage() {
         >
           <Icon name="search" size={18} />
           <span>Explorar</span>
+        </button>
+
+        <button
+          type="button"
+          className={activeTab === 'foryou' ? 'active' : ''}
+          aria-current={activeTab === 'foryou' ? 'page' : undefined}
+          onClick={() => setActiveTab('foryou')}
+        >
+          <Icon name="sparkles" size={18} />
+          <span>Para ti</span>
         </button>
 
         <button
