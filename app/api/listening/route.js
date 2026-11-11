@@ -32,6 +32,14 @@ export async function PUT(request) {
     return Response.json({ error: 'No autorizado' }, { status: 401 });
   }
 
+  const declaredLen = parseInt(request.headers.get('content-length') || '0', 10);
+  if (Number.isFinite(declaredLen) && declaredLen > MAX_LISTENING_BODY_BYTES) {
+    return Response.json(
+      { error: 'El historial de escucha supera el límite permitido de 1 MB.' },
+      { status: 413 }
+    );
+  }
+
   let rawText = '';
   try {
     rawText = await request.text();

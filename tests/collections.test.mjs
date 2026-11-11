@@ -18,6 +18,8 @@ const mergeMod = await import('../lib/collections-merge.js');
 const collectionsRoute = await import('../app/api/collections/route.js');
 const coverRoute = await import('../app/api/cover/[id]/route.js');
 const uploadIdRoute = await import('../app/api/upload/[id]/route.js');
+const exportRoute = await import('../app/api/export/route.js');
+const listeningStoreMod = await import('../lib/listening-store.js');
 
 const {
   loadStore,
@@ -31,7 +33,8 @@ const {
   resolveSafeCoverPath,
   addUserUploadRecord,
   updateUserUploadMetadata,
-  migrateLegacyCollectionsIfNeeded
+  migrateLegacyCollectionsIfNeeded,
+  runStartupMigrations
 } = storeMod;
 
 const { mergeCollectionsSnapshots } = mergeMod;
@@ -643,4 +646,113 @@ test('PUT /api/collections rejects oversized bodies above 2 MB (413)', async () 
     })
   );
   assert.equal(res.status, 413);
+});
+
+test('loadStore is pure read-only (never migrates or writes) and startup migration preserves collections on partial failure until retry succeeds', () => {
+  const storeFile = path.join(tempDataDir, 'store.json');
+  const rawBefore = JSON.parse(fs.readFileSync(storeFile, 'utf8'));
+
+  const okUid = 'usr_mig_ok_01';
+  const failUid = 'usr_mig_fail_01';
+  const okColPath = path.join(tempDataDir, 'collections', `${okUid}.json`);
+  const failColPath = path.join(tempDataDir, 'collections', `${failUid}.json`);
+
+  rawBefore.collections = {
+    [okUid]: {
+      updatedAt: 9000,
+      likedTracks: [{ id: 'ok_song_1', title: 'Se Migra Bien', artist: 'Banda Uno' }],
+      customPlaylists: []
+    },
+    [failUid]: {
+      updatedAt: 9100,
+      likedTracks: [{ id: 'fail_song_1', title: 'No Perder Datos', artist: 'Banda Dos' }],
+      customPlaylists: []
+    }
+  };
+  fs.writeFileSync(storeFile, JSON.stringify(rawBefore, null, 2), 'utf8');
+  const diskSnapshotWithLegacy = fs.readFileSync(storeFile, 'utf8');
+
+  // 1. loadStore() and getUserCollections() MUST NOT write to store.json or migrate collections
+  const loaded = loadStore();
+  assert.ok(Array.isArray(loaded.users));
+  assert.equal(fs.readFileSync(storeFile, 'utf8'), diskSnapshotWithLegacy);
+  assert.equal(fs.existsSync(okColPath), false);
+  assert.equal(fs.existsSync(failColPath), false);
+
+  const readWithoutMig = getUserCollections(okUid);
+  assert.equal(readWithoutMig.hasSnapshot, false);
+  assert.equal(fs.existsSync(okColPath), false);
+
+  // 2. Simulate real disk write failure for failUid by placing a directory at its target JSON path
+  fs.mkdirSync(failColPath, { recursive: true });
+
+  const failedRun = runStartupMigrations();
+  assert.equal(failedRun.ok, false);
+  assert.equal(failedRun.partialFailure, true);
+  assert.ok(failedRun.failedUsers.includes(failUid));
+
+  // okUid was written, AND store.json STILL preserves collections so failUid is not lost
+  assert.equal(fs.existsSync(okColPath), true);
+  const storeAfterFail = JSON.parse(fs.readFileSync(storeFile, 'utf8'));
+  assert.equal(typeof storeAfterFail.collections, 'object');
+  assert.ok(storeAfterFail.collections[failUid]);
+
+  // Even an unrelated saveStore() call before the next restart must NOT wipe unmigrated collections
+  const mutatedStore = loadStore();
+  saveStore(mutatedStore);
+  const storeAfterUnrelatedSave = JSON.parse(fs.readFileSync(storeFile, 'utf8'));
+  assert.equal(typeof storeAfterUnrelatedSave.collections, 'object');
+  assert.ok(storeAfterUnrelatedSave.collections[failUid]);
+
+  // 3. Remove directory obstruction and retry on next startup -> succeeds idempotently & cleans store.json
+  fs.rmSync(failColPath, { recursive: true, force: true });
+  const retryRun = runStartupMigrations();
+  assert.equal(retryRun.ok, true);
+  assert.equal(retryRun.migrated, true);
+  assert.equal(retryRun.partialFailure, false);
+
+  const storeAfterRetry = JSON.parse(fs.readFileSync(storeFile, 'utf8'));
+  assert.equal('collections' in storeAfterRetry, false);
+
+  const okCol = getUserCollections(okUid);
+  const failCol = getUserCollections(failUid);
+  assert.equal(okCol.likedTracks.length, 1);
+  assert.equal(okCol.likedTracks[0].id, 'ok_song_1');
+  assert.equal(failCol.likedTracks.length, 1);
+  assert.equal(failCol.likedTracks[0].id, 'fail_song_1');
+});
+
+test('GET /api/export requires session (401) and returns downloadable JSON with favorites, playlists, and listening history', async () => {
+  const unauth = await exportRoute.GET(new Request('http://localhost/api/export'));
+  assert.equal(unauth.status, 401);
+
+  // Seed listening history for User A
+  listeningStoreMod.saveUserListeningHistory(users.userA.id, {
+    entries: {
+      export_song_1: {
+        plays: 9,
+        skips: 1,
+        completes: 7,
+        lastPlayedAt: 1700001234000,
+        hourBuckets: { madrugada: 0, manana: 4, tarde: 5, noche: 0 }
+      }
+    }
+  });
+
+  const authRes = await exportRoute.GET(
+    new Request('http://localhost/api/export', {
+      headers: { cookie: users.cookieA }
+    })
+  );
+  assert.equal(authRes.status, 200);
+  const contentDisp = authRes.headers.get('content-disposition') || '';
+  assert.match(contentDisp, /^attachment;\s*filename="mymusic-datos-.*\.json"$/);
+  assert.match(authRes.headers.get('content-type') || '', /application\/json/i);
+
+  const exported = await authRes.json();
+  assert.equal(exported.app, 'MyMusicAnywhere');
+  assert.equal(exported.user.id, users.userA.id);
+  assert.equal(Array.isArray(exported.likedTracks), true);
+  assert.equal(Array.isArray(exported.customPlaylists), true);
+  assert.equal(exported.listening.entries.export_song_1.plays, 9);
 });

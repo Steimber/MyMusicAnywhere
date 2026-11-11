@@ -10,6 +10,7 @@ export default function SettingsPanel({
   playlistsCount,
   backupMsg,
   onExportBackupJson,
+  onExportUserData,
   onImportBackupJson,
   onForceCloudSync,
   // Spotify & CSV import
@@ -88,6 +89,17 @@ export default function SettingsPanel({
 
         <div className="settings-actions-row" style={{ marginTop: 4 }}>
           <div className="settings-actions-group">
+            {onExportUserData && (
+              <button
+                type="button"
+                className="btn secondary sm"
+                disabled={isOffline || Boolean(user?.offline)}
+                onClick={onExportUserData}
+              >
+                <Icon name="download" size={14} /> Exportar mis datos
+              </button>
+            )}
+
             <button
               type="button"
               className="btn secondary sm"

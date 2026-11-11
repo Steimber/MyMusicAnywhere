@@ -640,4 +640,22 @@ test('/api/listening enforces auth, path-traversal protection, optimistic lockin
     })
   );
   assert.equal(putHuge.status, 413);
+
+  // Oversized Content-Length header -> rejected with 413 BEFORE reading request.text()
+  let bodyWasRead = false;
+  const declaredHugeReq = new Request('http://localhost/api/listening', {
+    method: 'PUT',
+    headers: {
+      cookie: auth.cookie,
+      'Content-Type': 'application/json',
+      'content-length': String(1024 * 1024 + 4096)
+    }
+  });
+  declaredHugeReq.text = async () => {
+    bodyWasRead = true;
+    return '{"entries":{}}';
+  };
+  const putDeclaredHuge = await listeningRoute.PUT(declaredHugeReq);
+  assert.equal(putDeclaredHuge.status, 413);
+  assert.equal(bodyWasRead, false, 'request.text() must NOT be called when Content-Length exceeds 1 MB');
 });

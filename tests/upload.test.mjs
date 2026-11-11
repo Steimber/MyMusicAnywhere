@@ -569,3 +569,117 @@ test('POST /api/upload extracts embedded ID3 cover art and PATCH /api/upload/:id
   assert.equal(patchedBody.track.album, 'La Lógica del León');
   assert.equal(patchedBody.track.artwork, newCover);
 });
+
+test('POST /api/upload enforces 300 MB per-user quota across files still on the VPS (413) and frees quota after deletion', async () => {
+  const prevMaxStorage = process.env.MAX_STORAGE_MB;
+  process.env.MAX_STORAGE_MB = '1024';
+
+  const quotaId1 = 'upl_' + 'c'.repeat(32);
+  const quotaId2 = 'upl_' + 'd'.repeat(32);
+  const quotaFile1 = path.join(getDownloadsDir(), `${quotaId1}.m4a`);
+  const quotaFile2 = path.join(getDownloadsDir(), `${quotaId2}.m4a`);
+
+  try {
+    // Create two sparse files totaling 300 MB - 1024 bytes for auth.owner
+    const halfQuota = 150 * 1024 * 1024;
+    fs.writeFileSync(quotaFile1, '');
+    fs.truncateSync(quotaFile1, halfQuota);
+    fs.writeFileSync(quotaFile2, '');
+    fs.truncateSync(quotaFile2, halfQuota - 1024);
+
+    storeMod.addUserUploadRecord({
+      id: quotaId1,
+      userId: auth.owner.id,
+      filename: `${quotaId1}.m4a`,
+      title: 'Pesado 1',
+      artist: 'Owner',
+      fileDeleted: false,
+      createdAt: Date.now()
+    });
+    storeMod.addUserUploadRecord({
+      id: quotaId2,
+      userId: auth.owner.id,
+      filename: `${quotaId2}.m4a`,
+      title: 'Pesado 2',
+      artist: 'Owner',
+      fileDeleted: false,
+      createdAt: Date.now()
+    });
+
+    const wavPath = path.join(fixturesDir, 'quota_probe.wav');
+    generateSineAudioFile(wavPath);
+    const wavBytes = fs.readFileSync(wavPath);
+    assert.ok(wavBytes.length > 2048);
+
+    // 1. Multipart upload by auth.owner exceeds 300 MB -> 413 with clear message
+    const ownerForm = new FormData();
+    ownerForm.append('file', new File([wavBytes], 'OverQuota.wav', { type: 'audio/wav' }));
+    const blockedMulti = await uploadRoute.POST(
+      new Request('http://localhost/api/upload', {
+        method: 'POST',
+        headers: { cookie: auth.ownerCookie },
+        body: ownerForm
+      })
+    );
+    assert.equal(blockedMulti.status, 413);
+    const blockedBody = await blockedMulti.json();
+    assert.match(blockedBody.error, /300 MB/);
+
+    // 2. Chunked upload by auth.owner also rejected with 413
+    const blockedChunk = await uploadRoute.POST(
+      new Request('http://localhost/api/upload', {
+        method: 'POST',
+        headers: {
+          cookie: auth.ownerCookie,
+          'x-upload-mode': 'chunk',
+          'x-chunk-index': '0',
+          'x-total-chunks': '1',
+          'x-total-size': String(wavBytes.length),
+          'x-file-name': encodeURIComponent('OverQuotaChunk.wav')
+        },
+        body: wavBytes
+      })
+    );
+    assert.equal(blockedChunk.status, 413);
+
+    // 3. Another user (auth.other) is unaffected by auth.owner's quota -> 200
+    const otherForm = new FormData();
+    otherForm.append('file', new File([wavBytes], 'OtherUserSong.wav', { type: 'audio/wav' }));
+    const otherRes = await uploadRoute.POST(
+      new Request('http://localhost/api/upload', {
+        method: 'POST',
+        headers: { cookie: auth.otherCookie },
+        body: otherForm
+      })
+    );
+    assert.equal(otherRes.status, 200);
+
+    // 4. Deleting one of auth.owner's pending VPS files frees quota -> upload now succeeds (200)
+    const delRes = await uploadDeleteRoute.DELETE(
+      new Request(`http://localhost/api/upload/${quotaId1}`, {
+        method: 'DELETE',
+        headers: { cookie: auth.ownerCookie }
+      }),
+      { params: Promise.resolve({ id: quotaId1 }) }
+    );
+    assert.equal(delRes.status, 200);
+
+    const retryForm = new FormData();
+    retryForm.append('file', new File([wavBytes], 'AfterFreeingSpace.wav', { type: 'audio/wav' }));
+    const retryRes = await uploadRoute.POST(
+      new Request('http://localhost/api/upload', {
+        method: 'POST',
+        headers: { cookie: auth.ownerCookie },
+        body: retryForm
+      })
+    );
+    assert.equal(retryRes.status, 200);
+  } finally {
+    if (prevMaxStorage === undefined) delete process.env.MAX_STORAGE_MB;
+    else process.env.MAX_STORAGE_MB = prevMaxStorage;
+    try {
+      if (fs.existsSync(quotaFile1)) fs.unlinkSync(quotaFile1);
+      if (fs.existsSync(quotaFile2)) fs.unlinkSync(quotaFile2);
+    } catch {}
+  }
+});

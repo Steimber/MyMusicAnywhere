@@ -29,7 +29,7 @@ import {
 } from '../lib/download/youtube-status';
 
 const AUDIO_CACHE_NAME = 'my-music-offline-audio-v1';
-const SHELL_CACHE_NAME = 'mymusic-shell-v30';
+const SHELL_CACHE_NAME = 'mymusic-shell-v31';
 const DEFAULT_TRACK_COVER = '/icon.svg?v=3';
 const FORYOU_RECS_STORAGE_KEY = 'mma_foryou_recs_v1';
 const USER_STORAGE_KEY = 'mma_cached_user_v1';
@@ -2107,6 +2107,53 @@ export default function HomePage() {
       });
     } catch {
       setBackupMsg({ type: 'err', text: 'No se pudo generar el archivo de respaldo.' });
+    }
+  }
+
+  async function handleExportUserData() {
+    setBackupMsg({ type: '', text: '' });
+    if (isOffline || user?.offline) {
+      setBackupMsg({
+        type: 'err',
+        text: 'Conéctate a internet para exportar todos tus datos desde el servidor.'
+      });
+      return;
+    }
+    try {
+      await Promise.allSettled([pushCollectionsToServerNow(), pushListeningHistoryNow()]);
+      const res = await fetch('/api/export', { cache: 'no-store' });
+      if (!res.ok) {
+        const errData = await res.json().catch(() => ({}));
+        setBackupMsg({
+          type: 'err',
+          text: errData.error || 'No se pudieron exportar tus datos.'
+        });
+        return;
+      }
+      const disposition = res.headers.get('content-disposition') || '';
+      const nameMatch = disposition.match(/filename="?([^";]+)"?/i);
+      const stamp = new Date().toISOString().slice(0, 10);
+      const filename = nameMatch ? nameMatch[1] : `mymusic-datos-${stamp}.json`;
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = filename;
+      document.body.appendChild(a);
+      a.click();
+      setTimeout(() => {
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+      }, 1200);
+      setBackupMsg({
+        type: 'ok',
+        text: 'Datos exportados correctamente (favoritos, playlists e historial de escucha).'
+      });
+    } catch {
+      setBackupMsg({
+        type: 'err',
+        text: 'No se pudieron exportar tus datos. Verifica tu conexión.'
+      });
     }
   }
 
@@ -7118,6 +7165,7 @@ export default function HomePage() {
           playlistsCount={customPlaylists.length}
           backupMsg={backupMsg}
           onExportBackupJson={handleExportBackupJson}
+          onExportUserData={handleExportUserData}
           onImportBackupJson={handleImportBackupJson}
           onForceCloudSync={() => pushCollectionsToServerNow()}
           spotifyUrl={spotifyUrl}
