@@ -1,4 +1,3 @@
-import { NextResponse } from 'next/server';
 import crypto from 'crypto';
 import {
   loadStore,
@@ -8,7 +7,8 @@ import {
   getYtCookiesStatus,
   saveYtCookiesFile,
   clearYtCookiesFile
-} from '../../../lib/store';
+} from '../../../lib/store.js';
+import { getYouTubeAdminStatus } from '../../../lib/download/youtube-status.js';
 
 function generateInviteCode() {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -22,7 +22,7 @@ function generateInviteCode() {
 export async function GET(request) {
   const user = getSessionUser(request);
   if (!user || !user.is_admin) {
-    return NextResponse.json({ error: 'No autorizado' }, { status: 403 });
+    return Response.json({ error: 'No autorizado' }, { status: 403 });
   }
 
   const store = loadStore();
@@ -35,18 +35,19 @@ export async function GET(request) {
     created_at: u.created_at
   }));
 
-  return NextResponse.json({
+  return Response.json({
     users: safeUsers,
     invites: store.invites,
     storage: getStorageStats(),
-    ytCookies: getYtCookiesStatus()
+    ytCookies: getYtCookiesStatus(),
+    youtube: getYouTubeAdminStatus()
   });
 }
 
 export async function POST(request) {
   const user = getSessionUser(request);
   if (!user || !user.is_admin) {
-    return NextResponse.json({ error: 'No autorizado' }, { status: 403 });
+    return Response.json({ error: 'No autorizado' }, { status: 403 });
   }
 
   try {
@@ -69,7 +70,7 @@ export async function POST(request) {
       };
       store.invites.unshift(invite);
       saveStore(store);
-      return NextResponse.json({ ok: true, invite });
+      return Response.json({ ok: true, invite });
     }
 
     if (action === 'revoke_invite') {
@@ -78,13 +79,13 @@ export async function POST(request) {
         target.revoked = !target.revoked;
         saveStore(store);
       }
-      return NextResponse.json({ ok: true });
+      return Response.json({ ok: true });
     }
 
     if (action === 'delete_invite') {
       store.invites = store.invites.filter(i => i.code !== body.code);
       saveStore(store);
-      return NextResponse.json({ ok: true });
+      return Response.json({ ok: true });
     }
 
     if (action === 'toggle_user') {
@@ -93,21 +94,21 @@ export async function POST(request) {
         target.active = !target.active;
         saveStore(store);
       }
-      return NextResponse.json({ ok: true });
+      return Response.json({ ok: true });
     }
 
     if (action === 'save_yt_cookies') {
       const status = saveYtCookiesFile(body.content || body.cookiesText || '');
-      return NextResponse.json({ ok: true, ytCookies: status });
+      return Response.json({ ok: true, ytCookies: status });
     }
 
     if (action === 'clear_yt_cookies') {
       const status = clearYtCookiesFile();
-      return NextResponse.json({ ok: true, ytCookies: status });
+      return Response.json({ ok: true, ytCookies: status });
     }
 
-    return NextResponse.json({ error: 'Acción inválida' }, { status: 400 });
+    return Response.json({ error: 'Acción inválida' }, { status: 400 });
   } catch (err) {
-    return NextResponse.json({ error: err.message }, { status: 500 });
+    return Response.json({ error: err.message }, { status: 500 });
   }
 }

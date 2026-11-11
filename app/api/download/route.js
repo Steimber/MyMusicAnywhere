@@ -1,4 +1,3 @@
-import { NextResponse } from 'next/server';
 import fs from 'fs';
 import os from 'os';
 import path from 'path';
@@ -11,7 +10,7 @@ import {
   getYtCookiesFilePath,
   registerActiveRawJob,
   unregisterActiveRawJob
-} from '../../../lib/store';
+} from '../../../lib/store.js';
 import {
   MAX_QUEUED_PER_USER,
   getUserQueuedCount,
@@ -19,7 +18,7 @@ import {
   acquireContinuationNetSlot,
   enqueueCpuJob,
   getPoolStatus
-} from '../../../lib/download/queue';
+} from '../../../lib/download/queue.js';
 import {
   markUrlDrmBlocked,
   sanitizeSlug,
@@ -38,7 +37,17 @@ import {
   evaluateCandidatePool,
   parseCandidateLines,
   buildRejectTitleRegex
-} from '../../../lib/download/candidates';
+} from '../../../lib/download/candidates.js';
+import {
+  YOUTUBE_FALLBACK_NOTICE,
+  NO_SOURCE_FOUND_ERROR,
+  isYouTubeTargetUrl,
+  buildYtDlpProxyArgs,
+  redactProxySecrets,
+  isYouTubeBotBlockError,
+  isYouTubeBlocked,
+  markYouTubeBlocked
+} from '../../../lib/download/youtube-status.js';
 
 if (!global.__activeDownloads) {
   global.__activeDownloads = new Map();
@@ -149,7 +158,7 @@ function sanitizeSearchQuery(raw) {
 
 let cachedLinuxYtDlpBin = null;
 
-function resolveYtDlpCommand(extraArgs) {
+export function resolveYtDlpCommand(extraArgs) {
   const configuredBin = process.env.YTDLP_BIN?.trim();
   if (configuredBin) {
     return { cmd: configuredBin, args: extraArgs };
@@ -377,6 +386,14 @@ async function resolveCatalogMetadata(rawDuration, cleanTitle, primaryArtist, op
 
 function runFlatSearchOnce(searchQueries, timeoutMs = 10000) {
   return new Promise(resolve => {
+    const isYtSearch =
+      Array.isArray(searchQueries) &&
+      searchQueries.some(q => isYouTubeTargetUrl(q));
+
+    if (isYtSearch && isYouTubeBlocked()) {
+      return resolve({ candidates: [], timedOut: false, ytBlocked: true });
+    }
+
     // Do NOT pass --cookies during --flat-playlist metadata search: public search metadata never
     // requires login and omitting cookies prevents Google session rotation / account flagging.
     const ytdlpArgs = [
@@ -385,6 +402,7 @@ function runFlatSearchOnce(searchQueries, timeoutMs = 10000) {
       '--no-warnings',
       '--socket-timeout', '8',
       '--js-runtimes', 'node',
+      ...buildYtDlpProxyArgs(isYtSearch),
       '--print', '%(extractor)s\t%(id)s\t%(webpage_url)s\t%(url)s\t%(duration)s\t%(uploader)s\t%(title)s',
       '--',
       ...searchQueries
@@ -392,20 +410,25 @@ function runFlatSearchOnce(searchQueries, timeoutMs = 10000) {
 
     const { cmd, args } = resolveYtDlpCommand(ytdlpArgs);
     let stdoutText = '';
+    let stderrText = '';
     let settled = false;
 
     let child;
     try {
       child = spawn(/*turbopackIgnore: true*/ cmd, args);
     } catch {
-      return resolve({ candidates: [], timedOut: false });
+      return resolve({ candidates: [], timedOut: false, ytBlocked: false });
     }
 
     const finish = (candidates, timedOut = false) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
-      resolve({ candidates, timedOut });
+      const ytBlocked = isYtSearch && isYouTubeBotBlockError(stderrText);
+      if (ytBlocked) {
+        markYouTubeBlocked(stderrText);
+      }
+      resolve({ candidates, timedOut, ytBlocked });
     };
 
     const timer = setTimeout(() => {
@@ -417,6 +440,10 @@ function runFlatSearchOnce(searchQueries, timeoutMs = 10000) {
 
     child.stdout.on('data', d => {
       stdoutText += d.toString();
+    });
+
+    child.stderr.on('data', d => {
+      stderrText += d.toString();
     });
 
     child.on('error', () => {
@@ -431,13 +458,13 @@ function runFlatSearchOnce(searchQueries, timeoutMs = 10000) {
 
 async function discoverCandidatesFromSearch(searchQueries, timeoutMs = 10000) {
   const first = await runFlatSearchOnce(searchQueries, timeoutMs);
-  if (first.candidates.length > 0 || first.timedOut) {
+  if (first.candidates.length > 0 || first.timedOut || first.ytBlocked || isYouTubeBlocked()) {
     return first.candidates;
   }
 
   const isYtSearch =
     Array.isArray(searchQueries) &&
-    searchQueries.some(q => /^ytsearch/i.test(String(q || '')));
+    searchQueries.some(q => isYouTubeTargetUrl(q));
   if (isYtSearch) {
     await new Promise(r => setTimeout(r, 1500));
     console.log(
@@ -461,8 +488,17 @@ function runYtDlpAttempt(target, outputTemplate, options, onProgress) {
   } = options || {};
 
   return new Promise(resolve => {
-    const isYouTubeTarget = /youtube\.com|youtu\.be|^ytsearch/i.test(String(target || ''));
+    const isYouTubeTarget = isYouTubeTargetUrl(target);
     const isBilibiliTarget = /^bilisearch|bilibili\.com/i.test(String(target || ''));
+
+    if (isYouTubeTarget && isYouTubeBlocked()) {
+      return resolve({
+        ok: false,
+        ytBlocked: true,
+        error: YOUTUBE_FALLBACK_NOTICE
+      });
+    }
+
     const masterCookiesPath = isYouTubeTarget && useCookies ? getYtCookiesFilePath() : null;
     let tempCookiesPath = null;
 
@@ -504,6 +540,7 @@ function runYtDlpAttempt(target, outputTemplate, options, onProgress) {
     }
 
     if (isYouTubeTarget) {
+      ytdlpArgs.push(...buildYtDlpProxyArgs(true));
       // Mobile Web (mweb) + local yt-dlp-ejs JS solver (node) + bgutil PO-Token
       ytdlpArgs.push('--extractor-args', 'youtube:player_client=mweb,web');
     }
@@ -601,7 +638,7 @@ function runYtDlpAttempt(target, outputTemplate, options, onProgress) {
     });
 
     child.on('error', err => {
-      finish({ ok: false, error: err.message });
+      finish({ ok: false, error: redactProxySecrets(err.message) });
     });
 
     child.on('close', code => {
@@ -612,13 +649,20 @@ function runYtDlpAttempt(target, outputTemplate, options, onProgress) {
         .filter(l => l && !/^\[download\]\s+[\d\.]+%\s*$/.test(l));
       const filepath = outLines.length >= 1 ? outLines[outLines.length - 1] : null;
       const acodec = outLines.length >= 2 ? outLines[outLines.length - 2] : null;
+      const ytBlocked =
+        isYouTubeTarget && code !== 0 && code !== 101 && isYouTubeBotBlockError(stderrText);
+      if (ytBlocked) {
+        markYouTubeBlocked(stderrText);
+      }
+      const cleanErr = redactProxySecrets(stderrText).slice(-300);
       // Exit code 101 in yt-dlp means --max-downloads limit was reached after downloading the 1st valid full song
       finish({
         ok: code === 0 || code === 101,
         code,
         acodec,
         filepath,
-        error: stderrText.slice(-300)
+        ytBlocked,
+        error: cleanErr
       });
     });
   });
@@ -913,20 +957,31 @@ async function runExtractionPipeline(
       }));
     };
 
-    if (/^https?:\/\//i.test(rawQuery)) {
+    const forceAlternateSource = Boolean(item.forceAlternateSource);
+    const isDirectUrl = /^https?:\/\//i.test(rawQuery);
+    const isDirectScAltRetry =
+      isDirectUrl && forceAlternateSource && /soundcloud\.com/i.test(rawQuery);
+
+    if (isYouTubeBlocked()) {
+      item.notice = YOUTUBE_FALLBACK_NOTICE;
+    }
+
+    if (isDirectUrl && !isDirectScAltRetry) {
       const directUrl = normalizeDirectMediaUrl(rawQuery);
       if (!isAllowedMediaUrl(directUrl)) {
         item.status = 'error';
+        item.stage = 'error';
         item.error = 'Dominio de URL no permitido.';
         return;
       }
+      const isDirectYt = isYouTubeTargetUrl(directUrl);
       const isPlaceholderYtTitle =
         !metaTitle ||
         /^https?:\/\//i.test(metaTitle) ||
         /^youtube\s*\(/i.test(metaTitle);
       const isPlaceholderYtArtist =
         !metaArtist || metaArtist.toLowerCase() === 'youtube';
-      if (isPlaceholderYtTitle || isPlaceholderYtArtist) {
+      if (isDirectYt && (isPlaceholderYtTitle || isPlaceholderYtArtist)) {
         const oembed = await resolveDirectUrlOembedMeta(directUrl);
         if (oembed) {
           if (oembed.title && isPlaceholderYtTitle) {
@@ -956,13 +1011,21 @@ async function runExtractionPipeline(
           item.artist = strippedArtist;
         }
       }
-      if (!metaAlbum) metaAlbum = 'YouTube';
-      targets = [{ url: directUrl, isSearchPool: false, useCookies: hasCookiesConfigured }];
-      if (hasCookiesConfigured) {
-        targets.push({ url: directUrl, isSearchPool: false, useCookies: false });
-      }
-      if (/youtube\.com|youtu\.be/i.test(directUrl)) {
-        targets.push({ lazyDiscovery: 'sc-direct-fallback', directUrl });
+      if (!metaAlbum) metaAlbum = isDirectYt ? 'YouTube' : 'SoundCloud';
+
+      if (isDirectYt && (isYouTubeBlocked() || forceAlternateSource)) {
+        if (isYouTubeBlocked()) {
+          item.notice = YOUTUBE_FALLBACK_NOTICE;
+        }
+        targets = [{ lazyDiscovery: 'sc-direct-fallback', directUrl }];
+      } else {
+        targets = [{ url: directUrl, isSearchPool: false, useCookies: isDirectYt && hasCookiesConfigured }];
+        if (isDirectYt && hasCookiesConfigured) {
+          targets.push({ url: directUrl, isSearchPool: false, useCookies: false });
+        }
+        if (isDirectYt) {
+          targets.push({ lazyDiscovery: 'sc-direct-fallback', directUrl });
+        }
       }
     } else {
       const primaryTitle = stripParentheticalSubtitles(cleanTitle);
@@ -976,6 +1039,7 @@ async function runExtractionPipeline(
 
       if (!artistAndCleanTitle) {
         item.status = 'error';
+        item.stage = 'error';
         item.error = 'Búsqueda inválida.';
         return;
       }
@@ -989,17 +1053,25 @@ async function runExtractionPipeline(
         scDiscoveryQueries.push(`scsearch10:${cleanTitleOnly}`);
       }
 
-      // Staggered discovery by cookie state: launch only the primary source alongside catalog metadata
-      // (1 yt-dlp search process instead of 2), and only query the secondary source on fallback.
+      const skipYoutube = isYouTubeBlocked() || (forceAlternateSource && !isDirectScAltRetry);
+      if (isYouTubeBlocked()) {
+        item.notice = YOUTUBE_FALLBACK_NOTICE;
+      }
+
+      // Staggered discovery by cookie and YouTube block state
       let catalogMeta;
       let ytRawCandidates = [];
       let scRawCandidates = [];
+      const preferYoutubePrimary = !skipYoutube && (hasCookiesConfigured || isDirectScAltRetry);
 
-      if (hasCookiesConfigured) {
+      if (preferYoutubePrimary) {
         [catalogMeta, ytRawCandidates] = await Promise.all([
           resolveCatalogMetadata(item.duration, cleanTitle, primaryArtist),
           discoverCandidatesFromSearch(ytDiscoveryQueries, 7500)
         ]);
+        if (isYouTubeBlocked()) {
+          item.notice = YOUTUBE_FALLBACK_NOTICE;
+        }
       } else {
         [catalogMeta, scRawCandidates] = await Promise.all([
           resolveCatalogMetadata(item.duration, cleanTitle, primaryArtist),
@@ -1027,8 +1099,9 @@ async function runExtractionPipeline(
 
       let ytDirectTargets = [];
       let scCombinedTargets = [];
+      const ytStillAllowed = !skipYoutube && !isYouTubeBlocked();
 
-      if (hasCookiesConfigured) {
+      if (preferYoutubePrimary && ytStillAllowed) {
         const ytPool = evaluateCandidatePool(ytRawCandidates, discoveryCtx, 'yt', queryLabel);
         ytDirectTargets = buildYtTargetsFromPool(ytPool);
         if (ytDirectTargets.length === 0) {
@@ -1045,20 +1118,29 @@ async function runExtractionPipeline(
           scCombinedTargets = [{ lazyDiscovery: 'sc' }];
         }
       } else {
+        if (preferYoutubePrimary && scRawCandidates.length === 0) {
+          scRawCandidates = await discoverCandidatesFromSearch(scDiscoveryQueries, 10000);
+        }
         const scPool = evaluateCandidatePool(scRawCandidates, discoveryCtx, 'sc', queryLabel);
         scCombinedTargets = buildScTargetsFromPool(scPool);
-        if (scCombinedTargets.length === 0) {
-          ytRawCandidates = await discoverCandidatesFromSearch(ytDiscoveryQueries, 7500);
-          const ytPool = evaluateCandidatePool(
-            ytRawCandidates,
-            discoveryCtx,
-            'yt-fallback',
-            queryLabel
-          );
-          ytDirectTargets = buildYtTargetsFromPool(ytPool);
-        } else {
-          // Defer YouTube search unless all direct SoundCloud URLs fail during download
-          ytDirectTargets = [{ lazyDiscovery: 'yt' }];
+        if (ytStillAllowed) {
+          if (scCombinedTargets.length === 0) {
+            ytRawCandidates = await discoverCandidatesFromSearch(ytDiscoveryQueries, 7500);
+            if (isYouTubeBlocked()) {
+              item.notice = YOUTUBE_FALLBACK_NOTICE;
+            } else {
+              const ytPool = evaluateCandidatePool(
+                ytRawCandidates,
+                discoveryCtx,
+                'yt-fallback',
+                queryLabel
+              );
+              ytDirectTargets = buildYtTargetsFromPool(ytPool);
+            }
+          } else {
+            // Defer YouTube search unless all direct SoundCloud URLs fail during download
+            ytDirectTargets = [{ lazyDiscovery: 'yt' }];
+          }
         }
       }
 
@@ -1095,21 +1177,23 @@ async function runExtractionPipeline(
         useCookies: false
       };
 
-      if (hasCookiesConfigured) {
+      if (preferYoutubePrimary && !isYouTubeBlocked()) {
         targets.push(...ytDirectTargets, ...scCombinedTargets);
       } else {
         targets.push(...scCombinedTargets, ...ytDirectTargets);
       }
 
-      targets.push({
-        url: `ytsearch5:${searchQueryBase || artistAndPrimaryTitle} official audio`,
-        isSearchPool: true,
-        minDuration: minDur,
-        maxDuration: maxDur,
-        rejectTitleRegex,
-        trimDurationSec: maxAllowedDur,
-        useCookies: hasCookiesConfigured
-      });
+      if (!skipYoutube && !isYouTubeBlocked()) {
+        targets.push({
+          url: `ytsearch5:${searchQueryBase || artistAndPrimaryTitle} official audio`,
+          isSearchPool: true,
+          minDuration: minDur,
+          maxDuration: maxDur,
+          rejectTitleRegex,
+          trimDurationSec: maxAllowedDur,
+          useCookies: hasCookiesConfigured
+        });
+      }
 
       if (ENABLE_BILIBILI) {
         targets.push(biliTarget);
@@ -1119,10 +1203,17 @@ async function runExtractionPipeline(
     const minRawBytes = expectedDurationSec
       ? Math.max(240 * 1024, Math.min(700 * 1024, Math.round(expectedDurationSec * 4000)))
       : 240 * 1024;
+    let lastFailureCause = isYouTubeBlocked() ? 'YouTube bloqueado temporalmente en el servidor' : '';
 
     for (let idx = 0; idx < targets.length; idx++) {
       const t = targets[idx];
       if (t.lazyDiscovery) {
+        if (t.lazyDiscovery === 'yt' && (isYouTubeBlocked() || forceAlternateSource)) {
+          if (isYouTubeBlocked()) {
+            item.notice = YOUTUBE_FALLBACK_NOTICE;
+          }
+          continue;
+        }
         if (netSlotReleased) {
           releaseNetSlot = await acquireContinuationNetSlot(userId);
           netSlotReleased = false;
@@ -1141,15 +1232,19 @@ async function runExtractionPipeline(
           }
         } else if (t.lazyDiscovery === 'yt' && discoveryCtx && ytDiscoveryQueries.length > 0) {
           const lazyYtRaw = await discoverCandidatesFromSearch(ytDiscoveryQueries, 7500);
-          const ytPool = evaluateCandidatePool(
-            lazyYtRaw,
-            discoveryCtx,
-            'yt-lazy-fallback',
-            queryLabel
-          );
-          const discoveredYtTargets = buildYtTargetsFromPool(ytPool);
-          if (discoveredYtTargets.length > 0) {
-            targets.splice(idx + 1, 0, ...discoveredYtTargets);
+          if (isYouTubeBlocked()) {
+            item.notice = YOUTUBE_FALLBACK_NOTICE;
+          } else {
+            const ytPool = evaluateCandidatePool(
+              lazyYtRaw,
+              discoveryCtx,
+              'yt-lazy-fallback',
+              queryLabel
+            );
+            const discoveredYtTargets = buildYtTargetsFromPool(ytPool);
+            if (discoveredYtTargets.length > 0) {
+              targets.splice(idx + 1, 0, ...discoveredYtTargets);
+            }
           }
         } else if (t.lazyDiscovery === 'sc-direct-fallback') {
           let fallbackTitle = stripRemasterNoise(metaTitle) || metaTitle;
@@ -1235,6 +1330,12 @@ async function runExtractionPipeline(
         continue;
       }
 
+      if (isYouTubeTargetUrl(t.url) && isYouTubeBlocked()) {
+        item.notice = YOUTUBE_FALLBACK_NOTICE;
+        continue;
+      }
+
+      item.stage = 'converting';
       let stepRes = null;
       let ffmpegErr = '';
       let sizeSkipReason = '';
@@ -1251,6 +1352,10 @@ async function runExtractionPipeline(
           { ...t, useCookies: Boolean(t.useCookies) },
           pct => updateProg(Math.round(24 + pct * 0.66))
         );
+
+        if (stepRes?.ytBlocked || (isYouTubeTargetUrl(t.url) && isYouTubeBlocked())) {
+          item.notice = YOUTUBE_FALLBACK_NOTICE;
+        }
 
         const rawFilePath = findRawStageFile(downloadsDir, baseSlug, stepRes?.filepath);
         if (rawFilePath) {
@@ -1298,38 +1403,53 @@ async function runExtractionPipeline(
         expectedDurationSec
       );
       if (finalized.valid && finalized.filePath && fs.existsSync(finalized.filePath)) {
-        console.log(`[download] OK: ${finalized.filename} <- ${t.url}`);
+        console.log(`[download] OK: ${finalized.filename} <- ${redactProxySecrets(t.url)}`);
         enforceStorageQuota();
         scheduleFileCleanup(finalized.filePath, 90000);
         item.status = 'ready';
+        item.stage = 'ready';
         item.progress = 100;
         item.filename = finalized.filename;
         return;
       }
-      const lastErrLine = String(ffmpegErr || stepRes?.error || '')
-        .split(/\r?\n/)
-        .map(l => l.trim())
-        .filter(Boolean)
-        .pop();
+      const lastErrLine = redactProxySecrets(
+        String(ffmpegErr || stepRes?.error || '')
+          .split(/\r?\n/)
+          .map(l => l.trim())
+          .filter(Boolean)
+          .pop() || ''
+      );
       if (lastErrLine && /drm protected/i.test(lastErrLine)) {
         markUrlDrmBlocked(t.url);
+        lastFailureCause = 'Pista con protección DRM';
+      } else if (stepRes?.ytBlocked || (isYouTubeTargetUrl(t.url) && isYouTubeBlocked())) {
+        lastFailureCause = 'YouTube bloqueado temporalmente en el servidor';
+      } else if (/private video|video unavailable|not available/i.test(lastErrLine)) {
+        lastFailureCause = 'Contenido privado o no disponible';
+      } else if (/tiempo de espera agotado/i.test(lastErrLine)) {
+        lastFailureCause = 'Tiempo de espera agotado';
       }
       const fallbackFilterInfo = t.isSearchPool
         ? `filtered_all_search_results(dur=${t.minDuration}-${t.maxDuration}s${t.matchTitleRegex ? ',matchTitle' : ''}${t.rejectTitleRegex ? ',rejectTitle' : ''})`
         : 'no valid audio';
-      const skipDetail =
+      const skipDetail = redactProxySecrets(
         sizeSkipReason ||
-        finalized.reason ||
-        (lastErrLine && /drm protected/i.test(lastErrLine)
-          ? `soundcloud_drm_protected (${lastErrLine})`
-          : lastErrLine) ||
-        fallbackFilterInfo;
-      console.warn(`[download] skip ${t.url} (code=${stepRes?.code ?? 'err'}): ${skipDetail}`);
+          finalized.reason ||
+          (lastErrLine && /drm protected/i.test(lastErrLine)
+            ? `soundcloud_drm_protected (${lastErrLine})`
+            : lastErrLine) ||
+          fallbackFilterInfo
+      );
+      console.warn(
+        `[download] skip ${redactProxySecrets(t.url)} (code=${stepRes?.code ?? 'err'}): ${skipDetail}`
+      );
     }
 
     enforceStorageQuota();
     item.status = 'error';
-    item.error = 'No se encontró versión original completa de esta pista.';
+    item.stage = 'error';
+    item.error = NO_SOURCE_FOUND_ERROR;
+    item.cause = lastFailureCause || null;
   } finally {
     if (releaseNetSlot && !netSlotReleased) {
       releaseNetSlot();
@@ -1370,7 +1490,7 @@ export async function POST(request) {
   try {
     const user = getSessionUser(request);
     if (!user) {
-      return NextResponse.json({ error: 'Inicia sesión para descargar' }, { status: 401 });
+      return Response.json({ error: 'Inicia sesión para descargar' }, { status: 401 });
     }
 
     const data = await request.json();
@@ -1384,18 +1504,18 @@ export async function POST(request) {
       : rawCandidate;
 
     if (!rawQuery) {
-      return NextResponse.json({ error: 'Nombre o búsqueda requerida' }, { status: 400 });
+      return Response.json({ error: 'Nombre o búsqueda requerida' }, { status: 400 });
     }
 
     if (/^https?:\/\//i.test(rawQuery) && !isAllowedMediaUrl(rawQuery)) {
-      return NextResponse.json(
+      return Response.json(
         { error: 'Solo se permiten URLs de YouTube o SoundCloud.' },
         { status: 400 }
       );
     }
 
     if (getUserQueuedCount(user.id) >= MAX_QUEUED_PER_USER) {
-      return NextResponse.json(
+      return Response.json(
         { error: 'Tienes demasiadas descargas en cola' },
         { status: 429 }
       );
@@ -1404,6 +1524,7 @@ export async function POST(request) {
     const downloadsDir = getDownloadsDir();
     const downloadId = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
     const baseSlug = `${sanitizeSlug(`${data.artist || ''} ${data.title || rawQuery}`)}_${downloadId}`;
+    const ytBlockedNow = isYouTubeBlocked();
 
     pruneFinishedActiveDownloadsIfNeeded();
     activeDownloads.set(downloadId, {
@@ -1414,6 +1535,9 @@ export async function POST(request) {
       duration: data.duration || null,
       artwork: data.artwork || '',
       status: 'downloading',
+      stage: 'analyzing',
+      notice: ytBlockedNow ? YOUTUBE_FALLBACK_NOTICE : null,
+      forceAlternateSource: Boolean(data.forceAlternateSource),
       progress: 8,
       filename: null
     });
@@ -1432,44 +1556,49 @@ export async function POST(request) {
       const item = activeDownloads.get(downloadId);
       if (item) {
         item.status = 'error';
-        item.error = err.message;
+        item.stage = 'error';
+        item.error = redactProxySecrets(err.message);
       }
       scheduleActiveDownloadCleanup(downloadId);
     });
 
-    return NextResponse.json({
+    return Response.json({
       ok: true,
       downloadId,
+      notice: ytBlockedNow ? YOUTUBE_FALLBACK_NOTICE : null,
       pool: getPoolStatus(user.id, downloadId)
     });
   } catch (err) {
-    return NextResponse.json({ error: err.message }, { status: 500 });
+    return Response.json({ error: redactProxySecrets(err.message) }, { status: 500 });
   }
 }
 
 export async function GET(request) {
   const user = getSessionUser(request);
   if (!user) {
-    return NextResponse.json({ error: 'No autorizado' }, { status: 401 });
+    return Response.json({ error: 'No autorizado' }, { status: 401 });
   }
 
   const { searchParams } = new URL(request.url);
   const id = searchParams.get('id');
 
   if (!id) {
-    return NextResponse.json({ pool: getPoolStatus(user.id) });
+    return Response.json({ pool: getPoolStatus(user.id) });
   }
 
   const item = activeDownloads.get(id);
   if (!item || (item.userId && item.userId !== user.id && !user.is_admin)) {
-    return NextResponse.json(
+    return Response.json(
       { error: 'Descarga no encontrada', pool: getPoolStatus(user.id) },
       { status: 404 }
     );
   }
 
-  const { userId: _ownerId, ...publicItem } = item;
-  return NextResponse.json({
+  const { userId: _ownerId, forceAlternateSource: _alt, ...publicItem } = item;
+  if (publicItem.error) {
+    publicItem.error = redactProxySecrets(publicItem.error);
+  }
+  return Response.json({
     ...publicItem,
     pool: getPoolStatus(user.id, id)
   });

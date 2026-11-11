@@ -21,6 +21,22 @@ import {
   isUrlDrmBlocked,
   markUrlDrmBlocked
 } from '../lib/download/candidates.js';
+import {
+  YOUTUBE_BLOCK_TTL_MS,
+  YOUTUBE_FALLBACK_NOTICE,
+  NO_SOURCE_FOUND_ERROR,
+  createYouTubeStatusState,
+  isYouTubeTargetUrl,
+  buildYtDlpProxyArgs,
+  redactProxySecrets,
+  isYouTubeBotBlockError,
+  isYouTubeBlocked,
+  markYouTubeBlocked,
+  onYouTubeBlockedTransition,
+  getYouTubeAdminStatus,
+  classifyDirectLinkSource
+} from '../lib/download/youtube-status.js';
+import { GET as getSearchRoute } from '../app/api/search/route.js';
 
 function createDeferred() {
   let resolve;
@@ -572,4 +588,107 @@ test('candidates: strips glued/dotted media extensions without corrupting real n
     pool.tier1[1].webpageUrl,
     'https://soundcloud.com/rock-ecuador/blacksun-la-nina'
   );
+});
+
+test('youtube-status: YTDLP_PROXY applies only to YouTube targets and secrets are scrubbed from errors', () => {
+  const secretProxy = 'http://proxyUser99:Sup3rS3cret!@proxy.internal.test:8080';
+
+  assert.equal(isYouTubeTargetUrl('https://www.youtube.com/watch?v=dQw4w9WgXcQ'), true);
+  assert.equal(isYouTubeTargetUrl('https://youtu.be/dQw4w9WgXcQ'), true);
+  assert.equal(isYouTubeTargetUrl('ytsearch6:Soda Stereo De Musica Ligera'), true);
+  assert.equal(isYouTubeTargetUrl('https://soundcloud.com/artist/track'), false);
+  assert.equal(isYouTubeTargetUrl('scsearch15:Soda Stereo'), false);
+  assert.equal(isYouTubeTargetUrl('bilisearch1:Soda Stereo'), false);
+
+  assert.deepEqual(buildYtDlpProxyArgs(true, secretProxy), ['--proxy', secretProxy]);
+  assert.deepEqual(buildYtDlpProxyArgs(false, secretProxy), []);
+  assert.deepEqual(buildYtDlpProxyArgs(true, ''), []);
+  assert.deepEqual(buildYtDlpProxyArgs(true, null), []);
+
+  const rawErr = `ERROR: Unable to connect to proxy ${secretProxy} (auth proxyUser99:Sup3rS3cret! at proxy.internal.test:8080)`;
+  const scrubbed = redactProxySecrets(rawErr, secretProxy);
+  assert.ok(!scrubbed.includes('Sup3rS3cret!'));
+  assert.ok(!scrubbed.includes('proxyUser99:Sup3rS3cret!'));
+  assert.ok(!scrubbed.includes('proxy.internal.test:8080'));
+});
+
+test('youtube-status: bot-check marks youtube_blocked for 15m and admin status hides proxy value', () => {
+  const state = createYouTubeStatusState();
+  const t0 = 1_700_000_000_000;
+  let transitions = 0;
+  const unsub = onYouTubeBlockedTransition(() => {
+    transitions += 1;
+  }, state);
+
+  assert.equal(
+    isYouTubeBotBlockError("ERROR: [youtube] 19W4JGa76IY: Sign in to confirm you’re not a bot"),
+    true
+  );
+  assert.equal(
+    isYouTubeBotBlockError("ERROR: [youtube] abc: Sign in to confirm you're not a bot."),
+    true
+  );
+  assert.equal(isYouTubeBotBlockError('ERROR: Video unavailable'), false);
+
+  assert.equal(isYouTubeBlocked(t0, state), false);
+  const firstMark = markYouTubeBlocked("Sign in to confirm you're not a bot", t0, state);
+  assert.equal(firstMark.becameBlocked, true);
+  assert.equal(transitions, 1);
+  assert.equal(isYouTubeBlocked(t0 + 60_000, state), true);
+
+  // Subsequent failures while already blocked extend TTL without firing duplicate transition alerts
+  const secondMark = markYouTubeBlocked("Sign in to confirm you're not a bot", t0 + 120_000, state);
+  assert.equal(secondMark.becameBlocked, false);
+  assert.equal(transitions, 1);
+
+  const secretProxy = 'socks5://ytuser:ytpass@proxy.internal.test:1080';
+  const adminStatus = getYouTubeAdminStatus(t0 + 120_000, state, secretProxy);
+  assert.equal(adminStatus.status, 'blocked');
+  assert.equal(adminStatus.blocked, true);
+  assert.equal(adminStatus.proxyConfigured, true);
+  assert.equal(adminStatus.blockedSince, new Date(t0).toISOString());
+  assert.ok(!JSON.stringify(adminStatus).includes('ytpass'));
+  assert.ok(!JSON.stringify(adminStatus).includes('proxy.internal.test'));
+
+  // Expires after 15 minutes from latest block timestamp
+  const afterExpiry = t0 + 120_000 + YOUTUBE_BLOCK_TTL_MS + 1;
+  assert.equal(isYouTubeBlocked(afterExpiry, state), false);
+  const okStatus = getYouTubeAdminStatus(afterExpiry, state, null);
+  assert.equal(okStatus.status, 'ok');
+  assert.equal(okStatus.blocked, false);
+  assert.equal(okStatus.blockedSince, null);
+  assert.equal(okStatus.proxyConfigured, false);
+  assert.ok(YOUTUBE_FALLBACK_NOTICE.includes('SoundCloud'));
+  assert.equal(NO_SOURCE_FOUND_ERROR, 'No se encontró en ninguna fuente');
+  unsub();
+});
+
+test('direct-link source detection classifies YouTube, SoundCloud, and unsupported URLs cleanly', async () => {
+  assert.deepEqual(classifyDirectLinkSource('https://youtu.be/dQw4w9WgXcQ'), {
+    isUrl: true,
+    source: 'youtube',
+    label: 'YouTube',
+    supported: true
+  });
+  assert.deepEqual(classifyDirectLinkSource('https://soundcloud.com/blacksun-ec/milenio'), {
+    isUrl: true,
+    source: 'soundcloud',
+    label: 'SoundCloud',
+    supported: true
+  });
+  assert.deepEqual(classifyDirectLinkSource('https://example.com/audio.mp3'), {
+    isUrl: true,
+    source: 'other',
+    label: 'Otra fuente',
+    supported: false
+  });
+  assert.equal(classifyDirectLinkSource('Soda Stereo De Musica Ligera').isUrl, false);
+
+  const unsupportedRes = await getSearchRoute(
+    new Request('http://localhost:3333/api/search?q=' + encodeURIComponent('https://example.com/audio.mp3'))
+  );
+  assert.equal(unsupportedRes.status, 400);
+  const unsupportedBody = await unsupportedRes.json();
+  assert.equal(unsupportedBody.source, 'other');
+  assert.match(unsupportedBody.error, /YouTube o SoundCloud/i);
 });

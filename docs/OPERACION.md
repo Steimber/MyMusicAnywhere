@@ -70,6 +70,7 @@ En el archivo `.env` local (nunca versionado en Git) se configuran las siguiente
 | `MAX_QUEUED_PER_USER` | `8` | Máximo de descargas en espera en el servidor por usuario. |
 | `ENABLE_BILIBILI` | `true` | Permite habilitar (`true`) o desactivar (`false`) el respaldo de Bilibili. |
 | `YTDLP_BIN` | `yt-dlp` | Ruta al binario de `yt-dlp` en el servidor. |
+| `YTDLP_PROXY` | *(vacío)* | Proxy opcional (`http://` o `socks5://`) aplicado **únicamente** a las llamadas `yt-dlp` contra YouTube. Su valor nunca se registra en logs ni se expone en la API (el panel de Admin solo indica `Sí` o `No`). |
 | `FFMPEG_BIN` | `ffmpeg` | Ruta al binario de `ffmpeg` en el servidor. |
 | `YTDLP_POT_PROVIDER_URL` | `http://127.0.0.1:4416` | Endpoint local del proveedor de PO-Token para YouTube. |
 | `SESSION_SECRET` | `<REDACTED>` | Clave secreta HMAC para firmar las cookies de sesión (`HttpOnly`). |
@@ -86,8 +87,10 @@ En el archivo `.env` local (nunca versionado en Git) se configuran las siguiente
 
 1. **Actualizar `yt-dlp` con frecuencia:**
    - Los extractores de YouTube y SoundCloud cambian con regularidad. Actualizar el binario en `<VPS_HOST>` (`yt-dlp -U` o mediante `pip install -U yt-dlp`) ante caídas en la tasa de éxito.
-2. **Renovar cookies de YouTube desde el panel de Admin:**
-   - Cuando YouTube empiece a rechazar descargas por sesión caducada, abrir una **ventana de incógnito/privada**, iniciar sesión con una **cuenta secundaria**, exportar las cookies en formato Netscape, **cerrar la ventana privada de inmediato** (para que el navegador no rote las cookies) y pegarlas en el panel de administración de la app.
+2. **Renovar cookies de YouTube o configurar `YTDLP_PROXY` ante bloqueos de IP:**
+   - Si YouTube responde con *“Sign in to confirm you’re not a bot”*, el backend activa automáticamente el estado `youtube_blocked` durante **15 minutos** y salta directamente al respaldo de SoundCloud sin reintentar YouTube en cada canción (consultable en el panel de Administración).
+   - Si el bloqueo es por IP del servidor, definir `YTDLP_PROXY=http://<USUARIO>:<CLAVE>@<PROXY_HOST>:<PUERTO>` en `.env` y ejecutar `pm2 restart mymusicanywhere --update-env`.
+   - Cuando el rechazo sea únicamente por sesión caducada, abrir una **ventana de incógnito/privada**, iniciar sesión con una **cuenta secundaria**, exportar las cookies en formato Netscape, **cerrar la ventana privada de inmediato** (para que el navegador no rote las cookies) y pegarlas en el panel de administración de la app.
 3. **Copia de seguridad externa de `data/store.json`:**
    - El archivo `data/store.json` contiene los usuarios, invitaciones, bibliotecas y listas personalizadas.
    - Generar copias con permisos `600` en `<VPS_HOST>` y descargarlas periódicamente fuera del servidor a un equipo local:

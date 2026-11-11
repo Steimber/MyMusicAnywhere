@@ -1,5 +1,21 @@
 'use client';
 
+function formatBlockedSince(iso) {
+  if (!iso) return '';
+  try {
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return '';
+    return d.toLocaleString('es', {
+      day: '2-digit',
+      month: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit'
+    });
+  } catch {
+    return '';
+  }
+}
+
 export default function AdminPanel({
   isOffline,
   adminData,
@@ -17,6 +33,9 @@ export default function AdminPanel({
   const users = Array.isArray(adminData?.users) ? adminData.users : [];
   const invites = Array.isArray(adminData?.invites) ? adminData.invites : [];
   const storage = adminData?.storage || null;
+  const youtube = adminData?.youtube || null;
+  const ytBlocked = Boolean(youtube?.blocked);
+  const ytSinceText = ytBlocked ? formatBlockedSince(youtube?.blockedSince) : '';
 
   return (
     <section className={isOffline ? 'offline-section-disabled' : ''}>
@@ -65,6 +84,40 @@ export default function AdminPanel({
             <div className="stat-hint tabular-nums" style={{ fontWeight: 700 }}>
               {storage ? `${storage.fileCount} archivos en cola` : 'Calculando…'}
             </div>
+          </div>
+        </div>
+      </div>
+
+      <div className="card" style={{ marginBottom: 16 }}>
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            flexWrap: 'wrap',
+            gap: 12
+          }}
+        >
+          <div>
+            <div className="track-title" style={{ fontSize: '0.96rem' }}>
+              Estado de descargas YouTube
+            </div>
+            <div className="track-sub tabular-nums" style={{ marginTop: 3 }}>
+              {youtube
+                ? ytBlocked
+                  ? `Bloqueado${ytSinceText ? ` desde ${ytSinceText}` : ''} · Respaldo automático en SoundCloud (15 min)`
+                  : 'Operativo · Sin bloqueo activo de IP/bot'
+                : 'Consultando estado…'}
+            </div>
+          </div>
+
+          <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 8 }}>
+            <span className={`badge ${ytBlocked ? 'coral' : 'lime'}`}>
+              {youtube ? (ytBlocked ? 'YouTube bloqueado' : 'YouTube OK') : '—'}
+            </span>
+            <span className="badge">
+              Proxy configurado: {youtube ? (youtube.proxyConfigured ? 'Sí' : 'No') : '—'}
+            </span>
           </div>
         </div>
       </div>

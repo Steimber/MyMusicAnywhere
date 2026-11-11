@@ -23,9 +23,13 @@ import PlayerScrubber from './components/PlayerScrubber';
 import SettingsPanel from './components/SettingsPanel';
 import AdminPanel from './components/AdminPanel';
 import ForYouPanel from './components/ForYouPanel';
+import {
+  NO_SOURCE_FOUND_ERROR,
+  classifyDirectLinkSource
+} from '../lib/download/youtube-status';
 
 const AUDIO_CACHE_NAME = 'my-music-offline-audio-v1';
-const SHELL_CACHE_NAME = 'mymusic-shell-v29';
+const SHELL_CACHE_NAME = 'mymusic-shell-v30';
 const DEFAULT_TRACK_COVER = '/icon.svg?v=3';
 const FORYOU_RECS_STORAGE_KEY = 'mma_foryou_recs_v1';
 const USER_STORAGE_KEY = 'mma_cached_user_v1';
@@ -422,6 +426,13 @@ function Icon({ name, size = 16, className = '' }) {
           <polygon points="10 9 15 12 10 15 10 9" fill="currentColor" stroke="none" />
         </svg>
       );
+    case 'link':
+      return (
+        <svg {...props}>
+          <path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71" />
+          <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
+        </svg>
+      );
     case 'edit':
       return (
         <svg {...props}>
@@ -534,6 +545,10 @@ export default function HomePage() {
   const [ytLinkUrl, setYtLinkUrl] = useState('');
   const [ytLinkPreview, setYtLinkPreview] = useState(null);
   const [ytLinkLoading, setYtLinkLoading] = useState(false);
+  const [ytLinkStage, setYtLinkStage] = useState('idle');
+  const [ytLinkProgress, setYtLinkProgress] = useState(0);
+  const [ytLinkNotice, setYtLinkNotice] = useState('');
+  const [ytLinkReadyTrack, setYtLinkReadyTrack] = useState(null);
   const [ytLinkError, setYtLinkError] = useState('');
   const [ytLinkTargetLib, setYtLinkTargetLib] = useState('offline');
   const menuDialogRef = useRef(null);
@@ -576,7 +591,13 @@ export default function HomePage() {
   const [spotifyNewLibName, setSpotifyNewLibName] = useState('');
 
   // Admin Panel & YouTube Cookies
-  const [adminData, setAdminData] = useState({ users: [], invites: [], storage: null, ytCookies: null });
+  const [adminData, setAdminData] = useState({
+    users: [],
+    invites: [],
+    storage: null,
+    ytCookies: null,
+    youtube: null
+  });
   const [inviteLabel, setInviteLabel] = useState('');
   const [inviteMaxUses, setInviteMaxUses] = useState(1);
   const [adminMsg, setAdminMsg] = useState('');
@@ -2561,11 +2582,16 @@ export default function HomePage() {
     setDownloadPrompt(null);
   }
 
-  function openYtLinkModal(defaultLib = null) {
-    setYtLinkUrl('');
+  function openYtLinkModal(defaultLib = null, initialUrl = '') {
+    const cleanInit = String(initialUrl || '').trim();
+    setYtLinkUrl(cleanInit);
     setYtLinkPreview(null);
     setYtLinkError('');
+    setYtLinkNotice('');
+    setYtLinkProgress(0);
+    setYtLinkReadyTrack(null);
     setYtLinkLoading(false);
+    setYtLinkStage('idle');
     setYtLinkTargetLib(defaultLib || (activeTab === 'library' ? selectedLibrary : 'offline'));
     setYtModalOpen(true);
     setTimeout(() => {
@@ -2576,6 +2602,9 @@ export default function HomePage() {
       ) {
         ytDialogRef.current.showModal();
       }
+      if (cleanInit) {
+        resolveYtLinkPreview(cleanInit);
+      }
     }, 15);
   }
 
@@ -2585,6 +2614,7 @@ export default function HomePage() {
     }
     setYtModalOpen(false);
     setYtLinkError('');
+    setYtLinkNotice('');
   }
 
   function openEditTrackModal(track) {
@@ -2667,85 +2697,150 @@ export default function HomePage() {
   async function resolveYtLinkPreview(rawUrl) {
     const reqId = ++ytPreviewReqIdRef.current;
     const clean = String(rawUrl || '').trim();
+    setYtLinkReadyTrack(null);
+    setYtLinkNotice('');
+    setYtLinkProgress(0);
+
     if (!clean) {
       setYtLinkPreview(null);
       setYtLinkError('');
       setYtLinkLoading(false);
+      setYtLinkStage('idle');
       return null;
     }
-    const isYt = /(?:youtube\.com\/(?:watch\?.*v=|shorts\/|embed\/|live\/)|youtu\.be\/)([\w-]{11})/i.test(
-      clean
-    );
-    if (!isYt) {
+
+    const linkInfo = classifyDirectLinkSource(clean);
+    if (!linkInfo.isUrl) {
       setYtLinkPreview(null);
       setYtLinkLoading(false);
+      setYtLinkStage('idle');
       return null;
     }
+    if (!linkInfo.supported) {
+      setYtLinkPreview(null);
+      setYtLinkLoading(false);
+      setYtLinkStage('error');
+      setYtLinkError('Fuente no soportada (Otra fuente). Pega un enlace directo de YouTube o SoundCloud.');
+      return null;
+    }
+
     setYtLinkLoading(true);
+    setYtLinkStage('analyzing');
     setYtLinkError('');
     try {
       const res = await fetch(`/api/search?q=${encodeURIComponent(clean)}`);
       const data = await res.json();
+      if (ytPreviewReqIdRef.current !== reqId) return null;
+      if (!res.ok) {
+        setYtLinkPreview(null);
+        setYtLinkLoading(false);
+        setYtLinkStage('error');
+        setYtLinkError(data.error || 'No se pudo analizar ese enlace.');
+        return null;
+      }
       const first = (data.results || data.tracks || [])[0] || null;
-      if (ytPreviewReqIdRef.current !== reqId) return first;
       if (first) {
         setYtLinkPreview(first);
         setYtLinkLoading(false);
+        setYtLinkStage('preview');
         return first;
       }
     } catch {}
     if (ytPreviewReqIdRef.current === reqId) {
       setYtLinkLoading(false);
+      setYtLinkStage('error');
+      setYtLinkError('No se pudo analizar el enlace. Verifica la dirección e inténtalo de nuevo.');
     }
     return null;
   }
 
-  async function handleYtLinkSubmit(e) {
-    e.preventDefault();
+  async function runDirectLinkDownload(forceAlternateSource = false) {
     if (isOffline) return;
     const clean = String(ytLinkUrl || '').trim();
-    const match = clean.match(
-      /(?:youtube\.com\/(?:watch\?.*v=|shorts\/|embed\/|live\/)|youtu\.be\/)([\w-]{11})/i
-    );
-    if (!match) {
-      setYtLinkError('Pegá un link válido de YouTube (ej. https://youtu.be/... o youtube.com/watch?v=...).');
+    const linkInfo = classifyDirectLinkSource(clean);
+    if (!linkInfo.isUrl) {
+      setYtLinkStage('error');
+      setYtLinkError('Pega un enlace válido de YouTube o SoundCloud.');
       return;
     }
-    const videoId = match[1];
+    if (!linkInfo.supported) {
+      setYtLinkStage('error');
+      setYtLinkError('Fuente no soportada (Otra fuente). Pega un enlace directo de YouTube o SoundCloud.');
+      return;
+    }
+
+    setYtLinkError('');
+    setYtLinkNotice('');
     let trackObj = ytLinkPreview;
-    if (!trackObj || trackObj.id !== `yt_${videoId}`) {
+    if (!trackObj || trackObj.sourceUrl !== clean) {
       trackObj = await resolveYtLinkPreview(clean);
     }
-    const canonicalUrl = `https://www.youtube.com/watch?v=${videoId}`;
-    const finalTrack = trackObj || {
-      id: `yt_${videoId}`,
-      title: `YouTube (${videoId})`,
-      artist: 'YouTube',
-      album: 'YouTube',
-      genre: 'YouTube',
-      artwork: `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`,
-      previewUrl: null,
-      duration: '—',
-      sourceUrl: canonicalUrl
-    };
+    if (!trackObj) return;
 
     if (ytLinkTargetLib === 'liked') {
-      if (!isLiked(finalTrack.id)) {
-        persistLikes([{ ...finalTrack, addedAt: Date.now() }, ...likedTracks]);
+      if (!isLiked(trackObj.id)) {
+        persistLikes([{ ...trackObj, addedAt: Date.now() }, ...likedTracks]);
       }
     } else if (ytLinkTargetLib && ytLinkTargetLib !== 'offline') {
-      if (!isTrackInPlaylist(ytLinkTargetLib, finalTrack.id)) {
-        toggleTrackInPlaylist(ytLinkTargetLib, finalTrack);
+      if (!isTrackInPlaylist(ytLinkTargetLib, trackObj.id)) {
+        toggleTrackInPlaylist(ytLinkTargetLib, trackObj);
       }
     }
 
     setResults(prev => {
-      if (prev.some(t => String(t.id) === String(finalTrack.id))) return prev;
-      return [finalTrack, ...prev];
+      if (prev.some(t => String(t.id) === String(trackObj.id))) return prev;
+      return [trackObj, ...prev];
     });
 
-    closeYtLinkModal();
-    await startDownload(finalTrack);
+    setYtLinkStage('converting');
+    setYtLinkProgress(10);
+    let lastErrorInfo = { error: NO_SOURCE_FOUND_ERROR, cause: null };
+    let completedTrack = trackObj;
+
+    const ok = await startDownload(trackObj, true, true, {
+      forceAlternateSource,
+      onProgressUpdate: info => {
+        if (info.progress != null) {
+          setYtLinkProgress(info.progress);
+        }
+        if (info.notice) {
+          setYtLinkNotice(info.notice);
+        }
+        if (info.track) {
+          completedTrack = info.track;
+        }
+        if (info.status === 'error') {
+          lastErrorInfo = {
+            error: info.error || NO_SOURCE_FOUND_ERROR,
+            cause: info.cause || null
+          };
+        }
+      }
+    });
+
+    if (ok) {
+      setYtLinkProgress(100);
+      setYtLinkReadyTrack(completedTrack);
+      setYtLinkStage('ready');
+    } else {
+      setYtLinkStage('error');
+      const detail = lastErrorInfo.cause
+        ? `${lastErrorInfo.error} (${lastErrorInfo.cause})`
+        : lastErrorInfo.error || NO_SOURCE_FOUND_ERROR;
+      setYtLinkError(detail);
+    }
+  }
+
+  async function handleYtLinkSubmit(e) {
+    e.preventDefault();
+    if (ytLinkStage === 'converting' || ytLinkLoading) return;
+    if (ytLinkStage === 'ready' && ytLinkReadyTrack) {
+      const readyTrack = ytLinkReadyTrack;
+      closeYtLinkModal();
+      playFromList([readyTrack], 0);
+      return;
+    }
+    await runDirectLinkDownload(false);
   }
 
   function handleDialogBackdropClick(e, closeFn) {
@@ -4343,7 +4438,13 @@ export default function HomePage() {
     }
   }
 
-  async function startDownload(track, waitUntilFinished = false, forceRetry = false) {
+  async function startDownload(
+    track,
+    waitUntilFinished = false,
+    forceRetry = false,
+    options = {}
+  ) {
+    const { forceAlternateSource = false, onProgressUpdate = null } = options || {};
     const key = track.id || track.title;
     if (downloads[key]?.status === 'downloading' && !forceRetry) return false;
 
@@ -4354,6 +4455,10 @@ export default function HomePage() {
       ...prev,
       [key]: {
         status: 'downloading',
+        stage: 'analyzing',
+        notice: null,
+        error: null,
+        cause: null,
         progress: 0,
         startedAt,
         isManual,
@@ -4373,21 +4478,32 @@ export default function HomePage() {
           artwork: track.artwork,
           previewUrl: track.previewUrl || null,
           sourceUrl: track.sourceUrl || null,
+          forceAlternateSource,
           priority: isManual,
           query: track.sourceUrl || `${track.title} ${track.artist || ''}`.trim()
         })
       });
       const data = await res.json();
-      if (!data.downloadId) {
-        setDownloads(prev => ({ ...prev, [key]: { status: 'error' } }));
+      if (!res.ok || !data.downloadId) {
+        const errMsg = data.error || NO_SOURCE_FOUND_ERROR;
+        setDownloads(prev => ({
+          ...prev,
+          [key]: { status: 'error', stage: 'error', error: errMsg, cause: null }
+        }));
+        onProgressUpdate?.({ status: 'error', stage: 'error', error: errMsg, cause: null });
         return false;
       }
 
       const dlId = data.downloadId;
+      const initialNotice = data.notice || null;
       setDownloads(prev => ({
         ...prev,
         [key]: {
           status: 'downloading',
+          stage: 'analyzing',
+          notice: initialNotice,
+          error: null,
+          cause: null,
           progress: 8,
           startedAt,
           isManual,
@@ -4396,6 +4512,12 @@ export default function HomePage() {
           trackMeta: track
         }
       }));
+      onProgressUpdate?.({
+        status: 'downloading',
+        stage: 'analyzing',
+        progress: 8,
+        notice: initialNotice
+      });
 
       const pollToFinish = async () => {
         const pollStartedAt = Date.now();
@@ -4407,7 +4529,16 @@ export default function HomePage() {
           try {
             const checkRes = await fetch(`/api/download?id=${dlId}`, { cache: 'no-store' });
             if (checkRes.status === 404) {
-              setDownloads(prev => ({ ...prev, [key]: { status: 'error' } }));
+              setDownloads(prev => ({
+                ...prev,
+                [key]: { status: 'error', stage: 'error', error: NO_SOURCE_FOUND_ERROR }
+              }));
+              onProgressUpdate?.({
+                status: 'error',
+                stage: 'error',
+                error: NO_SOURCE_FOUND_ERROR,
+                cause: null
+              });
               return false;
             }
             if (!checkRes.ok) continue;
@@ -4415,9 +4546,12 @@ export default function HomePage() {
             if (checkData.status === 'ready' && checkData.filename) {
               const streamUrl = `/api/stream?file=${encodeURIComponent(checkData.filename)}`;
               const isGenericTitle =
-                !track.title || /^youtube\s*\(/i.test(String(track.title));
+                !track.title ||
+                /^youtube\s*\(/i.test(String(track.title)) ||
+                String(track.title) === 'Pista de SoundCloud';
               const isGenericArtist =
-                !track.artist || String(track.artist).toLowerCase() === 'youtube';
+                !track.artist ||
+                ['youtube', 'soundcloud'].includes(String(track.artist).toLowerCase());
               const resolvedTitle =
                 (isGenericTitle && checkData.title ? checkData.title : track.title) ||
                 checkData.title ||
@@ -4427,7 +4561,7 @@ export default function HomePage() {
                 checkData.artist ||
                 'Audio MP3';
               const resolvedArtwork = track.artwork || checkData.artwork || DEFAULT_TRACK_COVER;
-              const savedOk = await saveUrlToOfflineCache(streamUrl, {
+              const resolvedTrack = {
                 ...track,
                 id: track.id || `offline_${checkData.filename}`,
                 title: resolvedTitle,
@@ -4435,15 +4569,34 @@ export default function HomePage() {
                 artwork: resolvedArtwork,
                 filename: checkData.filename,
                 streamUrl
-              });
+              };
+              const savedOk = await saveUrlToOfflineCache(streamUrl, resolvedTrack);
               if (!savedOk) {
-                setDownloads(prev => ({ ...prev, [key]: { status: 'error' } }));
+                const saveErr = 'No se pudo guardar el audio en la memoria del dispositivo.';
+                setDownloads(prev => ({
+                  ...prev,
+                  [key]: { status: 'error', stage: 'error', error: saveErr }
+                }));
+                onProgressUpdate?.({ status: 'error', stage: 'error', error: saveErr, cause: null });
                 return false;
               }
               setDownloads(prev => ({
                 ...prev,
-                [key]: { ...prev[key], ...checkData, status: 'ready', progress: 100 }
+                [key]: {
+                  ...prev[key],
+                  ...checkData,
+                  status: 'ready',
+                  stage: 'ready',
+                  progress: 100
+                }
               }));
+              onProgressUpdate?.({
+                status: 'ready',
+                stage: 'ready',
+                progress: 100,
+                notice: checkData.notice || null,
+                track: resolvedTrack
+              });
               setResults(prev =>
                 prev.map(t =>
                   String(t.id) === String(key)
@@ -4471,21 +4624,63 @@ export default function HomePage() {
               return true;
             }
             if (checkData.status === 'error') {
-              setDownloads(prev => ({ ...prev, [key]: { status: 'error' } }));
+              const errMsg = checkData.error || NO_SOURCE_FOUND_ERROR;
+              setDownloads(prev => ({
+                ...prev,
+                [key]: {
+                  status: 'error',
+                  stage: 'error',
+                  error: errMsg,
+                  cause: checkData.cause || null,
+                  notice: checkData.notice || null
+                }
+              }));
+              onProgressUpdate?.({
+                status: 'error',
+                stage: 'error',
+                error: errMsg,
+                cause: checkData.cause || null,
+                notice: checkData.notice || null
+              });
               return false;
             }
+            const nextProg = checkData.progress || 8;
+            const nextStage = checkData.stage || 'converting';
+            const nextNotice = checkData.notice || null;
             setDownloads(prev => ({
               ...prev,
               [key]: {
                 ...prev[key],
-                progress: checkData.progress || prev[key]?.progress || 8
+                stage: nextStage,
+                notice: nextNotice || prev[key]?.notice || null,
+                progress: Math.max(prev[key]?.progress || 8, nextProg)
               }
             }));
+            onProgressUpdate?.({
+              status: 'downloading',
+              stage: nextStage,
+              progress: nextProg,
+              notice: nextNotice
+            });
           } catch {
             // Transient mobile network handoff: keep polling until timeout
           }
         }
-        setDownloads(prev => ({ ...prev, [key]: { status: 'error' } }));
+        setDownloads(prev => ({
+          ...prev,
+          [key]: {
+            status: 'error',
+            stage: 'error',
+            error: NO_SOURCE_FOUND_ERROR,
+            cause: 'Tiempo de espera agotado'
+          }
+        }));
+        onProgressUpdate?.({
+          status: 'error',
+          stage: 'error',
+          error: NO_SOURCE_FOUND_ERROR,
+          cause: 'Tiempo de espera agotado'
+        });
         return false;
       };
 
@@ -4496,7 +4691,16 @@ export default function HomePage() {
 
       return await pollToFinish();
     } catch {
-      setDownloads(prev => ({ ...prev, [key]: { status: 'error' } }));
+      setDownloads(prev => ({
+        ...prev,
+        [key]: { status: 'error', stage: 'error', error: NO_SOURCE_FOUND_ERROR }
+      }));
+      onProgressUpdate?.({
+        status: 'error',
+        stage: 'error',
+        error: NO_SOURCE_FOUND_ERROR,
+        cause: null
+      });
       return false;
     }
   }
@@ -5409,6 +5613,8 @@ export default function HomePage() {
   function renderSimultaneousDownloadsBanner() {
     if (totalActiveDownloads === 0) return null;
     const activeSlots = activeDownloadEntries.slice(0, MAX_SIMULTANEOUS_DOWNLOADS);
+    const activeNotice =
+      activeDownloadEntries.map(([, d]) => d?.notice).find(Boolean) || null;
     const queueLabel =
       syncingAll && syncProgress.total > 0
         ? `${syncProgress.done}/${syncProgress.total} · ${simultaneousActiveCount}/${MAX_SIMULTANEOUS_DOWNLOADS}`
@@ -5433,6 +5639,7 @@ export default function HomePage() {
             );
           })}
         </div>
+        {activeNotice && <div className="sim-download-notice">{activeNotice}</div>}
       </div>
     );
   }
@@ -5643,11 +5850,13 @@ export default function HomePage() {
                   Propia
                 </span>
               )}
-              <span className="track-sub-text">
+              <span className={`track-sub-text ${dl?.status === 'error' ? 'is-error-text' : ''}`.trim()}>
                 {dl?.status === 'downloading'
                   ? isQueuedForSlot
                     ? `En cola · ${track.artist}`
-                    : `${Math.round(dl.progress || 8)}% · ${track.artist}`
+                    : `${Math.round(dl.progress || 8)}% · ${dl.notice || track.artist}`
+                  : dl?.status === 'error'
+                  ? `${dl.error || NO_SOURCE_FOUND_ERROR}${dl.cause ? ` (${dl.cause})` : ''}`
                   : subtitleParts.join(' · ')}
               </span>
             </div>
@@ -5678,6 +5887,17 @@ export default function HomePage() {
           ) : dl?.status === 'downloading' ? (
             <button type="button" className="icon-btn" disabled aria-label="Descargando">
               <Icon name="loader" size={16} className="spin" />
+            </button>
+          ) : dl?.status === 'error' && track.source !== 'own' ? (
+            <button
+              type="button"
+              className="btn secondary sm retry-alt-btn"
+              disabled={isOffline}
+              onClick={() => startDownload(track, false, true, { forceAlternateSource: true })}
+              title="Reintentar con otra fuente"
+            >
+              <Icon name="refresh" size={13} />
+              <span>Reintentar con otra fuente</span>
             </button>
           ) : (
             <button
@@ -6359,7 +6579,13 @@ export default function HomePage() {
                 className={`search-bar ${isOffline ? 'offline-section-disabled' : ''}`.trim()}
                 onSubmit={e => {
                   e.preventDefault();
-                  if (!isOffline && query.trim()) {
+                  const trimmed = query.trim();
+                  if (!isOffline && trimmed) {
+                    if (classifyDirectLinkSource(trimmed).isUrl) {
+                      setQuery('');
+                      openYtLinkModal('offline', trimmed);
+                      return;
+                    }
                     setActiveChip('');
                     searchTracks(query);
                   }
@@ -6373,10 +6599,18 @@ export default function HomePage() {
                   placeholder={
                     isOffline
                       ? 'Sin conexión a internet…'
-                      : '¿Qué querés escuchar hoy? Canción, artista o álbum…'
+                      : '¿Qué querés escuchar hoy? Canción, artista o enlace…'
                   }
                   value={query}
                   onChange={e => setQuery(e.target.value)}
+                  onPaste={e => {
+                    if (isOffline) return;
+                    const pasted = e.clipboardData?.getData('text')?.trim() || '';
+                    if (!query.trim() && classifyDirectLinkSource(pasted).isUrl) {
+                      e.preventDefault();
+                      openYtLinkModal('offline', pasted);
+                    }
+                  }}
                   disabled={isOffline}
                 />
                 {query && (
@@ -6401,11 +6635,11 @@ export default function HomePage() {
                   className="btn ghost sm"
                   disabled={isOffline}
                   onClick={() => openYtLinkModal('offline')}
-                  title="Pegar link directo de YouTube para descargar canción rara"
+                  title="Pegar enlace directo de YouTube o SoundCloud"
                   style={{ display: 'inline-flex', alignItems: 'center', gap: 5, flexShrink: 0 }}
                 >
-                  <Icon name="youtube" size={15} />
-                  <span>YouTube</span>
+                  <Icon name="link" size={15} />
+                  <span>Enlace</span>
                 </button>
               </form>
 
@@ -6598,10 +6832,10 @@ export default function HomePage() {
                   className="library-pill"
                   disabled={isOffline}
                   onClick={() => openYtLinkModal(selectedLibrary)}
-                  title="Descargar canción con link de YouTube"
+                  title="Pegar enlace directo de YouTube o SoundCloud"
                 >
-                  <Icon name="youtube" size={14} />
-                  <span>Link YouTube</span>
+                  <Icon name="link" size={14} />
+                  <span>Pegar enlace</span>
                 </button>
 
                 <label
@@ -7422,179 +7656,290 @@ export default function HomePage() {
         )}
       </dialog>
 
-      {/* ==================== DIALOG 5: YOUTUBE DIRECT LINK DOWNLOAD MODAL ==================== */}
+      {/* ==================== DIALOG 5: DIRECT LINK DOWNLOAD MODAL ==================== */}
       <dialog
         ref={ytDialogRef}
-        closedby="any"
+        closedby={ytLinkStage === 'converting' ? 'none' : 'any'}
         className="save-dialog"
         aria-labelledby="yt-dialog-title"
         onClose={() => setYtModalOpen(false)}
-        onClick={e => handleDialogBackdropClick(e, closeYtLinkModal)}
+        onClick={e => {
+          if (ytLinkStage === 'converting') return;
+          handleDialogBackdropClick(e, closeYtLinkModal);
+        }}
       >
-        <div>
-          <div className="dialog-head">
-            <div style={{ minWidth: 0 }}>
-              <div
-                id="yt-dialog-title"
-                className="dialog-title"
-                style={{ display: 'flex', alignItems: 'center', gap: 7 }}
-              >
-                <Icon name="youtube" size={17} />
-                <span>Descargar desde link de YouTube</span>
-              </div>
-              <div className="dialog-sub">
-                Ideal para canciones raras, covers, remixes o temas que solo están en YouTube
-              </div>
-            </div>
-            <button type="button" className="icon-btn" onClick={closeYtLinkModal}>
-              <Icon name="close" size={16} />
-            </button>
-          </div>
-
-          <form onSubmit={handleYtLinkSubmit}>
-            <div className="search-bar" style={{ marginBottom: 10 }}>
-              <Icon name="youtube" size={16} className="search-icon" />
-              <input
-                type="url"
-                className="search-input"
-                placeholder="Pegá el link (https://youtu.be/... o youtube.com/watch?v=...)"
-                value={ytLinkUrl}
-                onChange={e => {
-                  const val = e.target.value;
-                  setYtLinkUrl(val);
-                  resolveYtLinkPreview(val);
-                }}
-                autoFocus
-                required
-              />
-              {ytLinkUrl && (
+        {(() => {
+          const detectedLink = classifyDirectLinkSource(ytLinkUrl);
+          return (
+            <div>
+              <div className="dialog-head">
+                <div style={{ minWidth: 0 }}>
+                  <h2
+                    id="yt-dialog-title"
+                    className="dialog-title"
+                    style={{ margin: 0, display: 'flex', alignItems: 'center', gap: 7 }}
+                  >
+                    <Icon name="link" size={17} />
+                    <span>Descargar desde enlace</span>
+                  </h2>
+                  <div className="dialog-sub">
+                    Pega un enlace de YouTube o SoundCloud para ver la vista previa antes de bajar
+                  </div>
+                </div>
                 <button
                   type="button"
                   className="icon-btn"
-                  onClick={() => {
-                    setYtLinkUrl('');
-                    setYtLinkPreview(null);
-                    setYtLinkError('');
-                  }}
-                  aria-label="Limpiar link"
+                  onClick={closeYtLinkModal}
+                  aria-label="Cerrar ventana de enlace"
                 >
-                  <Icon name="close" size={14} />
+                  <Icon name="close" size={16} />
                 </button>
-              )}
-            </div>
-
-            {ytLinkLoading && (
-              <div style={{ fontSize: '0.78rem', color: 'var(--text-muted)', marginBottom: 10 }}>
-                Obteniendo datos del video…
               </div>
-            )}
 
-            {ytLinkPreview && (
-              <div
-                style={{
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: 10,
-                  padding: '8px 10px',
-                  borderRadius: 12,
-                  background: 'var(--surface-2)',
-                  border: '1px solid var(--border)',
-                  marginBottom: 10
-                }}
-              >
-                <div className="track-cover" style={{ width: 42, height: 42, flexShrink: 0 }}>
-                  <img
-                    src={
-                      isPlaceholderCover(ytLinkPreview.artwork)
-                        ? DEFAULT_TRACK_COVER
-                        : ytLinkPreview.artwork
-                    }
-                    alt=""
-                    onError={e => {
-                      e.currentTarget.src = DEFAULT_TRACK_COVER;
+              <form onSubmit={handleYtLinkSubmit}>
+                <label htmlFor="direct-link-input" className="visually-hidden">
+                  Enlace directo de YouTube o SoundCloud
+                </label>
+                <div className="search-bar" style={{ marginBottom: 10 }}>
+                  <Icon name="link" size={16} className="search-icon" />
+                  <input
+                    id="direct-link-input"
+                    name="directUrl"
+                    type="url"
+                    className="search-input"
+                    placeholder="Pega aquí el enlace (YouTube o SoundCloud)…"
+                    value={ytLinkUrl}
+                    autoCorrect="off"
+                    autoCapitalize="none"
+                    spellCheck={false}
+                    disabled={ytLinkStage === 'converting'}
+                    onChange={e => {
+                      const val = e.target.value;
+                      setYtLinkUrl(val);
+                      resolveYtLinkPreview(val);
                     }}
+                    autoFocus
+                    required
                   />
+                  {detectedLink.isUrl && (
+                    <span
+                      className={`badge ${
+                        detectedLink.source === 'other' ? 'coral' : 'lime'
+                      }`}
+                      style={{ flexShrink: 0 }}
+                    >
+                      {detectedLink.label}
+                    </span>
+                  )}
+                  {ytLinkUrl && ytLinkStage !== 'converting' && (
+                    <button
+                      type="button"
+                      className="icon-btn"
+                      onClick={() => {
+                        setYtLinkUrl('');
+                        setYtLinkPreview(null);
+                        setYtLinkError('');
+                        setYtLinkNotice('');
+                        setYtLinkReadyTrack(null);
+                        setYtLinkStage('idle');
+                      }}
+                      aria-label="Limpiar enlace"
+                    >
+                      <Icon name="close" size={14} />
+                    </button>
+                  )}
                 </div>
-                <div style={{ minWidth: 0, flex: 1 }}>
-                  <div className="track-title" style={{ fontSize: '0.84rem' }}>
-                    {ytLinkPreview.title}
+
+                {(ytLinkStage === 'analyzing' ||
+                  ytLinkStage === 'converting' ||
+                  ytLinkStage === 'ready') && (
+                  <div className="link-flow-status" role="status" aria-live="polite">
+                    <div className="link-flow-steps">
+                      <span
+                        className={`link-step-pill ${
+                          ytLinkStage === 'analyzing' ? 'active' : 'done'
+                        }`}
+                      >
+                        {ytLinkStage === 'analyzing' && (
+                          <Icon name="loader" size={12} className="spin" />
+                        )}
+                        <span>Analizando</span>
+                      </span>
+                      <span
+                        className={`link-step-pill ${
+                          ytLinkStage === 'converting'
+                            ? 'active'
+                            : ytLinkStage === 'ready'
+                            ? 'done'
+                            : ''
+                        }`.trim()}
+                      >
+                        {ytLinkStage === 'converting' && (
+                          <Icon name="loader" size={12} className="spin" />
+                        )}
+                        <span>
+                          {ytLinkStage === 'converting'
+                            ? `Convirtiendo · ${Math.round(ytLinkProgress || 10)}%`
+                            : 'Convirtiendo'}
+                        </span>
+                      </span>
+                      <span
+                        className={`link-step-pill ${ytLinkStage === 'ready' ? 'ready' : ''}`.trim()}
+                      >
+                        {ytLinkStage === 'ready' && <Icon name="check" size={12} />}
+                        <span>Listo</span>
+                      </span>
+                    </div>
+
+                    {ytLinkStage === 'converting' && (
+                      <div className="link-flow-progress">
+                        <div style={{ width: `${Math.max(8, Math.round(ytLinkProgress || 10))}%` }} />
+                      </div>
+                    )}
+
+                    {ytLinkNotice && <div className="link-flow-notice">{ytLinkNotice}</div>}
                   </div>
-                  <div className="track-sub" style={{ fontSize: '0.74rem' }}>
-                    {ytLinkPreview.artist}
+                )}
+
+                {ytLinkPreview && (
+                  <div className="link-preview-card">
+                    <div className="track-cover" style={{ width: 52, height: 52, flexShrink: 0 }}>
+                      <img
+                        src={
+                          isPlaceholderCover(ytLinkPreview.artwork)
+                            ? DEFAULT_TRACK_COVER
+                            : ytLinkPreview.artwork
+                        }
+                        alt=""
+                        onError={e => {
+                          e.currentTarget.src = DEFAULT_TRACK_COVER;
+                        }}
+                      />
+                    </div>
+                    <div style={{ minWidth: 0, flex: 1 }}>
+                      <div className="track-title" style={{ fontSize: '0.88rem' }}>
+                        {ytLinkPreview.title}
+                      </div>
+                      <div className="track-sub tabular-nums" style={{ fontSize: '0.76rem' }}>
+                        <span>{ytLinkPreview.artist}</span>
+                        <span>
+                          {' · '}
+                          {ytLinkPreview.duration && ytLinkPreview.duration !== '—'
+                            ? ytLinkPreview.duration
+                            : 'Duración automática'}
+                        </span>
+                      </div>
+                    </div>
                   </div>
+                )}
+
+                {ytLinkError && (
+                  <div className="link-flow-error" role="alert">
+                    <div className="link-flow-error-text">{ytLinkError}</div>
+                    {detectedLink.supported && (
+                      <button
+                        type="button"
+                        className="btn secondary sm"
+                        disabled={isOffline || ytLinkStage === 'converting'}
+                        onClick={() => runDirectLinkDownload(true)}
+                      >
+                        <Icon name="refresh" size={13} />
+                        <span>Reintentar con otra fuente</span>
+                      </button>
+                    )}
+                  </div>
+                )}
+
+                <div style={{ fontSize: '0.76rem', color: 'var(--muted)', marginBottom: 6 }}>
+                  Guardar en:
                 </div>
-              </div>
-            )}
-
-            {ytLinkError && (
-              <div
-                style={{
-                  fontSize: '0.78rem',
-                  color: '#ef4444',
-                  marginBottom: 10
-                }}
-              >
-                {ytLinkError}
-              </div>
-            )}
-
-            <div style={{ fontSize: '0.76rem', color: 'var(--text-muted)', marginBottom: 6 }}>
-              Guardar también en:
-            </div>
-            <div className="dialog-list" style={{ maxHeight: 165, overflowY: 'auto', marginBottom: 12 }}>
-              <button
-                type="button"
-                className={`dialog-option ${ytLinkTargetLib === 'offline' ? 'selected' : ''}`}
-                onClick={() => setYtLinkTargetLib('offline')}
-              >
-                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 7 }}>
-                  <Icon name="offline-pin" size={14} /> Solo en Descargadas (dispositivo)
-                </span>
-                {ytLinkTargetLib === 'offline' && <Icon name="check" size={14} />}
-              </button>
-
-              <button
-                type="button"
-                className={`dialog-option ${ytLinkTargetLib === 'liked' ? 'selected' : ''}`}
-                onClick={() => setYtLinkTargetLib('liked')}
-              >
-                <span style={{ display: 'inline-flex', alignItems: 'center', gap: 7 }}>
-                  <Icon name="heart-fill" size={14} /> Favoritos
-                </span>
-                {ytLinkTargetLib === 'liked' && <Icon name="check" size={14} />}
-              </button>
-
-              {customPlaylists.map(pl => (
-                <button
-                  key={pl.id}
-                  type="button"
-                  className={`dialog-option ${ytLinkTargetLib === pl.id ? 'selected' : ''}`}
-                  onClick={() => setYtLinkTargetLib(pl.id)}
+                <div
+                  className="dialog-list"
+                  style={{ maxHeight: 150, overflowY: 'auto', marginBottom: 14 }}
                 >
-                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: 7 }}>
-                    <Icon name="folder" size={14} /> {pl.name}
-                  </span>
-                  {ytLinkTargetLib === pl.id && <Icon name="check" size={14} />}
-                </button>
-              ))}
-            </div>
+                  <button
+                    type="button"
+                    className={`dialog-option ${ytLinkTargetLib === 'offline' ? 'selected' : ''}`}
+                    disabled={ytLinkStage === 'converting'}
+                    onClick={() => setYtLinkTargetLib('offline')}
+                  >
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 7 }}>
+                      <Icon name="offline-pin" size={14} /> Solo en Descargadas (dispositivo)
+                    </span>
+                    {ytLinkTargetLib === 'offline' && <Icon name="check" size={14} />}
+                  </button>
 
-            <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
-              <button type="button" className="btn ghost sm" onClick={closeYtLinkModal}>
-                Cancelar
-              </button>
-              <button
-                type="submit"
-                className="btn sm"
-                disabled={isOffline || !ytLinkUrl.trim()}
-                style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}
-              >
-                <Icon name="download" size={14} />
-                <span>Descargar canción</span>
-              </button>
+                  <button
+                    type="button"
+                    className={`dialog-option ${ytLinkTargetLib === 'liked' ? 'selected' : ''}`}
+                    disabled={ytLinkStage === 'converting'}
+                    onClick={() => setYtLinkTargetLib('liked')}
+                  >
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 7 }}>
+                      <Icon name="heart-fill" size={14} /> Favoritos
+                    </span>
+                    {ytLinkTargetLib === 'liked' && <Icon name="check" size={14} />}
+                  </button>
+
+                  {customPlaylists.map(pl => (
+                    <button
+                      key={pl.id}
+                      type="button"
+                      className={`dialog-option ${ytLinkTargetLib === pl.id ? 'selected' : ''}`}
+                      disabled={ytLinkStage === 'converting'}
+                      onClick={() => setYtLinkTargetLib(pl.id)}
+                    >
+                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: 7 }}>
+                        <Icon name="folder" size={14} /> {pl.name}
+                      </span>
+                      {ytLinkTargetLib === pl.id && <Icon name="check" size={14} />}
+                    </button>
+                  ))}
+                </div>
+
+                <button
+                  type="submit"
+                  className="btn"
+                  disabled={
+                    isOffline ||
+                    !ytLinkUrl.trim() ||
+                    ytLinkLoading ||
+                    ytLinkStage === 'converting' ||
+                    (detectedLink.isUrl && !detectedLink.supported)
+                  }
+                  style={{
+                    width: '100%',
+                    justifyContent: 'center',
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: 7
+                  }}
+                >
+                  <Icon
+                    name={
+                      ytLinkStage === 'ready'
+                        ? 'play'
+                        : ytLinkStage === 'converting'
+                        ? 'loader'
+                        : 'download'
+                    }
+                    size={15}
+                    className={ytLinkStage === 'converting' ? 'spin' : ''}
+                  />
+                  <span>
+                    {ytLinkStage === 'analyzing'
+                      ? 'Analizando…'
+                      : ytLinkStage === 'converting'
+                      ? 'Convirtiendo…'
+                      : ytLinkStage === 'ready'
+                      ? 'Listo · Escuchar ahora'
+                      : 'Descargar'}
+                  </span>
+                </button>
+              </form>
             </div>
-          </form>
-        </div>
+          );
+        })()}
       </dialog>
 
       {/* ==================== DIALOG 6: EDIT TRACK METADATA MODAL ==================== */}

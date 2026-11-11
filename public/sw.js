@@ -1,4 +1,4 @@
-const STATIC_CACHE = 'mymusic-shell-v29';
+const STATIC_CACHE = 'mymusic-shell-v30';
 const AUDIO_CACHE = 'my-music-offline-audio-v1';
 
 function inferAudioMimeFromUrl(reqUrl, cachedResponse) {
