@@ -1,21 +1,5 @@
-import { NextResponse } from 'next/server';
-
-const IGNORED_TERMS = new Set([
-  'offline',
-  'música',
-  'musica',
-  'music',
-  'spotify',
-  'spotify csv',
-  'offline pwa',
-  'guardado en dispositivo',
-  'guardado desde servidor',
-  'audio mp3',
-  'desconocido',
-  'unknown',
-  'varios',
-  'various artists'
-]);
+import { buildSmartShuffleOrder } from '../../../lib/shuffle.js';
+import { createSeededRng, isCleanTerm } from '../../../lib/autoplaylists.js';
 
 const CURATED_DISCOVERY_POOLS = [
   { label: ' Tendencias Globales & Pop', artists: ['The Weeknd', 'Dua Lipa', 'Bruno Mars', 'Billie Eilish', 'Calvin Harris'] },
@@ -25,57 +9,11 @@ const CURATED_DISCOVERY_POOLS = [
   { label: 'R&B, Soul & Chill', artists: ['SZA', 'Frank Ocean', 'Daniel Caesar', 'Kali Uchis', 'Anderson .Paak'] }
 ];
 
-function isCleanTerm(str) {
-  if (!str || typeof str !== 'string') return false;
-  const clean = str.trim().toLowerCase();
-  if (clean.length < 2) return false;
-  if (IGNORED_TERMS.has(clean)) return false;
-  if (clean.startsWith('offline_')) return false;
-  return true;
-}
-
 function formatDuration(seconds) {
   if (!seconds || isNaN(seconds)) return '—';
   const m = Math.floor(seconds / 60);
   const s = Math.floor(seconds % 60).toString().padStart(2, '0');
   return `${m}:${s}`;
-}
-
-/**
- * Fisher-Yates shuffle + Artist Spread constraint so recommendations never clump the same artist back-to-back.
- */
-function smartShuffleTracks(tracks, minArtistDistance = 2) {
-  const pool = [...tracks];
-  for (let i = pool.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
-    [pool[i], pool[j]] = [pool[j], pool[i]];
-  }
-
-  const result = [];
-  const recentArtists = [];
-
-  while (pool.length > 0) {
-    let selectedIdx = -1;
-    for (let i = 0; i < pool.length; i++) {
-      const artistKey = (pool[i].artist || '').toLowerCase();
-      if (!recentArtists.includes(artistKey)) {
-        selectedIdx = i;
-        break;
-      }
-    }
-    if (selectedIdx === -1) selectedIdx = 0;
-
-    const chosen = pool.splice(selectedIdx, 1)[0];
-    result.push(chosen);
-
-    const chosenArtist = (chosen.artist || '').toLowerCase();
-    recentArtists.push(chosenArtist);
-    if (recentArtists.length > minArtistDistance) {
-      recentArtists.shift();
-    }
-  }
-
-  return result;
 }
 
 async function fetchJsonWithTimeout(url, timeoutMs = 4500) {
@@ -166,6 +104,10 @@ export async function POST(request) {
   try {
     const body = await request.json().catch(() => ({}));
     const mode = body.mode === 'random' ? 'random' : 'recommended';
+    const rng =
+      typeof body.seed === 'string' && body.seed.trim()
+        ? createSeededRng(body.seed.trim())
+        : Math.random;
     const rawArtists = Array.isArray(body.artists) ? body.artists.filter(isCleanTerm) : [];
     const rawGenres = Array.isArray(body.genres) ? body.genres.filter(isCleanTerm) : [];
     const excludeKeys = new Set(
@@ -177,9 +119,13 @@ export async function POST(request) {
     let finalMode = mode;
 
     if (mode === 'recommended' && (rawArtists.length > 0 || rawGenres.length > 0)) {
-      // Pick up to 3 favorite artists randomly from the user's top 6 artists for fresh variety
+      // Pick up to 3 top affinity artists deterministically when seeded, or varied from top 6
       const topPool = [...new Set(rawArtists)].slice(0, 6);
-      const shuffledSeeds = [...topPool].sort(() => Math.random() - 0.5);
+      const shuffledSeeds = [...topPool];
+      for (let i = shuffledSeeds.length - 1; i > 0; i--) {
+        const j = Math.floor(rng() * (i + 1));
+        [shuffledSeeds[i], shuffledSeeds[j]] = [shuffledSeeds[j], shuffledSeeds[i]];
+      }
       seedArtists = shuffledSeeds.slice(0, 3);
       const topGenre = rawGenres[0] || '';
       label =
@@ -189,8 +135,12 @@ export async function POST(request) {
     } else {
       finalMode = 'random';
       const chosenPool =
-        CURATED_DISCOVERY_POOLS[Math.floor(Math.random() * CURATED_DISCOVERY_POOLS.length)];
-      const shuffledArtists = [...chosenPool.artists].sort(() => Math.random() - 0.5);
+        CURATED_DISCOVERY_POOLS[Math.floor(rng() * CURATED_DISCOVERY_POOLS.length)];
+      const shuffledArtists = [...chosenPool.artists];
+      for (let i = shuffledArtists.length - 1; i > 0; i--) {
+        const j = Math.floor(rng() * (i + 1));
+        [shuffledArtists[i], shuffledArtists[j]] = [shuffledArtists[j], shuffledArtists[i]];
+      }
       seedArtists = shuffledArtists.slice(0, 3);
       label = chosenPool.label.trim();
     }
@@ -230,15 +180,16 @@ export async function POST(request) {
       uniqueTracks.push(t);
     }
 
-    const smartOrdered = smartShuffleTracks(uniqueTracks, 2).slice(0, 24);
+    const orderIndices = buildSmartShuffleOrder(uniqueTracks, { rng });
+    const smartOrdered = orderIndices.map(i => uniqueTracks[i]).slice(0, 32);
 
-    return NextResponse.json({
+    return Response.json({
       mode: finalMode,
       label: label || 'Mix descubierto',
       results: smartOrdered,
       tracks: smartOrdered
     });
   } catch (err) {
-    return NextResponse.json({ error: err.message, results: [], tracks: [] }, { status: 500 });
+    return Response.json({ error: err.message, results: [], tracks: [] }, { status: 500 });
   }
 }

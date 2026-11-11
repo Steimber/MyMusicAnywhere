@@ -1,4 +1,3 @@
-import { NextResponse } from 'next/server';
 import { getSessionUser } from '../../../lib/store.js';
 import {
   MAX_LISTENING_BODY_BYTES,
@@ -11,15 +10,15 @@ export const runtime = 'nodejs';
 export async function GET(request) {
   const user = getSessionUser(request);
   if (!user) {
-    return NextResponse.json({ error: 'No autorizado' }, { status: 401 });
+    return Response.json({ error: 'No autorizado' }, { status: 401 });
   }
 
   const data = getUserListeningHistory(user.id);
   if (!data.ok) {
-    return NextResponse.json({ error: data.error }, { status: data.status || 400 });
+    return Response.json({ error: data.error }, { status: data.status || 400 });
   }
 
-  return NextResponse.json({
+  return Response.json({
     hasSnapshot: Boolean(data.hasSnapshot),
     version: data.version,
     updatedAt: data.updatedAt,
@@ -30,18 +29,18 @@ export async function GET(request) {
 export async function PUT(request) {
   const user = getSessionUser(request);
   if (!user) {
-    return NextResponse.json({ error: 'No autorizado' }, { status: 401 });
+    return Response.json({ error: 'No autorizado' }, { status: 401 });
   }
 
   let rawText = '';
   try {
     rawText = await request.text();
   } catch {
-    return NextResponse.json({ error: 'Cuerpo de solicitud inválido' }, { status: 400 });
+    return Response.json({ error: 'Cuerpo de solicitud inválido' }, { status: 400 });
   }
 
   if (Buffer.byteLength(rawText, 'utf8') > MAX_LISTENING_BODY_BYTES) {
-    return NextResponse.json(
+    return Response.json(
       { error: 'El historial de escucha supera el límite permitido de 1 MB.' },
       { status: 413 }
     );
@@ -51,11 +50,11 @@ export async function PUT(request) {
   try {
     body = JSON.parse(rawText || '{}');
   } catch {
-    return NextResponse.json({ error: 'Formato JSON inválido' }, { status: 400 });
+    return Response.json({ error: 'Formato JSON inválido' }, { status: 400 });
   }
 
   if (!body || typeof body !== 'object' || Array.isArray(body)) {
-    return NextResponse.json({ error: 'Datos de escucha inválidos' }, { status: 400 });
+    return Response.json({ error: 'Datos de escucha inválidos' }, { status: 400 });
   }
 
   const result = saveUserListeningHistory(user.id, {
@@ -65,7 +64,7 @@ export async function PUT(request) {
 
   if (!result.ok) {
     if (result.status === 409 && result.snapshot) {
-      return NextResponse.json(
+      return Response.json(
         {
           error: 'Conflicto de versión en historial de escucha.',
           conflict: true,
@@ -77,11 +76,11 @@ export async function PUT(request) {
         { status: 409 }
       );
     }
-    return NextResponse.json({ error: result.error }, { status: result.status || 400 });
+    return Response.json({ error: result.error }, { status: result.status || 400 });
   }
 
   const saved = result.snapshot;
-  return NextResponse.json({
+  return Response.json({
     ok: true,
     version: saved.version,
     updatedAt: saved.updatedAt,
