@@ -225,7 +225,6 @@ export function useExploreSearch({
       .slice(0, 3)
       .join('|')}:${forYouRefreshNonce}`;
     if (forYouLastFetchKeyRef.current === seedSignature) return;
-    forYouLastFetchKeyRef.current = seedSignature;
 
     const allKnown = [
       ...likedTracks,
@@ -260,9 +259,10 @@ export function useExploreSearch({
       })
     })
       .then(async res => {
-        if (!res.ok) return;
+        if (!res.ok || cancelled) return;
         const data = await res.json().catch(() => ({}));
         if (cancelled) return;
+        forYouLastFetchKeyRef.current = seedSignature;
         const nextTracks = Array.isArray(data.tracks) ? data.tracks : [];
         if (nextTracks.length > 0) {
           setForYouRecommendations(nextTracks);

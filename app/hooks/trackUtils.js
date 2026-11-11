@@ -1,5 +1,5 @@
 export const AUDIO_CACHE_NAME = 'my-music-offline-audio-v1';
-export const SHELL_CACHE_NAME = 'mymusic-shell-v32';
+export const SHELL_CACHE_NAME = 'mymusic-shell-v33';
 export const DEFAULT_TRACK_COVER = '/icon.svg?v=3';
 export const FORYOU_RECS_STORAGE_KEY = 'mma_foryou_recs_v1';
 export const USER_STORAGE_KEY = 'mma_cached_user_v1';

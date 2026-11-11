@@ -8,6 +8,7 @@
     "build": "next build",
     "start": "next start -H 0.0.0.0 -p 3333",
     "test": "node --test tests/*.test.mjs",
+    "test:e2e": "node tests/e2e/run-e2e.mjs",
     "check:secrets": "bash scripts/check-secrets.sh"
   },
   "dependencies": {
@@ -15,5 +16,8 @@
     "next": "^16.4.2",
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.65.0"
   }
 }

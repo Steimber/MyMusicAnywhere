@@ -161,6 +161,9 @@ let cachedLinuxYtDlpBin = null;
 export function resolveYtDlpCommand(extraArgs) {
   const configuredBin = process.env.YTDLP_BIN?.trim();
   if (configuredBin) {
+    if (/\.(?:m?js|cjs)$/i.test(configuredBin)) {
+      return { cmd: process.execPath, args: [configuredBin, ...extraArgs] };
+    }
     return { cmd: configuredBin, args: extraArgs };
   }
   if (process.platform === 'win32') {
