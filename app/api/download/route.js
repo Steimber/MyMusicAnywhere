@@ -6,7 +6,6 @@ import {
   getDownloadsDir,
   getSessionUser,
   enforceStorageQuota,
-  scheduleFileCleanup,
   getYtCookiesFilePath,
   registerActiveRawJob,
   unregisterActiveRawJob
@@ -42,6 +41,7 @@ import {
 import {
   YOUTUBE_FALLBACK_NOTICE,
   NO_SOURCE_FOUND_ERROR,
+  getYtDlpProxy,
   isYouTubeTargetUrl,
   buildYtDlpProxyArgs,
   redactProxySecrets,
@@ -54,6 +54,20 @@ if (!global.__activeDownloads) {
   global.__activeDownloads = new Map();
 }
 const activeDownloads = global.__activeDownloads;
+
+if (!global.__inFlightDownloadLeaders) {
+  global.__inFlightDownloadLeaders = new Map();
+}
+const inFlightDownloadLeaders = global.__inFlightDownloadLeaders;
+
+export function shouldPreferYouTubePrimary({
+  skipYoutube = false,
+  hasCookiesConfigured = false,
+  hasProxyConfigured = false,
+  isDirectScAltRetry = false
+} = {}) {
+  return !skipYoutube && (hasCookiesConfigured || hasProxyConfigured || isDirectScAltRetry);
+}
 
 function parseBooleanEnv(name, fallback = false) {
   const raw = String(process.env[name] ?? '').trim().toLowerCase();
@@ -882,13 +896,28 @@ async function runExtractionPipeline(
   downloadsDir,
   baseSlug,
   userId,
-  initialReleaseNetSlot
+  initialReleaseNetSlot,
+  leaderRecord = null
 ) {
   const item = activeDownloads.get(downloadId);
   if (!item) return;
 
   let releaseNetSlot = initialReleaseNetSlot;
   let netSlotReleased = false;
+  let readySourcePath = null;
+
+  const syncFollowersProgress = () => {
+    if (!leaderRecord || leaderRecord.followers.length === 0) return;
+    const cur = activeDownloads.get(downloadId);
+    if (!cur) return;
+    for (const f of leaderRecord.followers) {
+      const fItem = activeDownloads.get(f.downloadId);
+      if (!fItem || fItem.status !== 'downloading') continue;
+      fItem.progress = cur.progress;
+      fItem.stage = cur.stage;
+      if (cur.notice) fItem.notice = cur.notice;
+    }
+  };
 
   registerActiveRawJob(baseSlug);
   try {
@@ -898,7 +927,10 @@ async function runExtractionPipeline(
 
     const updateProg = p => {
       const cur = activeDownloads.get(downloadId);
-      if (cur) cur.progress = Math.max(cur.progress || 8, Math.min(98, p));
+      if (cur) {
+        cur.progress = Math.max(cur.progress || 8, Math.min(98, p));
+        syncFollowersProgress();
+      }
     };
 
     const rawTitle = String(item.title || rawQuery || '').trim();
@@ -921,7 +953,9 @@ async function runExtractionPipeline(
     let discoveryCtx = null;
     let maxAllowedDur = null;
     const hasCookiesConfigured = Boolean(getYtCookiesFilePath());
+    const hasProxyConfigured = Boolean(getYtDlpProxy());
     let ytDiscoveryQueries = [];
+    let ytFallbackQueries = [];
     let scDiscoveryQueries = [];
     let queryLabel = '';
 
@@ -942,7 +976,7 @@ async function runExtractionPipeline(
     };
 
     const buildYtTargetsFromPool = ytPool => {
-      const ytCands = ytPool.tier1;
+      const ytCands = ytPool.tier1 || [];
       const bestYtNonTopic = ytCands.find(
         c => !String(c.uploader || '').toLowerCase().endsWith('- topic')
       );
@@ -953,12 +987,28 @@ async function runExtractionPipeline(
           orderedYt.push(c);
         }
       }
-      return orderedYt.slice(0, 2).map(best => ({
+      const directTargets = orderedYt.slice(0, 2).map(best => ({
         url: best.webpageUrl,
         isSearchPool: false,
         trimDurationSec: best.relaxedDuration ? null : maxAllowedDur,
         useCookies: hasCookiesConfigured
       }));
+      // Retry top YouTube candidate without cookies if a stale cookies.txt session gets rejected
+      if (hasCookiesConfigured && orderedYt[0]) {
+        directTargets.push({
+          url: orderedYt[0].webpageUrl,
+          isSearchPool: false,
+          trimDurationSec: orderedYt[0].relaxedDuration ? null : maxAllowedDur,
+          useCookies: false
+        });
+      }
+      const ytLoopTargets = (ytPool.loopTier2 || []).slice(0, 1).map(loopCand => ({
+        url: loopCand.webpageUrl,
+        isSearchPool: false,
+        trimDurationSec: loopCand.trimDurationSec,
+        useCookies: hasCookiesConfigured
+      }));
+      return [...directTargets, ...ytLoopTargets];
     };
 
     const forceAlternateSource = Boolean(item.forceAlternateSource);
@@ -1050,6 +1100,7 @@ async function runExtractionPipeline(
 
       queryLabel = artistAndPrimaryTitle || artistAndCleanTitle;
       ytDiscoveryQueries = [`ytsearch6:${queryLabel} official audio`];
+      ytFallbackQueries = [`ytsearch6:${queryLabel}`];
       scDiscoveryQueries = [`scsearch15:${queryLabel}`];
       if (artistAndCleanTitle && artistAndCleanTitle !== artistAndPrimaryTitle) {
         scDiscoveryQueries.push(`scsearch10:${artistAndCleanTitle}`);
@@ -1062,11 +1113,16 @@ async function runExtractionPipeline(
         item.notice = YOUTUBE_FALLBACK_NOTICE;
       }
 
-      // Staggered discovery by cookie and YouTube block state
+      // Staggered discovery by cookie/proxy availability and YouTube block state
       let catalogMeta;
       let ytRawCandidates = [];
       let scRawCandidates = [];
-      const preferYoutubePrimary = !skipYoutube && (hasCookiesConfigured || isDirectScAltRetry);
+      const preferYoutubePrimary = shouldPreferYouTubePrimary({
+        skipYoutube,
+        hasCookiesConfigured,
+        hasProxyConfigured,
+        isDirectScAltRetry
+      });
 
       if (preferYoutubePrimary) {
         [catalogMeta, ytRawCandidates] = await Promise.all([
@@ -1108,6 +1164,20 @@ async function runExtractionPipeline(
       if (preferYoutubePrimary && ytStillAllowed) {
         const ytPool = evaluateCandidatePool(ytRawCandidates, discoveryCtx, 'yt', queryLabel);
         ytDirectTargets = buildYtTargetsFromPool(ytPool);
+        if (ytDirectTargets.length === 0 && !isYouTubeBlocked() && ytFallbackQueries.length > 0) {
+          const plainYtRaw = await discoverCandidatesFromSearch(ytFallbackQueries, 7500);
+          if (isYouTubeBlocked()) {
+            item.notice = YOUTUBE_FALLBACK_NOTICE;
+          } else {
+            const plainPool = evaluateCandidatePool(
+              plainYtRaw,
+              discoveryCtx,
+              'yt-plain',
+              queryLabel
+            );
+            ytDirectTargets = buildYtTargetsFromPool(plainPool);
+          }
+        }
         if (ytDirectTargets.length === 0) {
           scRawCandidates = await discoverCandidatesFromSearch(scDiscoveryQueries, 10000);
           const scPool = evaluateCandidatePool(
@@ -1140,6 +1210,24 @@ async function runExtractionPipeline(
                 queryLabel
               );
               ytDirectTargets = buildYtTargetsFromPool(ytPool);
+              if (
+                ytDirectTargets.length === 0 &&
+                !isYouTubeBlocked() &&
+                ytFallbackQueries.length > 0
+              ) {
+                const plainYtRaw = await discoverCandidatesFromSearch(ytFallbackQueries, 7500);
+                if (isYouTubeBlocked()) {
+                  item.notice = YOUTUBE_FALLBACK_NOTICE;
+                } else {
+                  const plainPool = evaluateCandidatePool(
+                    plainYtRaw,
+                    discoveryCtx,
+                    'yt-fallback-plain',
+                    queryLabel
+                  );
+                  ytDirectTargets = buildYtTargetsFromPool(plainPool);
+                }
+              }
             }
           } else {
             // Defer YouTube search unless all direct SoundCloud URLs fail during download
@@ -1245,7 +1333,25 @@ async function runExtractionPipeline(
               'yt-lazy-fallback',
               queryLabel
             );
-            const discoveredYtTargets = buildYtTargetsFromPool(ytPool);
+            let discoveredYtTargets = buildYtTargetsFromPool(ytPool);
+            if (
+              discoveredYtTargets.length === 0 &&
+              !isYouTubeBlocked() &&
+              ytFallbackQueries.length > 0
+            ) {
+              const plainYtRaw = await discoverCandidatesFromSearch(ytFallbackQueries, 7500);
+              if (isYouTubeBlocked()) {
+                item.notice = YOUTUBE_FALLBACK_NOTICE;
+              } else {
+                const plainPool = evaluateCandidatePool(
+                  plainYtRaw,
+                  discoveryCtx,
+                  'yt-lazy-plain',
+                  queryLabel
+                );
+                discoveredYtTargets = buildYtTargetsFromPool(plainPool);
+              }
+            }
             if (discoveredYtTargets.length > 0) {
               targets.splice(idx + 1, 0, ...discoveredYtTargets);
             }
@@ -1408,9 +1514,35 @@ async function runExtractionPipeline(
       );
       if (finalized.valid && finalized.filePath && fs.existsSync(finalized.filePath)) {
         console.log(`[download] OK: ${finalized.filename} <- ${redactProxySecrets(t.url)}`);
+        readySourcePath = finalized.filePath;
+        if (leaderRecord && leaderRecord.followers.length > 0) {
+          for (const f of leaderRecord.followers) {
+            const fItem = activeDownloads.get(f.downloadId);
+            if (!fItem || fItem.status !== 'downloading') continue;
+            const cloned = cloneReadyDownloadArtifact(
+              finalized.filePath,
+              f.downloadsDir,
+              f.baseSlug
+            );
+            if (cloned) {
+              fItem.title = item.title || fItem.title;
+              fItem.artist = item.artist || fItem.artist;
+              fItem.artwork = item.artwork || fItem.artwork;
+              fItem.status = 'ready';
+              fItem.stage = 'ready';
+              fItem.progress = 100;
+              fItem.filename = cloned.filename;
+            } else {
+              fItem.status = 'error';
+              fItem.stage = 'error';
+              fItem.error = NO_SOURCE_FOUND_ERROR;
+            }
+            scheduleActiveDownloadCleanup(f.downloadId);
+          }
+        }
         recordDownloadOutcome(true).catch(() => {});
         enforceStorageQuota();
-        scheduleFileCleanup(finalized.filePath, 90000);
+        scheduleBridgeFileCleanup(finalized.filePath, 90000);
         item.status = 'ready';
         item.stage = 'ready';
         item.progress = 100;
@@ -1457,6 +1589,32 @@ async function runExtractionPipeline(
     item.error = NO_SOURCE_FOUND_ERROR;
     item.cause = lastFailureCause || null;
   } finally {
+    if (leaderRecord?.dedupeKey && inFlightDownloadLeaders.get(leaderRecord.dedupeKey) === leaderRecord) {
+      inFlightDownloadLeaders.delete(leaderRecord.dedupeKey);
+    }
+    if (leaderRecord && leaderRecord.followers.length > 0) {
+      for (const f of leaderRecord.followers) {
+        const fItem = activeDownloads.get(f.downloadId);
+        if (!fItem || fItem.status !== 'downloading') continue;
+        if (item.status === 'ready' && readySourcePath) {
+          const cloned = cloneReadyDownloadArtifact(readySourcePath, f.downloadsDir, f.baseSlug);
+          if (cloned) {
+            fItem.status = 'ready';
+            fItem.stage = 'ready';
+            fItem.progress = 100;
+            fItem.filename = cloned.filename;
+            scheduleActiveDownloadCleanup(f.downloadId);
+            continue;
+          }
+        }
+        fItem.status = 'error';
+        fItem.stage = 'error';
+        fItem.error = item.error || NO_SOURCE_FOUND_ERROR;
+        fItem.cause = item.cause || null;
+        if (item.notice) fItem.notice = item.notice;
+        scheduleActiveDownloadCleanup(f.downloadId);
+      }
+    }
     if (releaseNetSlot && !netSlotReleased) {
       releaseNetSlot();
       netSlotReleased = true;
@@ -1469,6 +1627,73 @@ async function runExtractionPipeline(
 
 const ACTIVE_DOWNLOAD_TTL_MS = 10 * 60 * 1000; // 10 minutes after finishing
 const MAX_ACTIVE_DOWNLOAD_ENTRIES = 1000;
+const MAX_FOLLOWERS_PER_LEADER = 32;
+
+export function buildDownloadDedupeKey({
+  rawQuery = '',
+  title = '',
+  artist = '',
+  forceAlternateSource = false
+} = {}) {
+  const trimmedQuery = String(rawQuery || '').trim();
+  const altSuffix = forceAlternateSource ? '|alt:1' : '|alt:0';
+  if (/^https?:\/\//i.test(trimmedQuery)) {
+    return `url:${normalizeDirectMediaUrl(trimmedQuery).toLowerCase()}${altSuffix}`;
+  }
+  const cleanT = stripRemasterNoise(title || trimmedQuery) || title || trimmedQuery;
+  const normTitle = normalizeText(cleanT);
+  const normArtist = normalizeText(artist);
+  if (!normTitle) return null;
+  return `track:${normArtist}::${normTitle}${altSuffix}`;
+}
+
+function scheduleBridgeFileCleanup(filePath, delayMs = 90000) {
+  const timer = setTimeout(() => {
+    try {
+      if (fs.existsSync(/*turbopackIgnore: true*/ filePath)) {
+        fs.unlinkSync(/*turbopackIgnore: true*/ filePath);
+      }
+    } catch {}
+  }, delayMs);
+  if (typeof timer?.unref === 'function') {
+    timer.unref();
+  }
+}
+
+export function cloneReadyDownloadArtifact(srcPath, downloadsDir, destBaseSlug) {
+  try {
+    if (!srcPath || !fs.existsSync(/*turbopackIgnore: true*/ srcPath)) return null;
+    const st = fs.statSync(/*turbopackIgnore: true*/ srcPath);
+    if (!st.isFile() || st.size <= 0) return null;
+    const ext = path.extname(srcPath).toLowerCase() || '.m4a';
+    const destFilename = `${destBaseSlug}${ext}`;
+    const destPath = path.join(/*turbopackIgnore: true*/ downloadsDir, destFilename);
+    fs.copyFileSync(/*turbopackIgnore: true*/ srcPath, destPath);
+    scheduleBridgeFileCleanup(destPath, 90000);
+    return { filename: destFilename, filePath: destPath };
+  } catch {
+    return null;
+  }
+}
+
+function findReusableReadyDownload(dedupeKey, downloadsDir) {
+  if (!dedupeKey) return null;
+  for (const entry of activeDownloads.values()) {
+    if (entry.dedupeKey !== dedupeKey || entry.status !== 'ready' || !entry.filename) {
+      continue;
+    }
+    const srcPath = path.join(/*turbopackIgnore: true*/ downloadsDir, entry.filename);
+    try {
+      if (fs.existsSync(/*turbopackIgnore: true*/ srcPath)) {
+        const st = fs.statSync(/*turbopackIgnore: true*/ srcPath);
+        if (st.isFile() && st.size > 0) {
+          return { entry, srcPath };
+        }
+      }
+    } catch {}
+  }
+  return null;
+}
 
 function scheduleActiveDownloadCleanup(downloadId, delayMs = ACTIVE_DOWNLOAD_TTL_MS) {
   const timer = setTimeout(() => {
@@ -1520,6 +1745,86 @@ export async function POST(request) {
       );
     }
 
+    const forceAlternateSource = Boolean(data.forceAlternateSource);
+    const downloadsDir = getDownloadsDir();
+    const downloadId = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+    const baseSlug = `${sanitizeSlug(`${data.artist || ''} ${data.title || rawQuery}`)}_${downloadId}`;
+    const ytBlockedNow = isYouTubeBlocked();
+    const dedupeKey = buildDownloadDedupeKey({
+      rawQuery,
+      title: data.title,
+      artist: data.artist,
+      forceAlternateSource
+    });
+
+    pruneFinishedActiveDownloadsIfNeeded();
+
+    // 1. Reuse warm 90-second bridge file without spawning yt-dlp/ffmpeg again
+    const reusable = findReusableReadyDownload(dedupeKey, downloadsDir);
+    if (reusable) {
+      const cloned = cloneReadyDownloadArtifact(reusable.srcPath, downloadsDir, baseSlug);
+      if (cloned) {
+        activeDownloads.set(downloadId, {
+          id: downloadId,
+          userId: user.id,
+          dedupeKey,
+          title: reusable.entry.title || data.title || rawQuery,
+          artist: reusable.entry.artist || data.artist || '',
+          duration: reusable.entry.duration || data.duration || null,
+          artwork: reusable.entry.artwork || data.artwork || '',
+          status: 'ready',
+          stage: 'ready',
+          notice: null,
+          forceAlternateSource,
+          progress: 100,
+          filename: cloned.filename
+        });
+        enforceStorageQuota();
+        scheduleActiveDownloadCleanup(downloadId);
+        return Response.json({
+          ok: true,
+          downloadId,
+          cached: true,
+          notice: null,
+          pool: getPoolStatus(user.id, downloadId)
+        });
+      }
+    }
+
+    // 2. Coalesce onto an identical in-flight extraction job
+    const existingLeader = dedupeKey ? inFlightDownloadLeaders.get(dedupeKey) : null;
+    const leaderItem = existingLeader ? activeDownloads.get(existingLeader.leaderId) : null;
+    if (
+      existingLeader &&
+      leaderItem &&
+      leaderItem.status === 'downloading' &&
+      existingLeader.followers.length < MAX_FOLLOWERS_PER_LEADER
+    ) {
+      activeDownloads.set(downloadId, {
+        id: downloadId,
+        userId: user.id,
+        dedupeKey,
+        title: leaderItem.title || data.title || rawQuery,
+        artist: leaderItem.artist || data.artist || '',
+        duration: leaderItem.duration || data.duration || null,
+        artwork: leaderItem.artwork || data.artwork || '',
+        status: 'downloading',
+        stage: leaderItem.stage || 'analyzing',
+        notice: leaderItem.notice || (ytBlockedNow ? YOUTUBE_FALLBACK_NOTICE : null),
+        forceAlternateSource,
+        progress: leaderItem.progress || 8,
+        filename: null
+      });
+      existingLeader.followers.push({ downloadId, baseSlug, downloadsDir });
+      return Response.json({
+        ok: true,
+        downloadId,
+        coalesced: true,
+        notice: leaderItem.notice || (ytBlockedNow ? YOUTUBE_FALLBACK_NOTICE : null),
+        pool: getPoolStatus(user.id, downloadId)
+      });
+    }
+
     if (getUserQueuedCount(user.id) >= MAX_QUEUED_PER_USER) {
       return Response.json(
         { error: 'Tienes demasiadas descargas en cola' },
@@ -1527,15 +1832,10 @@ export async function POST(request) {
       );
     }
 
-    const downloadsDir = getDownloadsDir();
-    const downloadId = Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
-    const baseSlug = `${sanitizeSlug(`${data.artist || ''} ${data.title || rawQuery}`)}_${downloadId}`;
-    const ytBlockedNow = isYouTubeBlocked();
-
-    pruneFinishedActiveDownloadsIfNeeded();
     activeDownloads.set(downloadId, {
       id: downloadId,
       userId: user.id,
+      dedupeKey,
       title: data.title || rawQuery,
       artist: data.artist || '',
       duration: data.duration || null,
@@ -1543,10 +1843,17 @@ export async function POST(request) {
       status: 'downloading',
       stage: 'analyzing',
       notice: ytBlockedNow ? YOUTUBE_FALLBACK_NOTICE : null,
-      forceAlternateSource: Boolean(data.forceAlternateSource),
+      forceAlternateSource,
       progress: 8,
       filename: null
     });
+
+    const leaderRecord = dedupeKey
+      ? { leaderId: downloadId, dedupeKey, followers: [] }
+      : null;
+    if (leaderRecord) {
+      inFlightDownloadLeaders.set(dedupeKey, leaderRecord);
+    }
 
     const isManualRequest = Boolean(data.priority);
     enqueueNetDownload(user.id, downloadId, isManualRequest, releaseNetSlot =>
@@ -1556,15 +1863,31 @@ export async function POST(request) {
         downloadsDir,
         baseSlug,
         user.id,
-        releaseNetSlot
+        releaseNetSlot,
+        leaderRecord
       )
     ).catch(err => {
+      if (leaderRecord?.dedupeKey && inFlightDownloadLeaders.get(leaderRecord.dedupeKey) === leaderRecord) {
+        inFlightDownloadLeaders.delete(leaderRecord.dedupeKey);
+      }
+      const errMsg = redactProxySecrets(err.message);
       const item = activeDownloads.get(downloadId);
       if (item && item.status === 'downloading') {
         recordDownloadOutcome(false).catch(() => {});
         item.status = 'error';
         item.stage = 'error';
-        item.error = redactProxySecrets(err.message);
+        item.error = errMsg;
+      }
+      if (leaderRecord && leaderRecord.followers.length > 0) {
+        for (const f of leaderRecord.followers) {
+          const fItem = activeDownloads.get(f.downloadId);
+          if (fItem && fItem.status === 'downloading') {
+            fItem.status = 'error';
+            fItem.stage = 'error';
+            fItem.error = errMsg;
+            scheduleActiveDownloadCleanup(f.downloadId);
+          }
+        }
       }
       scheduleActiveDownloadCleanup(downloadId);
     });
@@ -1601,7 +1924,12 @@ export async function GET(request) {
     );
   }
 
-  const { userId: _ownerId, forceAlternateSource: _alt, ...publicItem } = item;
+  const {
+    userId: _ownerId,
+    forceAlternateSource: _alt,
+    dedupeKey: _dedupeKey,
+    ...publicItem
+  } = item;
   if (publicItem.error) {
     publicItem.error = redactProxySecrets(publicItem.error);
   }

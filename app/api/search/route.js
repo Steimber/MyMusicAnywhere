@@ -144,42 +144,53 @@ async function lookupQuickCatalogDuration(title, artist) {
   }
 }
 
-async function resolveYouTubeLinkTrack(videoId) {
+export async function resolveYouTubeLinkTrack(
+  videoId,
+  {
+    fetchFn = globalThis.fetch,
+    probeFn = probeDirectUrlWithYtDlp,
+    catalogDurationFn = lookupQuickCatalogDuration
+  } = {}
+) {
   const canonicalUrl = `https://www.youtube.com/watch?v=${videoId}`;
   const defaultArtwork = `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`;
   let rawTitle = `YouTube (${videoId})`;
   let authorName = 'YouTube';
   let artwork = defaultArtwork;
 
-  const [oembedRes, probeRes] = await Promise.all([
-    (async () => {
-      const ctrl = new AbortController();
-      const timer = setTimeout(() => ctrl.abort(), 2800);
-      try {
-        const oembedUrl = `https://www.youtube.com/oembed?url=${encodeURIComponent(
-          canonicalUrl
-        )}&format=json`;
-        const res = await fetch(oembedUrl, { signal: ctrl.signal });
-        if (!res.ok) return null;
-        return await res.json();
-      } catch {
-        return null;
-      } finally {
-        clearTimeout(timer);
-      }
-    })(),
-    probeDirectUrlWithYtDlp(canonicalUrl, true, 4200)
-  ]);
+  const oembedRes = await (async () => {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 2800);
+    try {
+      const oembedUrl = `https://www.youtube.com/oembed?url=${encodeURIComponent(
+        canonicalUrl
+      )}&format=json`;
+      const res = await fetchFn(oembedUrl, { signal: ctrl.signal });
+      if (!res.ok) return null;
+      return await res.json();
+    } catch {
+      return null;
+    } finally {
+      clearTimeout(timer);
+    }
+  })();
 
   if (oembedRes) {
     if (oembedRes.title) rawTitle = String(oembedRes.title).trim();
     if (oembedRes.author_name) authorName = String(oembedRes.author_name).trim();
     if (oembedRes.thumbnail_url) artwork = oembedRes.thumbnail_url;
   }
-  if (probeRes) {
-    if (rawTitle.startsWith('YouTube (') && probeRes.title) rawTitle = probeRes.title;
-    if (authorName === 'YouTube' && probeRes.uploader) authorName = probeRes.uploader;
-    if (probeRes.thumbnail && artwork === defaultArtwork) artwork = probeRes.thumbnail;
+
+  // Only invoke yt-dlp metadata probe when public oEmbed failed to resolve the title,
+  // avoiding unnecessary YouTube player requests from the server IP on link paste.
+  let probeRes = null;
+  if (!oembedRes?.title) {
+    probeRes = await probeFn(canonicalUrl, true, 4200);
+    if (probeRes) {
+      if (rawTitle.startsWith('YouTube (') && probeRes.title) rawTitle = probeRes.title;
+      if (authorName === 'YouTube' && probeRes.uploader) authorName = probeRes.uploader;
+      if (probeRes.thumbnail && artwork === defaultArtwork) artwork = probeRes.thumbnail;
+    }
   }
 
   const cleanedMeta = cleanYouTubeOembedMetadata(rawTitle, authorName);
@@ -188,7 +199,7 @@ async function resolveYouTubeLinkTrack(videoId) {
 
   let durationSec = probeRes?.durationSec || 0;
   if (!durationSec && finalTitle && !finalTitle.startsWith('YouTube (')) {
-    durationSec = await lookupQuickCatalogDuration(finalTitle, finalArtist);
+    durationSec = await catalogDurationFn(finalTitle, finalArtist);
   }
 
   return {
@@ -217,35 +228,37 @@ async function resolveSoundCloudLinkTrack(rawUrl) {
   let authorName = 'SoundCloud';
   let artwork = '/icon.svg?v=3';
 
-  const [oembedRes, probeRes] = await Promise.all([
-    (async () => {
-      const ctrl = new AbortController();
-      const timer = setTimeout(() => ctrl.abort(), 2800);
-      try {
-        const oembedUrl = `https://soundcloud.com/oembed?format=json&url=${encodeURIComponent(
-          canonicalUrl
-        )}`;
-        const res = await fetch(oembedUrl, { signal: ctrl.signal });
-        if (!res.ok) return null;
-        return await res.json();
-      } catch {
-        return null;
-      } finally {
-        clearTimeout(timer);
-      }
-    })(),
-    probeDirectUrlWithYtDlp(canonicalUrl, false, 4800)
-  ]);
+  const oembedRes = await (async () => {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), 2800);
+    try {
+      const oembedUrl = `https://soundcloud.com/oembed?format=json&url=${encodeURIComponent(
+        canonicalUrl
+      )}`;
+      const res = await fetch(oembedUrl, { signal: ctrl.signal });
+      if (!res.ok) return null;
+      return await res.json();
+    } catch {
+      return null;
+    } finally {
+      clearTimeout(timer);
+    }
+  })();
 
   if (oembedRes) {
     if (oembedRes.title) rawTitle = String(oembedRes.title).trim();
     if (oembedRes.author_name) authorName = String(oembedRes.author_name).trim();
     if (oembedRes.thumbnail_url) artwork = oembedRes.thumbnail_url;
   }
-  if (probeRes) {
-    if (probeRes.title) rawTitle = probeRes.title;
-    if (probeRes.uploader && authorName === 'SoundCloud') authorName = probeRes.uploader;
-    if (probeRes.thumbnail && artwork.startsWith('/icon')) artwork = probeRes.thumbnail;
+
+  let probeRes = null;
+  if (!oembedRes?.title) {
+    probeRes = await probeDirectUrlWithYtDlp(canonicalUrl, false, 4800);
+    if (probeRes) {
+      if (probeRes.title) rawTitle = probeRes.title;
+      if (probeRes.uploader && authorName === 'SoundCloud') authorName = probeRes.uploader;
+      if (probeRes.thumbnail && artwork.startsWith('/icon')) artwork = probeRes.thumbnail;
+    }
   }
 
   // SoundCloud oEmbed often formats title as "Track by Artist"

@@ -1,5 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 
 import {
   createPoolState,
@@ -36,7 +40,17 @@ import {
   getYouTubeAdminStatus,
   classifyDirectLinkSource
 } from '../lib/download/youtube-status.js';
-import { GET as getSearchRoute } from '../app/api/search/route.js';
+import {
+  GET as getSearchRoute,
+  resolveYouTubeLinkTrack
+} from '../app/api/search/route.js';
+import {
+  POST as postDownloadRoute,
+  GET as getDownloadRoute,
+  shouldPreferYouTubePrimary,
+  buildDownloadDedupeKey
+} from '../app/api/download/route.js';
+import { loadStore, createSessionToken } from '../lib/store.js';
 
 function createDeferred() {
   let resolve;
@@ -691,4 +705,260 @@ test('direct-link source detection classifies YouTube, SoundCloud, and unsupport
   const unsupportedBody = await unsupportedRes.json();
   assert.equal(unsupportedBody.source, 'other');
   assert.match(unsupportedBody.error, /YouTube o SoundCloud/i);
+});
+
+test('youtube-priority: YTDLP_PROXY promotes YouTube to primary even without cookies unless blocked', () => {
+  assert.equal(
+    shouldPreferYouTubePrimary({
+      skipYoutube: false,
+      hasCookiesConfigured: false,
+      hasProxyConfigured: true,
+      isDirectScAltRetry: false
+    }),
+    true
+  );
+  assert.equal(
+    shouldPreferYouTubePrimary({
+      skipYoutube: false,
+      hasCookiesConfigured: false,
+      hasProxyConfigured: false,
+      isDirectScAltRetry: false
+    }),
+    false
+  );
+  assert.equal(
+    shouldPreferYouTubePrimary({
+      skipYoutube: true,
+      hasCookiesConfigured: true,
+      hasProxyConfigured: true,
+      isDirectScAltRetry: false
+    }),
+    false
+  );
+});
+
+test('link-preview: resolveYouTubeLinkTrack skips yt-dlp probe when oEmbed succeeds and falls back when oEmbed fails', async () => {
+  let probeCalls = 0;
+  const fromOembed = await resolveYouTubeLinkTrack('dQw4w9WgXcQ', {
+    fetchFn: async () => ({
+      ok: true,
+      json: async () => ({
+        title: 'Rick Astley - Never Gonna Give You Up (Official Video)',
+        author_name: 'Rick Astley',
+        thumbnail_url: 'https://i.ytimg.com/vi/dQw4w9WgXcQ/hqdefault.jpg'
+      })
+    }),
+    probeFn: async () => {
+      probeCalls += 1;
+      return { durationSec: 213, title: 'Should Not Be Called' };
+    },
+    catalogDurationFn: async () => 213
+  });
+
+  assert.equal(probeCalls, 0);
+  assert.equal(fromOembed.artist, 'Rick Astley');
+  assert.equal(fromOembed.title, 'Never Gonna Give You Up');
+  assert.equal(fromOembed.durationSec, 213);
+  assert.equal(fromOembed.duration, '3:33');
+
+  const fromProbeFallback = await resolveYouTubeLinkTrack('dQw4w9WgXcQ', {
+    fetchFn: async () => ({ ok: false, status: 404 }),
+    probeFn: async () => {
+      probeCalls += 1;
+      return {
+        durationSec: 198,
+        title: 'Solar Echo - Aurora Borealis',
+        uploader: 'Solar Echo',
+        thumbnail: 'https://i.ytimg.com/vi/dQw4w9WgXcQ/maxresdefault.jpg'
+      };
+    },
+    catalogDurationFn: async () => 0
+  });
+
+  assert.equal(probeCalls, 1);
+  assert.equal(fromProbeFallback.artist, 'Solar Echo');
+  assert.equal(fromProbeFallback.title, 'Aurora Borealis');
+  assert.equal(fromProbeFallback.durationSec, 198);
+});
+
+test('dedupe: buildDownloadDedupeKey normalizes URLs/remasters and POST /api/download coalesces in-flight + reuses warm bridge files safely', async () => {
+  assert.equal(
+    buildDownloadDedupeKey({ rawQuery: 'https://youtu.be/dQw4w9WgXcQ?si=xyz123' }),
+    buildDownloadDedupeKey({
+      rawQuery: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ&feature=share'
+    })
+  );
+  assert.notEqual(
+    buildDownloadDedupeKey({
+      rawQuery: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
+      forceAlternateSource: false
+    }),
+    buildDownloadDedupeKey({
+      rawQuery: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
+      forceAlternateSource: true
+    })
+  );
+  assert.equal(
+    buildDownloadDedupeKey({
+      rawQuery: 'Soda Stereo - De Musica Ligera',
+      title: 'De Música Ligera (Remastered 2007)',
+      artist: 'Soda Stereo'
+    }),
+    buildDownloadDedupeKey({
+      rawQuery: 'Soda Stereo - De Musica Ligera',
+      title: 'De Musica Ligera',
+      artist: 'Soda Stereo'
+    })
+  );
+
+  const prevDataDir = process.env.DATA_DIR;
+  const prevDownloadsDir = process.env.DOWNLOADS_DIR;
+  const prevYtDlpBin = process.env.YTDLP_BIN;
+  const prevLogPath = process.env.E2E_YTDLP_LOG_PATH;
+  const prevMockM4aPath = process.env.E2E_MOCK_M4A_PATH;
+  const origFetch = globalThis.fetch;
+
+  const tempRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'mma-dedupe-test-'));
+  const tempData = path.join(tempRoot, 'data');
+  const tempDownloads = path.join(tempRoot, 'downloads');
+  const logFile = path.join(tempRoot, 'ytdlp.jsonl');
+  const mockM4aFile = path.join(tempRoot, 'fixture.m4a');
+  fs.mkdirSync(tempData, { recursive: true });
+  fs.mkdirSync(tempDownloads, { recursive: true });
+
+  const gen = spawnSync(
+    process.env.FFMPEG_BIN?.trim() || 'ffmpeg',
+    [
+      '-hide_banner',
+      '-loglevel',
+      'error',
+      '-y',
+      '-f',
+      'lavfi',
+      '-i',
+      'anoisesrc=d=20:c=pink:r=44100:a=0.18',
+      '-c:a',
+      'aac',
+      '-b:a',
+      '192k',
+      mockM4aFile
+    ],
+    { stdio: 'pipe' }
+  );
+  assert.equal(gen.status, 0);
+
+  process.env.DATA_DIR = tempData;
+  process.env.DOWNLOADS_DIR = tempDownloads;
+  process.env.YTDLP_BIN = path.resolve('tests/e2e/yt-dlp-mock.mjs');
+  process.env.E2E_YTDLP_LOG_PATH = logFile;
+  process.env.E2E_MOCK_M4A_PATH = mockM4aFile;
+  globalThis.fetch = async () => ({ ok: false, status: 503, json: async () => ({}) });
+
+  try {
+    const store = loadStore();
+    const adminUser = store.users[0];
+    const token = createSessionToken(adminUser);
+    const cookieHeader = `mymusic_session=${encodeURIComponent(token)}`;
+
+    const makePost = () =>
+      postDownloadRoute(
+        new Request('http://localhost:3333/api/download', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Cookie: cookieHeader
+          },
+          body: JSON.stringify({
+            sourceUrl: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
+            title: 'Aurora Borealis',
+            artist: 'Solar Echo',
+            priority: true
+          })
+        })
+      );
+
+    // Fire two simultaneous requests for the exact same YouTube URL
+    const [res1, res2] = await Promise.all([makePost(), makePost()]);
+    const body1 = await res1.json();
+    const body2 = await res2.json();
+    assert.equal(body1.ok, true);
+    assert.equal(body2.ok, true);
+    assert.equal(body2.coalesced, true);
+    assert.notEqual(body1.downloadId, body2.downloadId);
+
+    // Poll until both reach ready
+    const waitReady = async id => {
+      for (let i = 0; i < 60; i += 1) {
+        const pollRes = await getDownloadRoute(
+          new Request(`http://localhost:3333/api/download?id=${encodeURIComponent(id)}`, {
+            headers: { Cookie: cookieHeader }
+          })
+        );
+        const pollBody = await pollRes.json();
+        if (pollBody.status === 'ready') return pollBody;
+        if (pollBody.status === 'error') {
+          throw new Error(`Unexpected download error for ${id}: ${pollBody.error}`);
+        }
+        await new Promise(r => setTimeout(r, 50));
+      }
+      throw new Error(`Timed out waiting for ${id}`);
+    };
+
+    const [ready1, ready2] = await Promise.all([
+      waitReady(body1.downloadId),
+      waitReady(body2.downloadId)
+    ]);
+
+    assert.ok(ready1.filename);
+    assert.ok(ready2.filename);
+    assert.notEqual(ready1.filename, ready2.filename);
+    assert.equal(ready1.dedupeKey, undefined);
+    assert.ok(fs.existsSync(path.join(tempDownloads, ready1.filename)));
+    assert.ok(fs.existsSync(path.join(tempDownloads, ready2.filename)));
+
+    // Verify yt-dlp ran only ONCE for both concurrent downloads
+    const logLines = fs
+      .readFileSync(logFile, 'utf8')
+      .trim()
+      .split(/\r?\n/)
+      .filter(Boolean)
+      .map(l => JSON.parse(l));
+    const downloadSpawns = logLines.filter(l => l.mode === 'download');
+    assert.equal(downloadSpawns.length, 1);
+
+    // Simulate /api/stream deleting the first request's file: follower's file stays intact
+    // and a 3rd request hits the warm 90s bridge cache immediately with 0 extra yt-dlp spawns
+    fs.unlinkSync(path.join(tempDownloads, ready1.filename));
+    assert.ok(fs.existsSync(path.join(tempDownloads, ready2.filename)));
+
+    const res3 = await makePost();
+    const body3 = await res3.json();
+    assert.equal(body3.ok, true);
+    assert.equal(body3.cached, true);
+    const ready3 = await waitReady(body3.downloadId);
+    assert.ok(ready3.filename);
+    assert.notEqual(ready3.filename, ready2.filename);
+    assert.ok(fs.existsSync(path.join(tempDownloads, ready3.filename)));
+
+    const logLinesAfterCache = fs
+      .readFileSync(logFile, 'utf8')
+      .trim()
+      .split(/\r?\n/)
+      .filter(Boolean)
+      .map(l => JSON.parse(l));
+    assert.equal(logLinesAfterCache.filter(l => l.mode === 'download').length, 1);
+  } finally {
+    globalThis.fetch = origFetch;
+    if (prevDataDir === undefined) delete process.env.DATA_DIR;
+    else process.env.DATA_DIR = prevDataDir;
+    if (prevDownloadsDir === undefined) delete process.env.DOWNLOADS_DIR;
+    else process.env.DOWNLOADS_DIR = prevDownloadsDir;
+    if (prevYtDlpBin === undefined) delete process.env.YTDLP_BIN;
+    else process.env.YTDLP_BIN = prevYtDlpBin;
+    if (prevLogPath === undefined) delete process.env.E2E_YTDLP_LOG_PATH;
+    else process.env.E2E_YTDLP_LOG_PATH = prevLogPath;
+    if (prevMockM4aPath === undefined) delete process.env.E2E_MOCK_M4A_PATH;
+    else process.env.E2E_MOCK_M4A_PATH = prevMockM4aPath;
+    fs.rmSync(tempRoot, { recursive: true, force: true });
+  }
 });
